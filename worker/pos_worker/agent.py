@@ -1,0 +1,329 @@
+"""The worker agent: heartbeat/control loop, job loop, result flushing.
+
+Desired state arrives with every heartbeat and the node reconciles towards it,
+so a lost message does no harm. One-off commands run at most once (ids are
+remembered in the spool) and are acknowledged with the next heartbeat.
+"""
+
+import asyncio
+import collections
+import contextlib
+import logging
+import socket
+import traceback
+from typing import Any
+
+import httpx
+
+from pos_shared import api
+from pos_shared.version import API_VERSION, __version__, is_compatible
+from pos_worker import cgroup, identity
+from pos_worker.client import CoordinatorClient, CoordinatorError, IncompatibleCoordinator
+from pos_worker.config import WorkerSettings
+from pos_worker.handlers import HANDLERS, Handler, JobContext
+from pos_worker.spool import Spool
+
+log = logging.getLogger(__name__)
+
+EXIT_RESTART = 75  # tells the supervisor (Docker restart policy, systemd) to start us again
+
+
+class RingLogHandler(logging.Handler):
+    """Keeps the last N log lines for the `fetch_logs` command."""
+
+    def __init__(self, capacity: int = 500):
+        super().__init__()
+        self.lines: collections.deque[str] = collections.deque(maxlen=capacity)
+        self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.lines.append(self.format(record))
+
+
+class Agent:
+    def __init__(
+        self,
+        settings: WorkerSettings,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        handlers: dict[str, Handler] | None = None,
+        log_buffer: RingLogHandler | None = None,
+    ):
+        self.settings = settings
+        self.handlers = handlers if handlers is not None else dict(HANDLERS)
+        self.log_buffer = log_buffer
+        self.identity = identity.load_or_create(settings.state_dir)
+        self.client = CoordinatorClient(settings, self.identity, transport=transport)
+        spool_path = settings.spool_path or str(settings.state_dir / "spool.db")
+        self.spool = Spool(spool_path, settings.spool_max_results)
+
+        self.desired = api.DesiredState()
+        self.local_paused = False
+        self.compatible = True
+        self.heartbeat_interval = 15.0
+        self.limits = cgroup.read_limits(settings.cgroup_root, settings.state_dir)
+        self.slots = self._compute_slots()
+        self.active: dict[Any, asyncio.Task] = {}
+        self.exit_code = 0
+        self._stop = asyncio.Event()
+        self._capacity_freed = asyncio.Event()
+        self._result_ready = asyncio.Event()
+
+    # --- lifecycle ---------------------------------------------------------
+
+    @property
+    def state(self) -> api.RunState:
+        if self._stop.is_set() or self.desired.run_state == api.RunState.draining:
+            return api.RunState.draining
+        if self.local_paused or self.desired.run_state == api.RunState.paused:
+            return api.RunState.paused
+        return api.RunState.running
+
+    async def ensure_enrolled(self) -> None:
+        if self.identity.node_id is not None:
+            return
+        if not self.settings.enrollment_code:
+            raise SystemExit("not enrolled: set POS_WORKER_ENROLLMENT_CODE")
+        name = self.settings.name or socket.gethostname()
+        resp = await self.client.enroll(self.settings.enrollment_code, name, self.capabilities)
+        if not is_compatible(API_VERSION, resp.coordinator_api_version):
+            raise IncompatibleCoordinator(resp.coordinator_api_version)
+        identity.save_node_id(self.settings.state_dir, resp.node_id)
+        self.identity.node_id = resp.node_id
+        log.info("enrolled as node %s", resp.node_id)
+
+    @property
+    def capabilities(self) -> list[str]:
+        return sorted(self.handlers)
+
+    def stop(self, exit_code: int = 0) -> None:
+        self.exit_code = exit_code
+        self._stop.set()
+        self._capacity_freed.set()
+
+    async def run(self, drain_timeout_s: float = 60.0) -> int:
+        await self.ensure_enrolled()
+        loops = [
+            asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
+            asyncio.create_task(self._resource_loop(), name="resources"),
+            asyncio.create_task(self._job_loop(), name="jobs"),
+            asyncio.create_task(self._flush_loop(), name="flush"),
+        ]
+        try:
+            await self._stop.wait()
+        finally:
+            # Graceful drain: no new leases, let running jobs finish, flush what we can.
+            if self.active:
+                await asyncio.wait(list(self.active.values()), timeout=drain_timeout_s)
+            for t in self.active.values():
+                t.cancel()
+            for t in loops:
+                t.cancel()
+            await asyncio.gather(*loops, return_exceptions=True)
+            try:
+                await self.flush_once()
+            except Exception:
+                log.warning("final flush failed; results stay spooled for the next start")
+            await self.client.aclose()
+            self.spool.close()
+        return self.exit_code
+
+    # --- resources ---------------------------------------------------------
+
+    def _compute_slots(self) -> cgroup.Slots:
+        return cgroup.compute_slots(
+            self.limits,
+            local_max_http=self.settings.max_http_slots,
+            local_max_browser=self.settings.max_browser_slots,
+            remote_max_http=self.desired.limits.max_http_slots,
+            remote_max_browser=self.desired.limits.max_browser_slots,
+            browser_capable="fetch_browser" in self.handlers,
+        )
+
+    async def _resource_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.settings.resource_poll_s)
+            self.limits = cgroup.read_limits(self.settings.cgroup_root, self.settings.state_dir)
+            new = self._compute_slots()
+            if new != self.slots:
+                log.info("concurrency %s -> %s", self.slots, new)
+                self.slots = new
+                self._capacity_freed.set()
+
+    # --- heartbeat / control ----------------------------------------------
+
+    def _heartbeat_body(self) -> api.Heartbeat:
+        lim = self.limits
+        return api.Heartbeat(
+            version=__version__,
+            state=self.state,
+            resources=api.Resources(
+                cpu_limit=lim.cpu,
+                mem_limit_bytes=lim.effective_mem,
+                mem_used_bytes=lim.mem_used,
+                cpu_load=lim.load,
+                disk_free_bytes=lim.disk_free,
+            ),
+            concurrency=api.Concurrency(
+                http_slots=self.slots.http,
+                browser_slots=self.slots.browser,
+                embed_batch=self.slots.embed_batch,
+            ),
+            active_jobs=len(self.active),
+            spooled_results=self.spool.result_count(),
+            command_results=[api.CommandResult(**c) for c in self.spool.unreported_commands()],
+        )
+
+    async def heartbeat_once(self) -> api.HeartbeatResponse:
+        body = self._heartbeat_body()
+        resp = await self.client.heartbeat(body)
+        self.spool.mark_commands_reported([str(c.id) for c in body.command_results])
+        if not is_compatible(API_VERSION, resp.coordinator_api_version):
+            if self.compatible:
+                log.error(
+                    "coordinator API %s is incompatible; refusing jobs",
+                    resp.coordinator_api_version,
+                )
+            self.compatible = False
+        else:
+            self.compatible = True
+        self.heartbeat_interval = resp.heartbeat_interval_s
+        if resp.desired != self.desired:
+            log.info("desired state: %s", resp.desired.model_dump(mode="json"))
+            self.desired = resp.desired
+            self.slots = self._compute_slots()
+            self._capacity_freed.set()
+        for cmd in resp.commands:
+            await self._run_command(cmd)
+        if self.active:
+            ext = await self.client.extend(list(self.active))
+            for job_id in ext.lost:
+                task = self.active.pop(job_id, None)
+                if task is not None:
+                    log.warning("lost lease on job %s; cancelling", job_id)
+                    task.cancel()
+        return resp
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            try:
+                await self.heartbeat_once()
+            except IncompatibleCoordinator:
+                self.compatible = False
+                log.error("coordinator refused our API version %s", API_VERSION)
+            except (CoordinatorError, httpx.HTTPError) as e:
+                log.warning("heartbeat failed: %s", e)
+            await asyncio.sleep(self.heartbeat_interval)
+
+    async def _run_command(self, cmd: api.Command) -> None:
+        cid = str(cmd.id)
+        if self.spool.command_seen(cid):
+            return
+        ok, output = True, None
+        try:
+            if cmd.type == "restart":
+                self.spool.record_command(cid, True, "restarting")
+                log.info("restart requested by coordinator")
+                self.stop(EXIT_RESTART)
+                return
+            elif cmd.type == "fetch_logs":
+                n = int(cmd.args.get("lines", 200))
+                output = list(self.log_buffer.lines)[-n:] if self.log_buffer else []
+            elif cmd.type == "diagnostics":
+                output = {
+                    "limits": self.limits.__dict__,
+                    "slots": self.slots.__dict__,
+                    "active_jobs": len(self.active),
+                    "spooled_results": self.spool.result_count(),
+                    "state": self.state.value,
+                    "capabilities": self.capabilities,
+                }
+            else:
+                ok, output = False, f"unknown command {cmd.type!r}"
+        except Exception as e:
+            ok, output = False, repr(e)
+        self.spool.record_command(cid, ok, output)
+
+    # --- jobs ----------------------------------------------------------------
+
+    def _free_slots(self) -> int:
+        return max(self.slots.http - len(self.active), 0)
+
+    def _job_types(self) -> list[str]:
+        types = [t for t in self.handlers if t != "fetch_browser" or self.slots.browser > 0]
+        if self.desired.job_types is not None:
+            types = [t for t in types if t in self.desired.job_types]
+        return types
+
+    async def lease_once(self) -> int:
+        if self.state != api.RunState.running or not self.compatible or self.spool.full:
+            return 0
+        free, types = self._free_slots(), self._job_types()
+        if free <= 0 or not types:
+            return 0
+        jobs = await self.client.lease(types, free)
+        for job in jobs:
+            self.active[job.id] = asyncio.create_task(self._execute(job), name=f"job-{job.id}")
+        return len(jobs)
+
+    async def _job_loop(self) -> None:
+        while True:
+            got = 0
+            try:
+                got = await self.lease_once()
+            except IncompatibleCoordinator:
+                self.compatible = False
+            except (CoordinatorError, httpx.HTTPError) as e:
+                log.warning("lease failed: %s", e)
+            if got == 0:
+                self._capacity_freed.clear()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        self._capacity_freed.wait(), timeout=self.settings.lease_poll_s
+                    )
+
+    async def _execute(self, job: api.LeasedJob) -> None:
+        ctx = JobContext(upload_raw=self.client.upload_raw)
+        try:
+            result = await self.handlers[job.type](job, ctx)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            result = api.JobResult(
+                job_id=job.id,
+                outcome=api.JobOutcome.failed,
+                error=f"{e!r}\n{traceback.format_exc()}"[-20000:],
+                retryable=True,
+            )
+        if job.id in self.active:  # not cancelled because the lease was lost
+            self.spool.add_result(str(job.id), result.model_dump(mode="json"))
+            self.active.pop(job.id, None)
+            self._result_ready.set()
+            self._capacity_freed.set()
+
+    # --- results -------------------------------------------------------------
+
+    async def flush_once(self) -> int:
+        sent = 0
+        while batch := self.spool.peek_results(self.settings.result_batch_size):
+            ack = await self.client.push_results(batch)
+            done = [str(i) for i in ack.accepted] + list(ack.rejected)
+            for job_id, reason in ack.rejected.items():
+                log.warning("result for job %s rejected: %s", job_id, reason)
+            self.spool.remove_results(done)
+            sent += len(done)
+            if not done:
+                break
+        return sent
+
+    async def _flush_loop(self) -> None:
+        while True:
+            try:
+                await self.flush_once()
+            except (CoordinatorError, httpx.HTTPError) as e:
+                log.warning("flush failed (results stay spooled): %s", e)
+            self._result_ready.clear()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self._result_ready.wait(), timeout=self.settings.flush_interval_s
+                )
