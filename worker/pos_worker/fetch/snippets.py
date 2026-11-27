@@ -191,13 +191,26 @@ def _compact(node: dict) -> dict:
     return out
 
 
+MEDIA_KEYS = {"src", "srcset", "imagefilename", "mimetype", "aspectratio", "alt", "alttext"}
+MEDIA_FILE = re.compile(r"\.(jpe?g|png|webp|avif|gif|svg|tiff?|mp4|webm|mov)(\?|#|$)", re.I)
+
+
+def _is_media(obj: dict, keys: set[str]) -> bool:
+    """An image or video descriptor, not a product: media keys, or a URL to a media file.
+    A product object with its own page URL is not one (its sizes must not be lost)."""
+    if keys & MEDIA_KEYS:
+        return True
+    url = next((v for k, v in obj.items() if _norm_key(k) in ("url", "href")), None)
+    return isinstance(url, str) and bool(MEDIA_FILE.search(url))
+
+
 def _state_nodes(obj, path: str, found: list, depth: int = 0) -> None:
     if depth > 40 or len(found) >= MAX_STATE_NODES:
         return
     if isinstance(obj, dict):
         keys = {_norm_key(k) for k in obj}
-        if keys & {"url", "src", "imagefilename", "alt", "aspectratio", "mimetype"}:
-            return  # an image or file descriptor
+        if _is_media(obj, keys):
+            return  # an image or file descriptor: its width and height are pixels
         if len(keys & SIZE_KEYS) >= 2 or ({"weight", "netweight", "grossweight"} & keys):
             node = _compact(obj)
             if node and len(json.dumps(node, default=str)) <= MAX_STATE_NODE_CHARS:

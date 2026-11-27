@@ -66,35 +66,71 @@ def _value_text(v: Any, node: dict) -> str | None:
     return None
 
 
-def pairs(state: list[dict]) -> list[tuple[str, str]]:
+_TOKEN = re.compile(r"\[\d+\]|[^.\[\]]+")
+
+
+def package_root(path: str) -> str | None:
+    """The object a package node belongs to: through the segment naming the package
+    and any list index after it. "p.packages[1].dimensions" and "p.packages[1]" are one
+    box, "p.packageMeasurements[0]" and "p.packageMeasurements[1]" two. None: not a
+    package."""
+    tokens = _TOKEN.findall(path)
+    named = [i for i, t in enumerate(tokens) if not t.startswith("[") and PACKAGE_PATH.search(t)]
+    if not named:
+        return None
+    end = named[-1]
+    indexes = [i for i in range(end + 1, len(tokens)) if tokens[i].startswith("[")]
+    if indexes:
+        end = indexes[-1]
+    return "".join(
+        t if t.startswith("[") or i == 0 else f".{t}" for i, t in enumerate(tokens[: end + 1])
+    )
+
+
+def _merged(items: list[dict]) -> dict:
+    """One object from a package and its nested parts (weight on the box, axes in its
+    "dimensions"): the shallower object's values win."""
+    out: dict = {}
+    for item in sorted(items, key=lambda it: len(it.get("path", ""))):
+        for k, v in (item.get("node") or {}).items():
+            out.setdefault(k, v)
+    return out
+
+
+def _emit(node: dict, prefix: str, out: list[tuple[str, str]], package: bool) -> None:
+    for k, v in node.items():
+        label = LABELS.get(_key(k))
+        if label is None or (package and label == "volume"):
+            continue  # a box's volume is its a*b*c, not the product's true volume
+        text = _value_text(v, node)
+        if text:
+            out.append((f"{prefix}{label}", text))
+
+
+def pairs(state: list[dict], locale: str | None = None) -> list[tuple[str, str]]:
+    """`locale` is the page's: a weight written as text ("1,250 kg") is read with it."""
     out: list[tuple[str, str]] = []
-    package_nodes = [s for s in state if PACKAGE_PATH.search(s.get("path", ""))]
+    boxes: dict[str, list[dict]] = {}
     for item in state:
-        node = item.get("node") or {}
-        is_package = item in package_nodes
-        if is_package and len(package_nodes) > 1:
-            continue  # several boxes: only their total mass is meaningful (below)
-        prefix = "package " if is_package else ""
-        for k, v in node.items():
-            label = LABELS.get(_key(k))
-            if label is None or (is_package and label == "volume"):
-                continue  # a box's volume is its a*b*c, not the product's true volume
-            text = _value_text(v, node)
-            if text:
-                out.append((f"{prefix}{label}", text))
-    if len(package_nodes) > 1:
+        root = package_root(item.get("path", ""))
+        if root is None:
+            _emit(item.get("node") or {}, "", out, package=False)
+        else:
+            boxes.setdefault(root, []).append(item)
+    if len(boxes) == 1:
+        _emit(_merged(next(iter(boxes.values()))), "package ", out, package=True)
+    elif boxes:
+        # Several boxes: only their total mass is meaningful, not any one box's size.
         masses = []
-        for item in package_nodes:
-            node = item.get("node") or {}
+        for items in boxes.values():
+            node = _merged(items)
             weight = next(
                 (v for k, v in node.items() if _key(k) in ("weight", "grossweight")), None
             )
             text = _value_text(weight, node) if weight is not None else None
-            q = units.parse_quantity(text, "mass", "en") if text else None
+            q = units.parse_quantity(text, "mass", locale) if text else None
             if q is None:
-                masses = []
-                break  # one box without a weight: no total
+                return out  # one box without a weight: no total
             masses.append(q.value)
-        if masses:
-            out.append(("package total gross weight", _num(sum(masses), "kg")))
+        out.append(("package total gross weight", _num(sum(masses), "kg")))
     return out

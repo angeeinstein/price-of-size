@@ -107,3 +107,51 @@ def test_state_numbers_are_not_read_as_thousands_on_german_pages():
     ex = extract_evidence({"status": 200, "verdict": {"kind": "ok"}, "snippets": snip})
     pkg = next(m for m in ex.measurements if m.basis == "package")
     assert pkg.mass_kg == pytest.approx(1.25) and pkg.a_m == pytest.approx(0.39)
+
+
+def _extract(state: dict, url="https://shop.example/p/6"):
+    snip = snippets.capture(_page(state), url)
+    return snip, extract_evidence({"status": 200, "verdict": {"kind": "ok"}, "snippets": snip})
+
+
+def test_a_product_with_its_own_url_keeps_its_sizes():
+    """A page URL is not a media descriptor; an image URL is."""
+    product = {
+        "url": "https://shop.example/p/7",
+        "weight": "12 kg",
+        "package": {"height": "100 cm", "width": "50 cm", "depth": "20 cm", "weight": "13 kg"},
+        "image": {"url": "https://cdn.example/7.jpg", "width": 800, "height": 600},
+        "hero": {"href": "https://cdn.example/7.webp?w=2", "width": "800 px", "weight": "1 kg"},
+    }
+    snip, ex = _extract({"product": product})
+    assert [n["path"] for n in snip["app_state"]] == ["product", "product.package"]
+    by = {m.basis: m for m in ex.measurements}
+    assert by["package"].mass_kg == pytest.approx(13) and by["package"].a_m == pytest.approx(1)
+
+
+def test_one_package_with_nested_dimensions_is_one_box():
+    state = {
+        "product": {
+            "package": {
+                "weight": "10 kg",
+                "dimensions": {"height": "100 cm", "width": "50 cm", "depth": "20 cm"},
+            }
+        }
+    }
+    _, ex = _extract(state)
+    pkg = next(m for m in ex.measurements if m.basis == "package")
+    assert (pkg.a_m, pkg.b_m, pkg.c_m, pkg.mass_kg) == pytest.approx((1.0, 0.5, 0.2, 10.0))
+
+
+def test_boxes_with_nested_parts_and_text_weights_in_the_page_locale():
+    state = {
+        "product": {
+            "packages": [
+                {"weight": "1,250 kg", "dimensions": {"height": "10 cm", "width": "20 cm"}},
+                {"weight": "2,250 kg", "dimensions": {"height": "30 cm", "width": "40 cm"}},
+            ]
+        }
+    }
+    _, ex = _extract(state)  # lang="de-AT": decimal commas
+    pkg = next(m for m in ex.measurements if m.basis == "package")
+    assert pkg.mass_kg == pytest.approx(3.5) and pkg.a_m is None

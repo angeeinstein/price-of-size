@@ -12,7 +12,7 @@ def extract_evidence(evidence: dict[str, Any]) -> Extraction:
     locale = (snip.get("lang") or "")[:2].lower() or None
     ex = Extraction(extract_version=EXTRACT_VERSION)
     pairs = jsonld.extract(snip.get("json_ld") or [], ex, locale)
-    state_pairs = appstate.pairs(snip.get("app_state") or [])
+    state_pairs = appstate.pairs(snip.get("app_state") or [], locale)
     if state_pairs:
         ex.sources.append("app_state")
         pairs += state_pairs
