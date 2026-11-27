@@ -241,3 +241,63 @@ async def test_scatter_for_the_log_log_plot(world, app):
     # the implausible lead brick (900,000 kg/m³) is not plotted
     assert r["n"] == 3 and {p["t"] for p in r["points"]} == {"Thing 0", "Thing 1", "Thing 2"}
     assert r["fit"]["slope"] == pytest.approx(1.0)  # price ∝ mass in this toy world
+
+
+def _o(i, url, day, price, flags=()):
+    return (i, url, datetime(2026, 11, day, tzinfo=UTC), Decimal(price), list(flags))
+
+
+def test_one_page_one_vote():
+    # shop a fetched five times at 100, shop b once at 130: the median is 115, not 100
+    offers = [_o(i, "https://a/1", 1 + i, "100") for i in range(5)]
+    offers.append(_o(9, "https://b/1", 3, "130"))
+    flags, canonical = stage.price_checks(offers)
+    assert canonical == Decimal("115") and not any(flags.values())
+
+
+def test_cross_source_outlier_and_disagreement():
+    offers = [
+        _o(1, "https://a/1", 1, "100"),
+        _o(2, "https://b/1", 1, "110"),
+        _o(3, "https://c/1", 1, "999"),  # a marketplace seller with an absurd price
+    ]
+    flags, canonical = stage.price_checks(offers)
+    assert flags[3] == {"cross_source_outlier"} and canonical == Decimal("105")
+    pair = [offers[0], offers[2]]
+    flags, canonical = stage.price_checks(pair)
+    assert flags[1] == flags[3] == {"price_disagreement"} and canonical is None
+    # derived flags are recomputed, rule flags kept: a third shop settles it
+    again = [(*o[:4], sorted(flags[o[0]] | {"seen_by_rule"})) for o in pair] + [offers[1]]
+    flags, canonical = stage.price_checks(again)
+    assert flags[1] == {"seen_by_rule"} and flags[3] == {"seen_by_rule", "cross_source_outlier"}
+    assert canonical == Decimal("105")
+
+
+def test_price_jump_between_visits():
+    offers = [_o(1, "https://a/1", 1, "1299"), _o(2, "https://a/1", 2, "1.299")]
+    flags, canonical = stage.price_checks(offers)
+    assert flags == {1: set(), 2: {"price_jump"}}
+    assert canonical == Decimal("1.299")  # flagged for review; no second page to compare
+
+
+async def test_repeated_fetches_do_not_outvote_other_shops(world):
+    sm, store = world
+    gtin = "4006381333931"
+    for day in (1, 2, 3):
+        when = datetime(2026, 11, day, 12, tzinfo=UTC)
+        await _fetch(sm, store, _evidence(gtin, "100", "EUR"), "https://a.example/p", "a", when)
+    await _fetch(sm, store, _evidence(gtin, "130", "EUR"), "https://b.example/p", "b")
+    await _fetch(sm, store, _evidence(gtin, "5000", "EUR"), "https://c.example/p", "c")
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    async with sm() as s:
+        product = (await s.execute(select(Product))).scalar_one()
+        outliers = (
+            (
+                await s.execute(
+                    select(Offer.source).where(Offer.flags.contains(["cross_source_outlier"]))
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert outliers == ["c"] and product.canonical_price_eur == Decimal("115.0000")

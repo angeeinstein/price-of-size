@@ -84,6 +84,15 @@ and watch `GET /api/admin/jobs/stats`. Interactive API docs: `/docs`.
 | Blocks (CAPTCHA, bot walls, repeated 403) logged, no evasion | `worker/.../fetch/blocks.py`, `crawl/feedback.py`, `domain_event` |
 | Raw evidence capture (JSON-LD, tables, breadcrumbs, price blocks, ...) | `worker/.../fetch/snippets.py` |
 | HTML retention policy | `crawl/scheduler.py` (`_keep_html`), `fetch/handlers.py` |
+| Units, number formats per locale, net/gross, product vs. package | `pos_shared/units.py` |
+| Extraction tiers 1 (JSON-LD) and 3 (spec tables, dl, text) | `pos_shared/extract/` (`jsonld.py`, `spectext.py`, `pipeline.py`) |
+| Price traps (unit/monthly/net/used/placeholder prices, packs) | `pos_shared/extract/price_rules.py` |
+| Derive stage: products, offers, measurements; versions on every row | `coordinator/.../derive/stage.py` |
+| Product identity (GTIN check digit, brand+MPN, URL) | `derive/stage.py` (`match_key`) |
+| Currency conversion at fetch-day ECB rates, never guessed | `derive/fx.py`, `fx_rate` table |
+| Plausibility (size, density, gross < net), flag never delete | `derive/stage.py` (`measurement_flags`, `cross_checks`) |
+| Rebuild drill: derived layer reproducible from raw | `derive/stage.py` (`rebuild`), `pos-coordinator rebuild-derived` |
+| Log-log explorer | `panel/api.py` (`/api/panel/scatter`), `panel/src/pages/Explorer.tsx` |
 
 ### Deviations from the spec
 
@@ -122,10 +131,37 @@ Next steps:
 
 - [x] Control panel: accounts (Argon2id, TOTP), sessions + CSRF, roles, re-auth, audit;
       overview (live via SSE), nodes, jobs, domains, sources, releases, settings, users
-- [ ] Panel: data explorer, QA/gold labelling, costs, AI parser chat, passkeys
+- [x] Panel: data explorer (log-log price vs. mass/volume/length with fit)
+- [ ] Panel: QA/gold labelling, costs, AI parser chat, passkeys
 - [x] Polite fetching: per-(domain, egress group) rate slots, AIMD back-off, robots.txt,
       blocks, raw evidence capture, HTML retention (Phase 2 groundwork)
 - [x] Discovery: sitemaps (from robots.txt or explicit), indexes, gzip, per-source URL patterns
 - [ ] Discovery from category pages (links), scheduled re-discovery and re-fetch
 - [ ] Browser fetching (Playwright) for pages without data over plain HTTP
 - [ ] Node dashboard (local web UI) and quiet hours; Raspberry Pi SD-card friendly spool
+
+### Phase 2: extraction and the derived layer
+
+The derive stage runs inside the coordinator. It walks `raw_fetch` in
+`(received_at, id)` order behind a cursor (`derive_cursor`), leaving a settle
+window so that rows committed late are not skipped. For each fetch it reads
+the raw evidence from the NAS, runs the extraction tiers and upserts the
+product (by match key), its offers (one per fetch) and its measurements. Every
+row carries the parser, unit and validator versions. Bumping
+`derive.stage.VERSION` means the derived layer is rebuilt, not migrated:
+
+```bash
+pos-coordinator rebuild-derived   # truncate derived tables, re-run from raw, compare counts
+pos-coordinator fx-refresh        # ECB reference rates (also fetched daily)
+```
+
+- [x] Units and numbers (German/English formats, ranges, fractions, inches)
+- [x] JSON-LD Product/Offer/AggregateOffer/ProductGroup, breadcrumbs, additionalProperty
+- [x] Spec tables and definition lists: dimensions, weight, product vs. package
+- [x] Price traps flagged; offers in foreign currency converted at the fetch-day rate
+- [x] Canonical price: median over pages (latest observation each) of valid offers in EUR
+- [x] Cross-source check (factor 3 from the median; two disagreeing pages: neither) and
+      price jumps between visits (factor 10), recomputed as offers arrive
+- [x] Rebuild drill reproduces the derived layer from raw
+- [ ] Tier 2 (microdata/RDFa), tier 4 (LLM extraction within budget)
+- [ ] Classification and embeddings; per-category size scalar

@@ -48,7 +48,7 @@ from pos_shared.units import UNITS_VERSION
 log = logging.getLogger(__name__)
 
 STAGE = "extract"
-VALIDATOR_VERSION = "1"
+VALIDATOR_VERSION = "2"
 VERSION = f"extract={EXTRACT_VERSION};units={UNITS_VERSION};validate={VALIDATOR_VERSION}"
 SETTLE = timedelta(seconds=30)
 
@@ -314,28 +314,82 @@ async def _write(session, f: RawFetch, ex: Extraction, fx: RateCache, report) ->
     return product_id
 
 
+# Product-level price checks (docs/spec.md, "Detection pipeline", steps 2 and 4).
+# They depend on every offer of a product, so they are recomputed whenever one
+# arrives: the flags below are derived state, stripped and set again each time.
+OUTLIER_FACTOR = Decimal(3)  # an offer this far from the product median is suspect
+JUMP_FACTOR = Decimal(10)  # an order of magnitude between two visits of one page
+CHECK_FLAGS = {"cross_source_outlier", "price_disagreement", "price_jump"}
+NOT_A_VALID_PRICE |= {"cross_source_outlier", "price_disagreement"}
+
+
+def _far(a: Decimal, b: Decimal, factor: Decimal) -> bool:
+    return a > 0 and b > 0 and (a / b > factor or b / a > factor)
+
+
+def price_checks(offers: list[tuple[Any, str, Any, Decimal | None, list[str]]]):
+    """Offers of one product as (id, url, observed_on, price_eur, flags).
+
+    Returns (new flags per offer id, canonical price). One page counts once:
+    its latest observation stands for it, so a shop fetched daily does not
+    outvote a shop fetched once. The canonical price is the median of the
+    pages whose latest price passes every check.
+    """
+    flags: dict[Any, set[str]] = {o[0]: set(o[4] or []) - CHECK_FLAGS for o in offers}
+    history: dict[str, list] = {}
+    for o in sorted(offers, key=lambda o: (o[2], str(o[0]))):
+        history.setdefault(o[1] or str(o[0]), []).append(o)
+    latest = []
+    for obs in history.values():
+        priced = [o for o in obs if o[3] is not None]
+        for prev, cur in zip(priced, priced[1:], strict=False):
+            if _far(cur[3], prev[3], JUMP_FACTOR):
+                flags[cur[0]].add("price_jump")
+        last = obs[-1]
+        if last[3] is not None and not (NOT_A_VALID_PRICE & flags[last[0]]):
+            latest.append(last)
+    if len(latest) == 2 and _far(latest[0][3], latest[1][3], OUTLIER_FACTOR):
+        for o in latest:  # two pages that disagree: neither is believed
+            flags[o[0]].add("price_disagreement")
+    elif len(latest) >= 3:
+        median = statistics.median(o[3] for o in latest)
+        for o in latest:
+            if _far(o[3], median, OUTLIER_FACTOR):
+                flags[o[0]].add("cross_source_outlier")
+    valid = [o[3] for o in latest if not (NOT_A_VALID_PRICE & flags[o[0]])]
+    return flags, (statistics.median(valid) if valid else None)
+
+
 async def _canonical_prices(session: AsyncSession, product_ids: set) -> None:
-    """Canonical product price: the median of its valid offers in EUR."""
+    """Re-run the product-level price checks and set the canonical price."""
     if not product_ids:
         return
     await session.flush()
     rows = (
         await session.execute(
-            select(Offer.product_id, Offer.price_eur, Offer.flags).where(
-                Offer.product_id.in_(product_ids), Offer.price_eur.is_not(None)
-            )
+            select(
+                Offer.product_id,
+                Offer.id,
+                Offer.url,
+                Offer.observed_on,
+                Offer.price_eur,
+                Offer.flags,
+            ).where(Offer.product_id.in_(product_ids))
         )
     ).all()
-    prices: dict[Any, list[Decimal]] = {}
-    for pid, price, flags in rows:
-        if not NOT_A_VALID_PRICE & set(flags or []):
-            prices.setdefault(pid, []).append(price)
-    for pid in product_ids:
-        valid = prices.get(pid)
+    by_product: dict[Any, list] = {}
+    for pid, *offer in rows:
+        by_product.setdefault(pid, []).append(tuple(offer))
+    for pid in sorted(product_ids, key=str):
+        offers = by_product.get(pid, [])
+        new_flags, canonical = price_checks(offers)
+        for oid, _url, _on, _price, old in offers:
+            if set(old or []) != new_flags[oid]:
+                await session.execute(
+                    update(Offer).where(Offer.id == oid).values(flags=sorted(new_flags[oid]))
+                )
         await session.execute(
-            update(Product)
-            .where(Product.id == pid)
-            .values(canonical_price_eur=statistics.median(valid) if valid else None)
+            update(Product).where(Product.id == pid).values(canonical_price_eur=canonical)
         )
 
 
