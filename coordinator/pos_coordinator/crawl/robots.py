@@ -65,6 +65,11 @@ def _compile(pattern: str) -> re.Pattern[str]:
     return re.compile(regex + ("$" if anchored else ""))
 
 
+def _lines(text: str) -> list[str]:
+    """robots.txt lines; a leading UTF-8 byte order mark is not part of the first one."""
+    return text.removeprefix("\ufeff").splitlines()
+
+
 @lru_cache(maxsize=4096)
 def _rules(text: str, agent: str) -> tuple[Rule, ...]:
     """The rules that apply to `agent` (RFC 9309 2.2): all groups naming its product
@@ -73,7 +78,7 @@ def _rules(text: str, agent: str) -> tuple[Rule, ...]:
     has_ours = False  # a group for us, even one without rules, replaces the * groups
     current: list[str] = []
     in_rules = False
-    for raw in text.splitlines():
+    for raw in _lines(text):
         line = raw.split("#", 1)[0].strip()
         if ":" not in line:
             continue
@@ -135,12 +140,13 @@ def crawl_delay(kind: str, text: str | None, agent: str = PRODUCT_TOKEN) -> floa
     return max(values) if values else None
 
 
+@lru_cache(maxsize=4096)
 def _delay_groups(text: str) -> dict[str, list[float]]:
     """user-agent (lowercase) -> delays in seconds, from Crawl-delay and Request-rate."""
     groups: dict[str, list[float]] = {}
     agents: list[str] = []
     in_rules = False  # a user-agent line after rules starts a new group
-    for raw in text.splitlines():
+    for raw in _lines(text):
         line = raw.split("#", 1)[0].strip()
         if ":" not in line:
             continue
@@ -178,7 +184,7 @@ def _delay_groups(text: str) -> dict[str, list[float]]:
 def sitemaps(text: str | None, limit: int = 100) -> list[str]:
     """`Sitemap:` lines (independent of user-agent groups)."""
     out: list[str] = []
-    for raw in (text or "").splitlines():
+    for raw in _lines(text or ""):
         line = raw.split("#", 1)[0].strip()
         if line.lower().startswith("sitemap:"):
             url = line.split(":", 1)[1].strip()

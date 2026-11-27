@@ -121,7 +121,7 @@ async def apply(
 
 def _apply_one(session, job: Job, ds: DomainState, eg: DomainEgressState, out, now, cfg) -> None:
     if job.type == "fetch_robots":
-        _apply_robots(session, ds, out, now)
+        _apply_robots(session, ds, out, now, cfg.user_agent)
         if ds.robots_crawl_delay_s:  # the first page waits for the delay too
             first = now + timedelta(seconds=ds.robots_crawl_delay_s)
             eg.next_slot_at = max(eg.next_slot_at or first, first)
@@ -162,7 +162,9 @@ async def _follow_redirect(session: AsyncSession, job: Job, target: str) -> None
     )
 
 
-def _apply_robots(session: AsyncSession, ds: DomainState, out: dict, now: datetime) -> None:
+def _apply_robots(
+    session: AsyncSession, ds: DomainState, out: dict, now: datetime, agent: str
+) -> None:
     verdict = out.get("verdict")
     if verdict in ("throttled", "blocked"):
         return  # not an answer about robots.txt; retried through the job
@@ -173,7 +175,7 @@ def _apply_robots(session: AsyncSession, ds: DomainState, out: dict, now: dateti
     ds.robots_txt = body
     ds.robots_http_status = out.get("status")
     ds.robots_fetched_at = now
-    ds.robots_crawl_delay_s = robots.crawl_delay(kind, body)
+    ds.robots_crawl_delay_s = robots.crawl_delay(kind, body, agent)
     ds.sitemaps = robots.sitemaps(body) or None
     wait = robots.ROBOTS_MAX_AGE_S if kind != "unreachable" else robots.ROBOTS_RETRY_S
     ds.robots_next_check_at = now + timedelta(seconds=wait)
@@ -211,7 +213,9 @@ def _apply_rate(
     )
     old_rate = eg.rate_rps
     top = ratecontrol.ceiling(
-        cfg.max_rate_rps, ds.robots_crawl_delay_s, (ds.overrides or {}).get("rate_rps")
+        cfg.max_rate_rps,
+        robots.crawl_delay(ds.robots_status, ds.robots_txt, cfg.user_agent),
+        (ds.overrides or {}).get("rate_rps"),
     )
     d = ratecontrol.observe(
         state,

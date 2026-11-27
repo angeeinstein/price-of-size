@@ -401,14 +401,16 @@ async def _lease_domain(
         return []
 
     override = (ds.overrides or {}).get("rate_rps")
-    top = ratecontrol.ceiling(cfg.max_rate_rps, ds.robots_crawl_delay_s, override)
+    # robots.txt rules and delays for the identity we actually send (`user_agent`)
+    crawl_delay = robots.crawl_delay(ds.robots_status, ds.robots_txt, cfg.user_agent)
+    top = ratecontrol.ceiling(cfg.max_rate_rps, crawl_delay, override)
     rate = ratecontrol.clamp(eg.rate_rps, top)  # the floor never beats crawl-delay
     interval = 1.0 / rate
     # The domain as a whole (all egress groups): robots.txt's crawl-delay and an
     # operator's override are the site's wishes, not per-IP budgets; the optional
     # global cap too. One schedule across groups enforces them.
     cap = cfg.max_total_rate_per_domain
-    domain_top = ratecontrol.ceiling(cap or float("inf"), ds.robots_crawl_delay_s, override)
+    domain_top = ratecontrol.ceiling(cap or float("inf"), crawl_delay, override)
     global_gap = 1.0 / domain_top if domain_top != float("inf") else 0.0
     t_group = max(now, eg.next_slot_at or now)
     t_global = max(now, ds.next_global_slot_at or now) if global_gap else now
@@ -457,7 +459,7 @@ async def _lease_domain(
         if (
             job.type in PAGE_TYPES
             and cfg.respect_robots_txt
-            and not robots.allowed(ds.robots_status, ds.robots_txt, url)
+            and not robots.allowed(ds.robots_status, ds.robots_txt, url, cfg.user_agent)
         ):
             job.status = "failed"
             job.last_error = "robots_disallowed"

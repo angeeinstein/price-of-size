@@ -416,3 +416,42 @@ async def test_pending_discovery_survives_a_robots_job_that_ran_out(sessionmaker
             )
         ).scalar_one()
         assert active == 1
+
+
+def test_a_byte_order_mark_hides_no_rules():
+    text = "﻿User-agent: *\nDisallow: /private\nCrawl-delay: 7\nSitemap: https://a.example/s.xml\n"
+    assert not robots.allowed("rules", text, "https://a.example/private")
+    assert robots.crawl_delay("rules", text) == 7.0
+    assert robots.sitemaps(text) == ["https://a.example/s.xml"]
+
+
+async def test_robots_rules_follow_the_configured_user_agent(sessionmaker):
+    """Codex finding: requests go out as `user_agent`; its robots.txt group applies."""
+    async with sessionmaker() as s:
+        n = await _node(s)
+        await scheduler.enqueue_urls(s, ["https://own.example/p/1"], "t")
+        rules = "User-agent: CustomCrawler\nDisallow: /\n\nUser-agent: *\nAllow: /\n"
+        await _ready(s, "own.example", rules)
+        default = await _cfg(s)
+        assert len(await scheduler.lease_fetch(s, n, ["fetch_http"], 5, default)) == 1
+        await s.execute(update(Job).values(status="queued", attempts=0))
+        await s.execute(update(DomainEgressState).values(next_slot_at=None))
+        custom = await _cfg(s, user_agent="CustomCrawler/1.0")
+        assert await scheduler.lease_fetch(s, n, ["fetch_http"], 5, custom) == []
+        job = (await s.execute(select(Job).where(Job.type == "fetch_http"))).scalar_one()
+        assert job.last_error == "robots_disallowed"
+    agent_delay = "User-agent: CustomCrawler\nCrawl-delay: 30\n\nUser-agent: *\nCrawl-delay: 1\n"
+    assert robots.crawl_delay("rules", agent_delay, "CustomCrawler/1.0") == 30.0
+    assert robots.crawl_delay("rules", agent_delay) == 1.0
+
+
+async def test_the_overview_stream_gives_back_its_request_connection():
+    """Codex finding: an open Overview tab must not hold a pooled connection."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pos_coordinator.panel import api as panel_api
+
+    session = AsyncMock()
+    request = MagicMock()
+    await panel_api.stream(request, viewer=MagicMock(), session=session)
+    session.close.assert_awaited_once()

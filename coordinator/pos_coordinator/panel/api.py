@@ -360,9 +360,12 @@ async def get_overview(viewer: CurrentViewer, session: Session):
 
 
 @router.get("/stream")
-async def stream(request: Request, viewer: CurrentViewer):
+async def stream(request: Request, viewer: CurrentViewer, session: Session):
     """Server-sent events: an overview snapshot every few seconds."""
     sm = request.app.state.sessionmaker
+    # The request's session (authentication) would otherwise hold a pooled connection
+    # for as long as the stream stays open; every snapshot takes its own.
+    await session.close()
 
     async def events():
         while not await request.is_disconnected():
