@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel, SecretStr
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from pos_coordinator import runtime_settings
 from pos_coordinator.budget import Priority
@@ -482,3 +482,39 @@ async def test_the_application_key_is_used(settings, monkeypatch):
     app = create_app(settings, run_maintenance=False)
     async with app.router.lifespan_context(app):
         assert not app.state.llm.available()
+
+
+async def test_a_batch_holds_one_model_role_and_priority(sessionmaker):
+    llm = LlmService(sessionmaker, lambda: FakeClient())
+    with pytest.raises(ValueError):
+        await llm.submit_batch([_task(), _task("other", model_role="category_mapping")])
+    with pytest.raises(ValueError):
+        await llm.submit_batch([_task(), _task("other", priority=Priority.high)])
+
+
+async def test_collecting_a_batch_waits_for_the_budget_lock(sessionmaker):
+    @service.register("test_lock", Pick)
+    async def handler(session, outcome):
+        pass
+
+    fake = FakeClient()
+    llm = LlmService(sessionmaker, lambda: fake)
+    t = Task(stage="test_lock", system="S", prompt="p", schema=Pick, priority=Priority.high)
+    await llm.submit_batch([t])
+    (bid,) = fake.batches
+    fake.batches[bid]["status"] = "ended"
+    fake.batches[bid]["results"] = [
+        SimpleNamespace(
+            custom_id="0",
+            result=SimpleNamespace(
+                type="succeeded", message=_msg('{"category": "a", "confidence": 1}')
+            ),
+        )
+    ]
+    async with sessionmaker() as holder:  # an admission in progress
+        await holder.execute(select(func.pg_advisory_xact_lock(service.BUDGET_LOCK)))
+        poll = asyncio.create_task(llm.poll_batches())
+        await asyncio.sleep(0.3)
+        assert not poll.done()
+        await holder.commit()
+    assert await poll == 1

@@ -413,6 +413,11 @@ class LlmService:
         stage = tasks[0].stage
         if any(t.stage != stage for t in tasks) or stage not in HANDLERS:
             raise ValueError(f"one registered stage per batch (got {stage!r})")
+        # one model and one priority per batch: both decide for all its tasks
+        if any(
+            (t.model_role, t.priority) != (tasks[0].model_role, tasks[0].priority) for t in tasks
+        ):
+            raise ValueError("a batch holds tasks of one model role and one priority")
         model = await self.model_for(tasks[0].model_role)
         misses: list[tuple[str, Task]] = []
         for task in tasks:
@@ -496,6 +501,7 @@ class LlmService:
         estimate moves into the ledger (money possibly spent stays counted)."""
         cutoff = datetime.now(UTC) - STALE_SUBMISSION
         async with self.sm() as s:
+            await s.execute(select(func.pg_advisory_xact_lock(BUDGET_LOCK)))  # as above
             stale = (
                 (
                     await s.execute(
@@ -545,14 +551,20 @@ class LlmService:
             if getattr(remote, "processing_status", None) != "ended":
                 continue
             schema, handler = HANDLERS.get(b.stage, (None, None))
+            # read the results before the transaction: the budget lock below is
+            # held until commit, and admission waits for it meanwhile
+            results = self.client.messages.batches.results(b.remote_id)
+            if hasattr(results, "__await__"):
+                results = await results
+            results = [r async for r in _aiter(results)]
             async with self.sm() as s:
+                # the batch's reservation turns into ledger rows: admission must see
+                # one or the other, never neither
+                await s.execute(select(func.pg_advisory_xact_lock(BUDGET_LOCK)))
                 row = await s.get(LlmBatch, b.id, with_for_update=True)
                 if row is None or row.status != "submitted":
                     continue  # another coordinator took it
-                results = self.client.messages.batches.results(b.remote_id)
-                if hasattr(results, "__await__"):
-                    results = await results
-                async for r in _aiter(results):
+                for r in results:
                     req = (row.requests or {}).get(r.custom_id)
                     if req is None:
                         continue
