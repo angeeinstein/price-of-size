@@ -361,7 +361,7 @@ async def rederive(session: AsyncSession, fetch_id: uuid.UUID) -> bool:
     )
     if offer_ids:
         await session.execute(delete(Offer).where(Offer.id.in_(offer_ids)))
-    touched = await derive_evidence(session, f, evidence, RateCache(session), BatchReport())
+    touched = await derive_evidence(session, _store, f, evidence, RateCache(session), BatchReport())
     await _canonical_prices(session, {p for p in touched | old_products if p is not None})
     return True
 
