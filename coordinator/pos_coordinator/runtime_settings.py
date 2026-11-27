@@ -22,6 +22,10 @@ DEFAULTS: dict[str, Any] = {
     "llm_budget_soft_target_usd": None,
     "llm_budget_warn_fraction": 0.8,
     "html_archive_quota_gb": 100,
+    "html_keep_first_pages": 500,  # always archive the first pages of every domain
+    "html_keep_sample_fraction": 0.02,  # ...and a random sample of all others
+    # Identifies the crawler honestly; robots.txt rules for this product token apply.
+    "user_agent": "PriceOfSizeBot/0.1",
     "postgres_disk_budget_gb": 100,
     "coordinator.run_worker": False,
     # Release the coordinator's own agent should run (None = stay on the current one).
@@ -44,6 +48,12 @@ VALIDATORS: dict[str, Any] = {
     "heartbeat_interval_s": lambda v: isinstance(v, int | float) and 2 <= v <= 600,
     "job_lease_s": lambda v: isinstance(v, int) and 30 <= v <= 86400,
     "coordinator.target_version": lambda v: v is None or isinstance(v, str),
+    "max_total_rate_per_domain": lambda v: (
+        v is None or (isinstance(v, int | float) and 0 < v <= 50)
+    ),
+    "respect_robots_txt": lambda v: isinstance(v, bool),
+    "user_agent": lambda v: isinstance(v, str) and 3 <= len(v) <= 200,
+    "html_keep_sample_fraction": lambda v: isinstance(v, int | float) and 0 <= v <= 1,
 }
 
 

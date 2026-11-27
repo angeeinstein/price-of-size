@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 from pos_coordinator import maintenance, signing_key
-from pos_coordinator.api import admin, jobs, nodes, raw, releases
+from pos_coordinator.api import admin, crawl, jobs, nodes, raw, releases
 from pos_coordinator.api.deps import Session
 from pos_coordinator.config import Settings, get_settings
 from pos_coordinator.db import make_engine, make_sessionmaker
@@ -64,6 +64,6 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
     async def version():
         return {"version": __version__, "api_version": API_VERSION}
 
-    for module in (nodes, jobs, raw, releases, admin):
+    for module in (nodes, jobs, raw, releases, admin, crawl):
         app.include_router(module.router)
     return app

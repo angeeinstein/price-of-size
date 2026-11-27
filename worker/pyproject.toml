@@ -9,6 +9,7 @@ dependencies = [
   "cryptography>=43",
   "pydantic-settings>=2.4",
   "zstandard>=0.23",
+  "lxml>=5.3",
 ]
 
 [project.scripts]

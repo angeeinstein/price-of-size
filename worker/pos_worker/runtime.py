@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import httpx
 
+import pos_worker.fetch.handlers  # noqa: F401  (registers the fetch handlers)
 from pos_shared import api, exchange, signing
 from pos_shared.version import API_VERSION, __version__, is_compatible
 from pos_worker import cgroup, identity

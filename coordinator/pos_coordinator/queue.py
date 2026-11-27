@@ -108,7 +108,13 @@ async def extend(
             Job.node_id == node_id,
             Job.status == "leased",
         )
-        .values(lease_expires_at=func.now() + timedelta(seconds=lease_s), updated_at=func.now())
+        .values(
+            # never shorten a lease: fetch leases also cover the wait for their rate slot
+            lease_expires_at=func.greatest(
+                Job.lease_expires_at, func.now() + timedelta(seconds=lease_s)
+            ),
+            updated_at=func.now(),
+        )
         .returning(Job.id)
     )
     return list((await session.execute(stmt)).scalars().all())
@@ -119,9 +125,16 @@ def _retry_delay(attempts: int) -> timedelta:
 
 
 async def complete(
-    session: AsyncSession, node_id: uuid.UUID, results: list[JobResult]
+    session: AsyncSession,
+    node_id: uuid.UUID,
+    results: list[JobResult],
+    applied: dict[uuid.UUID, Job] | None = None,
 ) -> tuple[list[uuid.UUID], dict[str, str]]:
-    """Apply a batch of results. Returns (accepted ids, {job_id: rejection reason})."""
+    """Apply a batch of results. Returns (accepted ids, {job_id: rejection reason}).
+
+    `applied`, if given, receives the jobs whose result was stored by this call
+    (accepted replays are not in it), for follow-up processing.
+    """
     accepted: list[uuid.UUID] = []
     rejected: dict[str, str] = {}
     ids = [r.job_id for r in results]
@@ -150,6 +163,8 @@ async def complete(
             await _store_fetches(session, job, node_id, r)
         _apply(job, r)
         accepted.append(job.id)
+        if applied is not None:
+            applied[job.id] = job
     return accepted, rejected
 
 

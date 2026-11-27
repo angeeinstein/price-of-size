@@ -93,6 +93,15 @@ class DomainState(Base):
     blocked_at: Mapped[datetime | None]
     robots_txt: Mapped[str | None] = mapped_column(Text)
     robots_fetched_at: Mapped[datetime | None]
+    # rules | none (4xx: allow all) | unreachable (5xx/network: disallow until refetched)
+    robots_status: Mapped[str | None] = mapped_column(Text)
+    robots_http_status: Mapped[int | None] = mapped_column(SmallInteger)
+    robots_crawl_delay_s: Mapped[float | None] = mapped_column(Float)
+    robots_next_check_at: Mapped[datetime | None]
+    # Slot schedule for the optional hard cap across all egress groups.
+    next_global_slot_at: Mapped[datetime | None]
+    pages_fetched: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    last_fetch_at: Mapped[datetime | None]
     overrides: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'::jsonb"))
     updated_at: Mapped[datetime] = created()
 
@@ -111,7 +120,30 @@ class DomainEgressState(Base):
     cooldown_until: Mapped[datetime | None]
     clean_streak: Mapped[int] = mapped_column(Integer, server_default="0")
     throttle_count: Mapped[int] = mapped_column(Integer, server_default="0")
+    # When this group may send the next request to the domain (rate slot schedule).
+    next_slot_at: Mapped[datetime | None]
+    latency_ewma_ms: Mapped[float | None] = mapped_column(Float)
+    latency_base_ms: Mapped[float | None] = mapped_column(Float)
+    consecutive_errors: Mapped[int] = mapped_column(Integer, server_default="0")
+    consecutive_403: Mapped[int] = mapped_column(Integer, server_default="0")
     updated_at: Mapped[datetime] = created()
+
+
+class DomainEvent(Base):
+    """Every rate change, cooldown, block and robots.txt update, for the panel and
+    for measuring source-specific bias later."""
+
+    __tablename__ = "domain_event"
+    __table_args__ = (Index("ix_domain_event_domain_at", "domain", "at"),)
+    id: Mapped[uuid.UUID] = pk()
+    domain: Mapped[str] = mapped_column(Text)
+    egress_group: Mapped[str | None] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str | None] = mapped_column(Text)
+    old_rate_rps: Mapped[float | None] = mapped_column(Float)
+    new_rate_rps: Mapped[float | None] = mapped_column(Float)
+    details: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'::jsonb"))
+    at: Mapped[datetime] = created()
 
 
 class Node(Base):
@@ -205,6 +237,21 @@ class Job(Base):
         ),
         Index("ix_job_lease_expiry", "lease_expires_at", postgresql_where="status = 'leased'"),
         Index("ix_job_status_type", "status", "type"),
+        # The crawl scheduler picks queued jobs per domain.
+        Index(
+            "ix_job_domain_queue",
+            "domain",
+            text("priority DESC"),
+            "id",
+            postgresql_where="status = 'queued' AND domain IS NOT NULL",
+        ),
+        # The same URL is queued at most once at a time.
+        Index(
+            "uq_job_active_dedup",
+            "dedup_key",
+            unique=True,
+            postgresql_where="status IN ('queued', 'leased') AND dedup_key IS NOT NULL",
+        ),
     )
     id: Mapped[uuid.UUID] = pk()
     type: Mapped[str] = mapped_column(Text)
@@ -222,6 +269,7 @@ class Job(Base):
     node_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("node.id"))
     lease_expires_at: Mapped[datetime | None]
     domain: Mapped[str | None] = mapped_column(Text)
+    dedup_key: Mapped[str | None] = mapped_column(Text)
     source_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("source.id"))
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     last_error: Mapped[str | None] = mapped_column(Text)
