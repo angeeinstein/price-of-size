@@ -129,6 +129,7 @@ class DomainEgressState(Base):
     latency_base_ms: Mapped[float | None] = mapped_column(Float)
     consecutive_errors: Mapped[int] = mapped_column(Integer, server_default="0")
     consecutive_403: Mapped[int] = mapped_column(Integer, server_default="0")
+    consecutive_blocks: Mapped[int] = mapped_column(Integer, server_default="0")
     updated_at: Mapped[datetime] = created()
 
 

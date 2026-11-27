@@ -817,6 +817,7 @@ dependencies = [
     { name = "argon2-cffi" },
     { name = "cryptography" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "pgvector" },
     { name = "pos-shared" },
     { name = "psycopg", extra = ["binary"] },
@@ -824,6 +825,7 @@ dependencies = [
     { name = "pyotp" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "zstandard" },
 ]
 
 [package.metadata]
@@ -832,6 +834,7 @@ requires-dist = [
     { name = "argon2-cffi", specifier = ">=23.1" },
     { name = "cryptography", specifier = ">=43" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "pgvector", specifier = ">=0.3" },
     { name = "pos-shared", editable = "shared" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
@@ -839,6 +842,7 @@ requires-dist = [
     { name = "pyotp", specifier = ">=2.9" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
+    { name = "zstandard", specifier = ">=0.23" },
 ]
 
 [[package]]
@@ -863,7 +867,9 @@ name = "pos-worker"
 version = "0.1.0"
 source = { editable = "worker" }
 dependencies = [
+    { name = "anyio" },
     { name = "cryptography" },
+    { name = "httpcore" },
     { name = "httpx" },
     { name = "lxml" },
     { name = "pos-shared" },
@@ -873,7 +879,9 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4" },
     { name = "cryptography", specifier = ">=43" },
+    { name = "httpcore", specifier = ">=1.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "lxml", specifier = ">=5.3" },
     { name = "pos-shared", editable = "shared" },

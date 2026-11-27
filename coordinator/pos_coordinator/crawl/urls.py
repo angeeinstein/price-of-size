@@ -30,6 +30,19 @@ class BadUrl(ValueError):
 
 
 def normalize(url: str) -> str:
+    """Raises BadUrl, and only BadUrl, for anything that is not a usable http(s) URL
+    (URLs come from shops' sitemaps and redirects: untrusted)."""
+    try:
+        return _normalize(url)
+    except BadUrl:
+        raise
+    except (ValueError, TypeError, AttributeError) as e:  # urlsplit: bad port, brackets
+        raise BadUrl(f"malformed URL {str(url)[:200]!r}: {e}") from e
+
+
+def _normalize(url: str) -> str:
+    if len(url) > 8000:
+        raise BadUrl("URL too long")
     parts = urlsplit(url.strip())
     scheme = parts.scheme.lower()
     if scheme not in ("http", "https"):
@@ -62,7 +75,18 @@ def domain_of(url: str) -> str:
     """The rate-limit unit: the host name (www.example.com and example.com are separate
     servers as far as politeness goes; they often share limits, so stay conservative
     by keeping per-host rates low)."""
-    return (urlsplit(url).hostname or "").lower()
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def host_of(url: str) -> str | None:
+    """The host of an untrusted URL, or None if it has none or is malformed."""
+    try:
+        return (urlsplit(url).hostname or "").lower().rstrip(".") or None
+    except ValueError:
+        return None
 
 
 def dedup_key(normalized_url: str) -> str:

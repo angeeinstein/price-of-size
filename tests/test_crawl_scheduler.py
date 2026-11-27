@@ -193,8 +193,12 @@ async def test_unreachable_robots_holds_pages_back(sessionmaker):
     async with sessionmaker() as s:
         n = await _node(s, "1.1.1.1")
         await _setup(s, 2, robots_status="unreachable")
-        h = await scheduler.lease_fetch(s, n, ["fetch_http", "fetch_robots"], 5, await _cfg(s))
-        # no pages; a fresh robots.txt job instead (the old one was marked done)
+        cfg = await _cfg(s)
+        # no pages, and robots.txt is not asked again before its retry time
+        assert await scheduler.lease_fetch(s, n, ["fetch_http", "fetch_robots"], 5, cfg) == []
+        await s.execute(update(DomainState).values(robots_next_check_at=func.now()))
+        h = await scheduler.lease_fetch(s, n, ["fetch_http", "fetch_robots"], 5, cfg)
+        # then a fresh robots.txt job (the old one was marked done), still no pages
         assert [x.job.type for x in h] == ["fetch_robots"]
 
 

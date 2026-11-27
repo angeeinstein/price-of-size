@@ -2,7 +2,7 @@
 
 Payload of fetch_http (set by the coordinator's crawl scheduler):
     url, source, delay_s (wait before fetching: the domain's rate slot),
-    keep_html (archive the full page), user_agent
+    interval_s (the domain's spacing), keep_html (archive the full page), user_agent
 Output metrics drive the coordinator's per-domain rate control.
 """
 
@@ -22,6 +22,7 @@ from pos_worker.fetch import blocks, breaker, http, sitemaps, snippets
 from pos_worker.handlers import JobContext, done, handler
 
 DEFAULT_UA = "PriceOfSizeBot/0.1"
+ROBOTS_MAX_BYTES = 500 * 1024  # RFC 9309: crawlers parse at least 500 KiB
 MAX_DELAY_S = 600
 _zstd = zstandard.ZstdCompressor(level=12)
 
@@ -107,10 +108,61 @@ def _decode(body: bytes, content_type: str | None) -> str:
     return body.decode("utf-8", errors="replace")
 
 
-async def _wait_for_slot(job: api.LeasedJob) -> None:
+class _DomainGate:
+    """One request at a time per domain on this worker, spaced by its interval.
+
+    Slots come from the coordinator, but a job may get its turn only after the
+    concurrency limiter let it through: without this gate, every overdue job for
+    one domain would go out at once when the limiter frees up.
+    """
+
+    def __init__(self) -> None:
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._last: dict[str, float] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def lock(self, domain: str) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop:  # locks are loop-bound (tests run several loops)
+            self._locks, self._last, self._loop = {}, {}, loop
+        if len(self._locks) > 5000:  # forget idle domains
+            for d in [d for d, lk in self._locks.items() if not lk.locked()]:
+                self._locks.pop(d, None)
+                self._last.pop(d, None)
+        return self._locks.setdefault(domain, asyncio.Lock())
+
+    async def wait(self, domain: str, interval_s: float) -> None:
+        loop = asyncio.get_running_loop()
+        last = self._last.get(domain)
+        if last is not None:
+            gap = last + interval_s - loop.time()
+            if gap > 0:
+                await asyncio.sleep(min(gap, MAX_DELAY_S))
+        self._last[domain] = loop.time()
+
+
+_GATE = _DomainGate()
+MIN_INTERVAL_S = 1.0
+
+
+async def _gated_fetch(job: api.LeasedJob, url: str, max_bytes: int):
+    """Wait for the rate slot, then fetch politely. None if the domain is paused."""
+    domain = urlsplit(url).hostname or ""
     delay = float(job.payload.get("delay_s", 0) or 0)
     if delay > 0:
         await asyncio.sleep(min(delay, MAX_DELAY_S))
+    interval = max(float(job.payload.get("interval_s") or 0), MIN_INTERVAL_S)
+    async with _GATE.lock(domain):
+        if breaker.paused(domain):
+            return None
+        async with _LIMIT:
+            if breaker.paused(domain):  # tripped while we waited for a slot
+                return None
+            await _GATE.wait(domain, interval)
+            client = client_for(str(job.payload.get("user_agent") or DEFAULT_UA))
+            fetched_at = datetime.now(UTC)
+            res = await http.fetch(client, url, max_bytes=max_bytes)
+    return fetched_at, res
 
 
 def _skipped(job: api.LeasedJob, domain: str) -> api.JobResult:
@@ -128,13 +180,10 @@ def _skipped(job: api.LeasedJob, domain: str) -> api.JobResult:
 async def fetch_http(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
     url = str(job.payload["url"])
     domain = urlsplit(url).hostname or ""
-    await _wait_for_slot(job)
-    if breaker.paused(domain):
+    got = await _gated_fetch(job, url, http.MAX_BODY_BYTES)
+    if got is None:
         return _skipped(job, domain)
-    client = client_for(str(job.payload.get("user_agent") or DEFAULT_UA))
-    async with _LIMIT:
-        fetched_at = datetime.now(UTC)
-        res = await http.fetch(client, url)
+    fetched_at, res = got
 
     text = (
         _decode(res.body, res.content_type)
@@ -194,6 +243,7 @@ async def fetch_http(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
         "reason": verdict.reason,
         "has_structured_data": bool(snip.get("has_structured_data")),
         "final_url": res.final_url,
+        "redirect_to": res.redirected_to,
     }
     # Every outcome is a result, never a retry from the worker's side: whether and when
     # to try again is the coordinator's decision (rate control, blocks, robots).
@@ -204,13 +254,13 @@ async def fetch_http(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
 async def fetch_robots(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
     url = str(job.payload["url"])  # https://host/robots.txt
     domain = urlsplit(url).hostname or ""
-    await _wait_for_slot(job)
-    if breaker.paused(domain):
+    got = await _gated_fetch(job, url, ROBOTS_MAX_BYTES)
+    if got is None:
         return _skipped(job, domain)
-    client = client_for(str(job.payload.get("user_agent") or DEFAULT_UA))
-    async with _LIMIT:
-        fetched_at = datetime.now(UTC)
-        res = await http.fetch(client, url, max_bytes=512 * 1024)
+    fetched_at, res = got
+    if res.error == "too_large":
+        # RFC 9309: parse at least the first 500 KiB, ignore the rest.
+        res.error = None
     body = res.body.decode("utf-8", errors="replace") if res.body else ""
     sha = (
         await _store(
@@ -267,13 +317,10 @@ async def fetch_sitemap(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
     raw store, and only counts travel in the result."""
     url = str(job.payload["url"])
     domain = urlsplit(url).hostname or ""
-    await _wait_for_slot(job)
-    if breaker.paused(domain):
+    got = await _gated_fetch(job, url, sitemaps.MAX_BYTES)
+    if got is None:
         return _skipped(job, domain)
-    client = client_for(str(job.payload.get("user_agent") or DEFAULT_UA))
-    async with _LIMIT:
-        fetched_at = datetime.now(UTC)
-        res = await http.fetch(client, url, max_bytes=sitemaps.MAX_BYTES)
+    fetched_at, res = got
     verdict = blocks.classify(res.status, res.body[:20_000].decode("utf-8", "replace"), res.error)
     breaker.trip(domain, verdict.kind, res.retry_after_s)
     parsed, parse_error = None, None

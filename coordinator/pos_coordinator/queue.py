@@ -33,6 +33,8 @@ from pos_shared.ids import uuid7
 
 RETRY_BASE_S = 30
 RETRY_MAX_S = 3600
+SKIP_RETRY_S = 120  # a job the worker skipped (domain paused there) comes back after this
+MAX_ATTEMPTS_WITH_SKIPS = 100  # a job skipped forever still ends some day
 
 
 @dataclass
@@ -196,6 +198,19 @@ def _apply(job: Job, r: JobResult) -> None:
         job.result = r.output
         job.last_error = None
         job.finished_at = func.now()
+    elif (
+        r.retryable
+        and (r.error or "").startswith("skipped:")
+        and job.max_attempts < MAX_ATTEMPTS_WITH_SKIPS
+    ):
+        # Not fetched at all (the worker's breaker held it back): the attempt does not
+        # count against the job. Attempt numbers stay unique (results quote them), so
+        # the budget grows instead of the counter going back.
+        job.status = "queued"
+        job.max_attempts += 1
+        job.last_error = r.error
+        job.not_before = func.now() + timedelta(seconds=SKIP_RETRY_S)
+        job.finished_at = None
     elif r.retryable and job.attempts < job.max_attempts:
         job.status = "queued"
         job.last_error = r.error

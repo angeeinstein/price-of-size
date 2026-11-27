@@ -18,6 +18,8 @@ def _no_proxy(monkeypatch):
     for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("NO_PROXY", "*")
+    # the fake shop lives on 127.0.0.x, which real workers refuse to fetch
+    monkeypatch.setenv("POS_WORKER_ALLOW_PRIVATE_TARGETS", "1")
 
 
 @pytest.fixture
@@ -222,11 +224,34 @@ async def test_captcha_blocks_the_domain(app, admin, sessionmaker, shop, tmp_pat
     )
     worker = await make_agent(app, admin, tmp_path / "w", "w")
 
+    async def suspected():
+        async with sessionmaker() as s:
+            kinds = (
+                await s.execute(select(DomainEvent.kind).where(DomainEvent.domain == "127.0.0.3"))
+            ).scalars()
+            return "block_suspected" in set(kinds)
+
     async def blocked():
         async with sessionmaker() as s:
             return (await s.get(DomainState, "127.0.0.3")).block_status == "blocked"
 
-    await _run_until(worker, blocked)
+    # A first challenge page pauses the domain; only a second one blocks it.
+    await _run_until(worker, suspected)
+    async with sessionmaker() as s:
+        d = await s.get(DomainState, "127.0.0.3")
+        g = (await s.execute(select(DomainEgressState))).scalars().all()
+        assert d.block_status != "blocked" and all(
+            x.cooldown_until for x in g if x.domain == d.domain
+        )
+        for x in g:  # an hour later
+            x.cooldown_until = None
+        for j in (await s.execute(select(Job).where(Job.domain == "127.0.0.3"))).scalars():
+            j.not_before = datetime.now(UTC)
+        await s.commit()
+    from pos_worker.fetch import breaker
+
+    breaker.reset()  # the worker's own pause (its process would have waited too)
+    await _run_until(await make_agent(app, admin, tmp_path / "w2", "w2"), blocked)
     await asyncio.sleep(0.5)
     async with sessionmaker() as s:
         d = await s.get(DomainState, "127.0.0.3")
@@ -242,6 +267,7 @@ async def test_captcha_blocks_the_domain(app, admin, sessionmaker, shop, tmp_pat
     assert [x["domain"] for x in domains] == ["127.0.0.3"]
     events = (await admin.get("/api/admin/domains/127.0.0.3/events")).json()
     assert events[0]["kind"] == "blocked"
+    assert "block_suspected" in [e["kind"] for e in events]
 
     r = await admin.patch("/api/admin/domains/127.0.0.3", json={"unblock": True})
     assert r.json()["block_status"] == "ok"

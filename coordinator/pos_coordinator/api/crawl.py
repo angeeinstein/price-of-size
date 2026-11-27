@@ -125,7 +125,7 @@ async def update_domain(domain: str, body: DomainUpdate, admin: SensitiveAdmin, 
                 select(DomainEgressState).where(DomainEgressState.domain == domain)
             )
         ).scalars():
-            g.cooldown_until, g.consecutive_403 = None, 0
+            g.cooldown_until, g.consecutive_403, g.consecutive_blocks = None, 0, 0
     overrides = dict(d.overrides or {})
     if body.rate_rps is not None:
         overrides["rate_rps"] = body.rate_rps

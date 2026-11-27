@@ -83,6 +83,8 @@ and watch `GET /api/admin/jobs/stats`. Interactive API docs: `/docs`.
 | robots.txt fetched first, enforced per setting, Crawl-delay | `crawl/robots.py`, `crawl/scheduler.py` |
 | Blocks (CAPTCHA, bot walls, repeated 403) logged, no evasion | `worker/.../fetch/blocks.py`, `crawl/feedback.py`, `domain_event` |
 | Raw evidence capture (JSON-LD, tables, breadcrumbs, price blocks, ...) | `worker/.../fetch/snippets.py` |
+| Bounded fetches: size after decompression, total deadline, public addresses only, same-host redirects | `worker/.../fetch/http.py` |
+| Per-domain spacing on the worker (overdue slots never burst) | `worker/.../fetch/handlers.py` (`_DomainGate`) |
 | HTML retention policy | `crawl/scheduler.py` (`_keep_html`), `fetch/handlers.py` |
 | Units, number formats per locale, net/gross, product vs. package | `pos_shared/units.py` |
 | Extraction tiers 1 (JSON-LD) and 3 (spec tables, dl, text) | `pos_shared/extract/` (`jsonld.py`, `spectext.py`, `pipeline.py`) |

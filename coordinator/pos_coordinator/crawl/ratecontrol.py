@@ -24,6 +24,10 @@ LATENCY_FACTOR = 3.0  # "rising response times": fast EWMA above 3x baseline...
 LATENCY_MIN_MS = 2000.0  # ...and above 2 s
 ERROR_RUN = 3  # consecutive 5xx/other errors count as a throttle signal
 FORBIDDEN_RUN = 5  # consecutive 403s turn into a block
+# A challenge page once may be a fluke (or a page we misread); the domain is paused
+# then, and blocked only if the next answer is a refusal again.
+BLOCK_RUN = 2
+SUSPECT_PAUSE_S = 3600.0
 
 
 @dataclass
@@ -35,6 +39,7 @@ class RateState:
     latency_base_ms: float | None = None
     consecutive_errors: int = 0
     consecutive_403: int = 0
+    consecutive_blocks: int = 0
 
 
 @dataclass(frozen=True)
@@ -54,8 +59,15 @@ def ceiling(max_rps: float, crawl_delay_s: float | None, override_rps: float | N
     return top
 
 
-def _throttle(s: RateState, reason: str, retry_after_s: float | None) -> Decision:
-    s.rate_rps = max(s.rate_rps * DECREASE_FACTOR, FLOOR_RPS)
+def clamp(rate: float, top_rps: float) -> float:
+    """Between the floor and the ceiling; the ceiling (crawl-delay, override) wins."""
+    return min(max(rate, FLOOR_RPS), top_rps)
+
+
+def _throttle(
+    s: RateState, reason: str, retry_after_s: float | None, top_rps: float = float("inf")
+) -> Decision:
+    s.rate_rps = clamp(s.rate_rps * DECREASE_FACTOR, top_rps)
     s.throttle_count += 1
     s.clean_streak = 0
     cooldown = min(BASE_COOLDOWN_S * 2 ** (s.throttle_count - 1), MAX_COOLDOWN_S)
@@ -76,7 +88,12 @@ def observe(
     s.rate_rps = min(s.rate_rps, top_rps)
     if verdict == "blocked":
         s.clean_streak = 0
-        return Decision(s.rate_rps, MAX_COOLDOWN_S, "blocked", reason)
+        s.consecutive_blocks += 1
+        if s.consecutive_blocks >= BLOCK_RUN:
+            return Decision(s.rate_rps, MAX_COOLDOWN_S, "blocked", reason)
+        s.rate_rps = clamp(s.rate_rps * DECREASE_FACTOR, top_rps)
+        return Decision(s.rate_rps, SUSPECT_PAUSE_S, "block_suspected", reason)
+    s.consecutive_blocks = 0
 
     if reason == "http_403":
         s.consecutive_403 += 1
@@ -87,13 +104,13 @@ def observe(
 
     if verdict == "throttled":
         s.consecutive_errors = 0
-        return _throttle(s, reason or "throttled", retry_after_s)
+        return _throttle(s, reason or "throttled", retry_after_s, top_rps)
 
     if verdict == "error":
         s.consecutive_errors += 1
         if s.consecutive_errors >= ERROR_RUN:
             s.consecutive_errors = 0
-            return _throttle(s, f"repeated_{reason}", retry_after_s)
+            return _throttle(s, f"repeated_{reason}", retry_after_s, top_rps)
         return Decision(s.rate_rps)
     s.consecutive_errors = 0
 
@@ -114,7 +131,7 @@ def observe(
             and s.latency_ewma_ms > LATENCY_MIN_MS
         ):
             s.latency_ewma_ms = s.latency_base_ms  # one signal per episode
-            return _throttle(s, "rising_latency", None)
+            return _throttle(s, "rising_latency", None, top_rps)
 
     s.clean_streak += 1
     if s.clean_streak >= CLEAN_RUN:

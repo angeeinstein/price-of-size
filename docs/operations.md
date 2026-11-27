@@ -172,8 +172,18 @@ URLs are normalised (tracking parameters dropped) and queued once. Per domain:
   by 10 % up to `max_rate_rps`; 429/503/timeouts/rising latency halve it and
   pause the domain (Retry-After honoured, cooldown doubling up to 6 h).
 * New domains get one request at a time until 10 pages answered (slow start).
-* CAPTCHAs, bot walls and five 403s in a row block the domain. Nothing tries to
-  get around a block. `GET /api/admin/domains?blocked=true`, history in
+* A challenge page (CAPTCHA, bot wall) pauses a domain for an hour
+  (`block_suspected`); a second one in a row, or five 403s in a row, blocks it.
+  CAPTCHA widgets on ordinary pages (a newsletter form) do not count. Nothing
+  tries to get around a block.
+* robots.txt is the site's wish, not a per-IP budget: its `Crawl-delay` (and a
+  per-domain `rate_rps` override) hold across all nodes and egress groups.
+* Workers fetch public addresses only: a sitemap or redirect pointing into the
+  node's own network (router, NAS, cloud metadata) is refused
+  (`blocked_address`). Redirects to another host are not followed by the worker;
+  a redirect within the same site (`www.` or not) is queued for that host, through
+  its robots.txt and rate schedule. For a lab shop on a private address, set
+  `POS_WORKER_ALLOW_PRIVATE_TARGETS=1` on that node. `GET /api/admin/domains?blocked=true`, history in
   `GET /api/admin/domains/<domain>/events`, unblock or cap a domain with
   `PATCH /api/admin/domains/<domain>` (`{"unblock": true}`, `{"rate_rps": 0.1}`).
 * The crawler identifies itself with `user_agent` (default `PriceOfSizeBot/0.1`).

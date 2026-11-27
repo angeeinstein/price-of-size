@@ -13,26 +13,35 @@ A source's config (table `source`, type `scraper`) steers discovery:
 
 Sitemap indexes enqueue their child sitemaps; urlsets enqueue the URLs that
 match the pattern (all URLs if there is none). Per the sitemaps protocol, URLs
-on other hosts than the sitemap's are ignored unless allowed explicitly.
+on other hosts than the sitemap's are ignored unless allowed explicitly; so are
+`Sitemap:` lines in a robots.txt that point to another host.
+
+Sitemaps are untrusted input: an index may list itself or form cycles, so
+nesting is capped and sitemaps (and pages) fetched recently are not queued again.
+One broken sitemap result never blocks the rest of a result batch.
 """
 
 import json
 import logging
 import re
+from datetime import timedelta
 from typing import Any
-from urllib.parse import urlsplit
 
 import zstandard
+from sqlalchemy import exc as sa_exc
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pos_coordinator.crawl import scheduler
+from pos_coordinator.crawl import scheduler, urls
 from pos_coordinator.models import DomainState, Job, Source
-from pos_coordinator.rawstore import RawStore
+from pos_coordinator.rawstore import RawStore, StoreUnavailable
 from pos_shared.api import JobOutcome, JobResult
 
 log = logging.getLogger(__name__)
 SITEMAP_PRIORITY = 50  # after robots.txt, before pages
+MAX_SITEMAP_DEPTH = 4  # index -> index -> ... -> urlset
+SITEMAP_REFETCH = timedelta(hours=12)  # cycles and repeated indexes
+PAGE_REFETCH = timedelta(hours=20)  # one discovery round re-queues a page once a day
 
 
 class SourceConfigError(ValueError):
@@ -60,10 +69,14 @@ async def discover(session: AsyncSession, source: Source) -> dict[str, int]:
     and its seed pages."""
     cfg = source.config or {}
     sitemap_urls = list(cfg.get("sitemaps", []))
+    allowed = {d.lower() for d in cfg.get("allow_domains", [])}
     for domain in cfg.get("domains", []):
         ds = await session.get(DomainState, domain)
         if ds is not None and ds.sitemaps:
-            sitemap_urls += ds.sitemaps
+            # robots.txt may name any host; only the shop's own (or allowed) hosts count
+            sitemap_urls += [
+                u for u in ds.sitemaps if urls.host_of(u) in {domain.lower(), *allowed}
+            ]
     s = await scheduler.enqueue_urls(
         session, sitemap_urls, source.name, SITEMAP_PRIORITY, job_type="fetch_sitemap"
     )
@@ -98,34 +111,61 @@ async def process_results(
                 if name
                 else None
             )
-        await _follow(session, job, evidence, sources[name])
+        try:
+            async with session.begin_nested():
+                await _follow(session, job, evidence, sources[name])
+        except (sa_exc.DBAPIError, StoreUnavailable):
+            raise  # deadlocks are retried by the caller; the store comes back
+        except Exception:  # noqa: BLE001 - a malformed sitemap must not block the batch
+            log.exception("sitemap %s: following its URLs failed", job.payload.get("url"))
 
 
 async def _follow(session: AsyncSession, job: Job, evidence: dict, source: Source | None) -> None:
     cfg = (source.config if source else None) or {}
     name = source.name if source else job.payload.get("source")
-    host = urlsplit(job.payload["url"]).hostname or ""
-    allowed_hosts = {host, *cfg.get("allow_domains", [])}
+    host = urls.host_of(job.payload["url"]) or ""
+    allowed_hosts = {host, *(d.lower() for d in cfg.get("allow_domains", []))}
 
-    def same_site(u: str) -> bool:
-        return (urlsplit(u).hostname or "") in allowed_hosts
+    def same_site(u: Any) -> bool:
+        return isinstance(u, str) and urls.host_of(u) in allowed_hosts
 
-    children = [u for u in evidence.get("sitemaps", []) if same_site(u)]
-    if children:
+    depth = int(job.payload.get("depth") or 0) + 1
+    me = _normalized(job.payload["url"])
+    children = [u for u in evidence.get("sitemaps", []) if same_site(u) and _normalized(u) != me]
+    if children and depth <= MAX_SITEMAP_DEPTH:
         await scheduler.enqueue_urls(
-            session, children, name, SITEMAP_PRIORITY, job_type="fetch_sitemap"
+            session,
+            children,
+            name,
+            SITEMAP_PRIORITY,
+            job_type="fetch_sitemap",
+            extra_payload={"depth": depth},
+            skip_done_within=SITEMAP_REFETCH,
         )
+    elif children:
+        log.warning("sitemap %s: nested too deep, children ignored", job.payload["url"])
     pattern = re.compile(cfg["product_url_pattern"]) if cfg.get("product_url_pattern") else None
     pages = [
         e["loc"]
         for e in evidence.get("urls", [])
-        if e.get("loc") and same_site(e["loc"]) and (pattern is None or pattern.search(e["loc"]))
+        if isinstance(e, dict)
+        and same_site(e.get("loc"))
+        and (pattern is None or pattern.search(e["loc"]))
     ]
     if pages:
-        report = await scheduler.enqueue_urls(session, pages, name, int(cfg.get("priority", 0)))
+        report = await scheduler.enqueue_urls(
+            session, pages, name, int(cfg.get("priority", 0)), skip_done_within=PAGE_REFETCH
+        )
         log.info(
             "sitemap %s: %d pages queued (%d known)",
             job.payload["url"],
             report.queued,
             report.duplicates,
         )
+
+
+def _normalized(url: Any) -> str | None:
+    try:
+        return urls.normalize(url) if isinstance(url, str) else None
+    except urls.BadUrl:
+        return None

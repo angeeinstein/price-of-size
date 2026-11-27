@@ -41,10 +41,22 @@ class Verdict:
     reason: str | None = None
 
 
+# Widgets that also appear on ordinary pages (a newsletter form with reCAPTCHA, a
+# DataDome tag in every page of a protected shop): a refusal only on a refusal
+# status or on a small page that is little else than the challenge.
+WEAK_MARKERS = {"captcha:recaptcha", "captcha:hcaptcha", "captcha:turnstile", "botwall:datadome"}
+CHALLENGE_PAGE_CHARS = 15_000
+# Final for this URL, not a sign of an overloaded server: never retried.
+PERMANENT_ERRORS = {"blocked_address", "bad_url"}
+
+
 def classify(status: int | None, body_head: str, error: str | None = None) -> Verdict:
-    if error is not None:
+    if error in PERMANENT_ERRORS:
+        return Verdict("gone", error)
+    if error is not None and error != "too_large":
         return Verdict("throttled" if error in ("timeout", "connect") else "error", error)
-    assert status is not None
+    if status is None:
+        return Verdict("error", error or "no_status")
     if status == 429:
         return Verdict("throttled", "http_429")
     if status == 503:
@@ -52,8 +64,12 @@ def classify(status: int | None, body_head: str, error: str | None = None) -> Ve
         marker = _marker(body_head)
         return Verdict("blocked", marker) if marker else Verdict("throttled", "http_503")
     marker = _marker(body_head)
-    if marker and status in (200, 401, 403):
+    if marker and status in (401, 403):
         return Verdict("blocked", marker)
+    if marker and status == 200:
+        weak = marker in WEAK_MARKERS
+        if not weak or len(body_head) < CHALLENGE_PAGE_CHARS:
+            return Verdict("blocked", marker)
     if status == 403:
         return Verdict("throttled", "http_403")  # repeated 403s escalate to a block
     if status in (404, 410):

@@ -13,18 +13,23 @@ Every change of rate, cooldown, block or robots rules is logged as a
 `domain_event`.
 """
 
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import exc as sa_exc
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pos_coordinator.crawl import ratecontrol, robots
+from pos_coordinator.crawl import ratecontrol, robots, scheduler, urls
 from pos_coordinator.crawl.scheduler import FETCH_TYPES, CrawlConfig, egress_group
 from pos_coordinator.models import DomainEgressState, DomainEvent, DomainState, Job, Node
 from pos_shared.api import JobOutcome, JobResult
 
+log = logging.getLogger(__name__)
 RETRY_VERDICTS = ("throttled", "error", "blocked")
+MAX_REDIRECT_HOPS = 3  # across hosts; same-host redirects are followed by the worker
 
 
 def reinterpret(job_type: str, result: JobResult) -> JobResult:
@@ -59,26 +64,82 @@ async def apply(
         (r for r in results if (j := jobs.get(r.job_id)) is not None and j.domain),
         key=lambda r: jobs[r.job_id].domain,
     )
+    redirects: list[tuple[Job, str]] = []
     for r in ordered:
         job = jobs.get(r.job_id)
         if job is None or job.type not in FETCH_TYPES or not job.domain or not r.output:
             continue
         ds = await session.get(DomainState, job.domain, with_for_update=True)
-        eg = await session.get(DomainEgressState, (job.domain, group), with_for_update=True)
-        if ds is None or eg is None:
+        if ds is None:
             continue
-        out = r.output
-        if job.type == "fetch_robots":
-            _apply_robots(session, ds, out, now)
-            if ds.robots_crawl_delay_s:  # the first page waits for the delay too
-                first = now + timedelta(seconds=ds.robots_crawl_delay_s)
-                eg.next_slot_at = max(eg.next_slot_at or first, first)
-        else:
-            ds.pages_fetched = (ds.pages_fetched or 0) + 1
-            ds.last_fetch_at = now
-        _apply_rate(session, ds, eg, out, now, cfg)
-        ds.updated_at = func.now()
-        eg.updated_at = func.now()
+        eg = await session.get(DomainEgressState, (job.domain, group), with_for_update=True)
+        if eg is None:
+            # The node's public IP changed since the lease: its answer (a 429, a block
+            # page, robots.txt) still counts, for the group it now belongs to.
+            await session.execute(
+                pg_insert(DomainEgressState)
+                .values(domain=job.domain, egress_group=group, rate_rps=cfg.base_rate_rps)
+                .on_conflict_do_nothing(index_elements=["domain", "egress_group"])
+            )
+            eg = await session.get(
+                DomainEgressState, (job.domain, group), with_for_update=True, populate_existing=True
+            )
+            if eg is None:
+                continue
+        try:
+            # Worker output is untrusted: a malformed value is logged and skipped, it
+            # must not fail the whole batch (the node would resend it forever).
+            async with session.begin_nested():
+                _apply_one(session, job, ds, eg, r.output, now, cfg)
+        except sa_exc.DBAPIError:
+            raise  # deadlocks: the caller retries the transaction
+        except Exception:  # noqa: BLE001
+            log.exception("feedback for job %s failed", job.id)
+            continue
+        target = r.output.get("redirect_to")
+        if job.type == "fetch_http" and isinstance(target, str):
+            redirects.append((job, target))
+    for job, target in redirects:
+        await _follow_redirect(session, job, target)
+
+
+def _apply_one(session, job: Job, ds: DomainState, eg: DomainEgressState, out, now, cfg) -> None:
+    if job.type == "fetch_robots":
+        _apply_robots(session, ds, out, now)
+        if ds.robots_crawl_delay_s:  # the first page waits for the delay too
+            first = now + timedelta(seconds=ds.robots_crawl_delay_s)
+            eg.next_slot_at = max(eg.next_slot_at or first, first)
+    else:
+        ds.pages_fetched = (ds.pages_fetched or 0) + 1
+        ds.last_fetch_at = now
+    _apply_rate(session, ds, eg, out, now, cfg)
+    ds.updated_at = func.now()
+    eg.updated_at = func.now()
+
+
+def same_site(a: str, b: str) -> bool:
+    """www.shop.example and shop.example (and shop.example/at) are one site; another
+    registrable host (a tracker, a login service, a marketplace) is not."""
+    ha, hb = urls.host_of(a), urls.host_of(b)
+    if not ha or not hb:
+        return False
+    return ha.removeprefix("www.") == hb.removeprefix("www.")
+
+
+async def _follow_redirect(session: AsyncSession, job: Job, target: str) -> None:
+    """A page moved to another host: fetch it there, through that host's robots.txt
+    and rate schedule, if it is the same site and not a redirect loop."""
+    hops = int(job.payload.get("redirect_hops") or 0) + 1
+    if hops > MAX_REDIRECT_HOPS or not same_site(job.payload.get("url", ""), target):
+        return
+    await scheduler.enqueue_urls(
+        session,
+        [target],
+        job.payload.get("source"),
+        job.priority,
+        extra_payload={"redirect_hops": hops},
+        skip_done_within=timedelta(days=1),
+    )
 
 
 def _apply_robots(session: AsyncSession, ds: DomainState, out: dict, now: datetime) -> None:
@@ -126,6 +187,7 @@ def _apply_rate(
         latency_base_ms=eg.latency_base_ms,
         consecutive_errors=eg.consecutive_errors,
         consecutive_403=eg.consecutive_403,
+        consecutive_blocks=eg.consecutive_blocks,
     )
     old_rate = eg.rate_rps
     top = ratecontrol.ceiling(
@@ -146,6 +208,7 @@ def _apply_rate(
     eg.latency_base_ms = state.latency_base_ms
     eg.consecutive_errors = state.consecutive_errors
     eg.consecutive_403 = state.consecutive_403
+    eg.consecutive_blocks = state.consecutive_blocks
     if d.cooldown_s:
         until = now + timedelta(seconds=d.cooldown_s)
         eg.cooldown_until = max(eg.cooldown_until or until, until)

@@ -103,7 +103,11 @@ async def enqueue_urls(
     source: str | None,
     priority: int = 0,
     job_type: str = "fetch_http",
+    extra_payload: dict[str, Any] | None = None,
+    skip_done_within: timedelta | None = None,
 ) -> EnqueueReport:
+    """Queue fetch jobs, once per normalised URL. `skip_done_within` also skips URLs
+    fetched successfully that recently (sitemap cycles, repeated discovery)."""
     report = EnqueueReport(invalid=[])
     rows, domains, seen = [], {}, set()
     for raw in raw_urls:
@@ -125,12 +129,26 @@ async def enqueue_urls(
             {
                 "id": uuid7(),
                 "type": job_type,
-                "payload": {"url": url, "source": source},
+                "payload": {**(extra_payload or {}), "url": url, "source": source},
                 "priority": priority,
                 "domain": domain,
                 "dedup_key": key,
             }
         )
+    if rows and skip_done_within is not None:
+        recent = set(
+            (
+                await session.execute(
+                    select(Job.dedup_key).where(
+                        Job.dedup_key.in_([r["dedup_key"] for r in rows]),
+                        Job.status == "done",
+                        Job.finished_at > func.now() - skip_done_within,
+                    )
+                )
+            ).scalars()
+        )
+        report.duplicates += sum(1 for r in rows if r["dedup_key"] in recent)
+        rows = [r for r in rows if r["dedup_key"] not in recent]
     if not rows:
         return report
     await ensure_domains(session, domains)
@@ -206,6 +224,9 @@ async def lease_fetch(
     now: datetime = (await session.execute(select(func.now()))).scalar_one()
     horizon = now + timedelta(seconds=LOOKAHEAD_S)
 
+    # Domains that cannot be served right now (robots.txt pending, first fetch in
+    # flight) are pushed back a little in _lease_domain, so they never hide ready ones;
+    # and more candidates than needed are looked at.
     candidates = (
         (
             await session.execute(
@@ -222,6 +243,28 @@ async def lease_fetch(
                       SELECT 1 FROM job j
                       WHERE j.domain = d.domain AND j.status = 'queued'
                         AND j.type = ANY(:types) AND j.not_before <= :now)
+                  -- servable now: usable robots.txt rules, or a robots.txt fetch to hand
+                  -- out (or to create, when due); domains waiting for one are skipped
+                  AND (
+                      d.robots_status IN ('rules', 'none')
+                      OR EXISTS (
+                          SELECT 1 FROM job r
+                          WHERE r.domain = d.domain AND r.type = 'fetch_robots'
+                            AND r.status = 'queued' AND r.not_before <= :now
+                            AND 'fetch_robots' = ANY(:types))
+                      OR (
+                          (d.robots_next_check_at IS NULL OR d.robots_next_check_at <= :now)
+                          AND NOT EXISTS (
+                              SELECT 1 FROM job r
+                              WHERE r.domain = d.domain AND r.type = 'fetch_robots'
+                                AND r.status IN ('queued', 'leased'))))
+                  -- slow start: a new domain with its first fetch in flight is not ready
+                  AND NOT (
+                      d.pages_fetched < :slow_start
+                      AND EXISTS (
+                          SELECT 1 FROM job f
+                          WHERE f.domain = d.domain AND f.status = 'leased'
+                            AND f.type = ANY(:fetch_types)))
                 ORDER BY e.next_slot_at NULLS FIRST, d.domain
                 LIMIT :n
                 """
@@ -231,7 +274,9 @@ async def lease_fetch(
                     "now": now,
                     "horizon": horizon,
                     "types": types,
-                    "n": min(max_jobs, MAX_DOMAINS_PER_LEASE),
+                    "n": min(max_jobs * 2 + 8, MAX_DOMAINS_PER_LEASE),
+                    "slow_start": SLOW_START_PAGES,
+                    "fetch_types": list(FETCH_TYPES),
                 },
             )
         )
@@ -306,8 +351,10 @@ async def _lease_domain(
     # Pages only with usable rules: "unreachable" (5xx/network) means disallow-all
     # until robots.txt can be fetched again (RFC 9309), so pages wait for it.
     rules_usable = ds.robots_status in ("rules", "none")
+    # Refetched when due: after 24 h, or an hour after it was unreachable (not on
+    # every lease: a failing robots.txt must not be hammered).
     due = ds.robots_next_check_at is None or ds.robots_next_check_at <= now
-    if not rules_usable or due:
+    if due:
         sample = (
             await session.execute(
                 select(Job.payload["url"].astext)
@@ -318,17 +365,35 @@ async def _lease_domain(
         if sample:  # idempotent: at most one active robots job per domain
             await ensure_robots_job(session, domain, urls.robots_url(sample))
     allowed_types = types if rules_usable else [t for t in types if t == "fetch_robots"]
-    if not allowed_types:
+    has_allowed = (
+        await session.execute(
+            select(Job.id)
+            .where(
+                Job.domain == domain,
+                Job.status == "queued",
+                Job.type.in_(allowed_types),
+                Job.not_before <= now,
+            )
+            .limit(1)
+        )
+    ).first()
+    if not allowed_types or not has_allowed:
         log.debug("%s: waiting for robots.txt (%s)", domain, ds.robots_status)
+        _push_back(eg, now)
         return []
 
     override = (ds.overrides or {}).get("rate_rps")
     top = ratecontrol.ceiling(cfg.max_rate_rps, ds.robots_crawl_delay_s, override)
-    rate = max(min(eg.rate_rps, top), ratecontrol.FLOOR_RPS)
+    rate = ratecontrol.clamp(eg.rate_rps, top)  # the floor never beats crawl-delay
     interval = 1.0 / rate
+    # The domain as a whole (all egress groups): robots.txt's crawl-delay and an
+    # operator's override are the site's wishes, not per-IP budgets; the optional
+    # global cap too. One schedule across groups enforces them.
     cap = cfg.max_total_rate_per_domain
+    domain_top = ratecontrol.ceiling(cap or float("inf"), ds.robots_crawl_delay_s, override)
+    global_gap = 1.0 / domain_top if domain_top != float("inf") else 0.0
     t_group = max(now, eg.next_slot_at or now)
-    t_global = max(now, ds.next_global_slot_at or now) if cap else now
+    t_global = max(now, ds.next_global_slot_at or now) if global_gap else now
 
     slots = int((horizon - max(t_group, t_global)).total_seconds() / interval) + 1
     want = max(0, min(room, slots, MAX_BATCH_PER_DOMAIN))
@@ -343,6 +408,7 @@ async def _lease_domain(
         want = 0 if in_flight else min(want, 1)
     if want == 0:
         log.debug("%s: no slot (slow start in flight or schedule full)", domain)
+        _push_back(eg, now)
         return []
     jobs = (
         (
@@ -385,24 +451,41 @@ async def _lease_domain(
             break
         delay = (slot - now).total_seconds()
         t_group = slot + timedelta(seconds=interval * random.uniform(1 - JITTER, 1 + JITTER))
-        if cap:
-            t_global = slot + timedelta(seconds=1.0 / cap)
+        if global_gap:
+            t_global = slot + timedelta(seconds=global_gap)
         job.status = "leased"
         job.node_id = node.id
         job.attempts = job.attempts + 1
         job.lease_expires_at = now + timedelta(seconds=cfg.lease_s + delay)
         job.updated_at = func.now()
-        extra: dict[str, Any] = {"delay_s": round(delay, 3), "user_agent": cfg.user_agent}
+        extra: dict[str, Any] = {
+            "delay_s": round(delay, 3),
+            # the worker keeps its own requests to the domain at least this far apart
+            "interval_s": round(max(interval * (1 - JITTER), global_gap), 3),
+            "user_agent": cfg.user_agent,
+        }
         if job.type == "fetch_http":
             extra["keep_html"] = _keep_html(ds, cfg)
         out.append(Handout(job=job, delay_s=delay, extra=extra))
 
     eg.next_slot_at = t_group
     eg.updated_at = func.now()
-    if cap:
+    if global_gap:
         ds.next_global_slot_at = t_global
     await session.flush()
     return out
+
+
+PUSH_BACK_S = 3.0  # enough to move behind ready domains; a first fetch takes seconds
+
+
+def _push_back(eg: DomainEgressState, now: datetime) -> None:
+    """A domain that cannot be served now moves back in the candidate order (its slot
+    never advances otherwise, and it would come first in every lease)."""
+    later = now + timedelta(seconds=PUSH_BACK_S)
+    if eg.next_slot_at is None or eg.next_slot_at < later:
+        eg.next_slot_at = later
+        eg.updated_at = func.now()
 
 
 def _keep_html(ds: DomainState, cfg: CrawlConfig) -> bool:

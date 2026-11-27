@@ -4,6 +4,7 @@ Status handling as in RFC 9309: 4xx = no rules (allow all), 5xx / unreachable =
 disallow all until it can be fetched again, 200 = the rules.
 """
 
+import re
 import urllib.robotparser
 from functools import lru_cache
 
@@ -22,10 +23,34 @@ def status_kind(status: int | None) -> str:
     return "none"  # e.g. 3xx loops that ended elsewhere: no usable rules
 
 
+_OTHER = "x-other-crawler"  # stands for every group that is not ours or "*"
+
+
+def _token(value: str) -> str:
+    return value.split("/", 1)[0].strip().lower()
+
+
+def _our_groups(text: str, agent: str) -> list[str]:
+    """robotparser matches user-agent lines by substring ("User-agent: bot" would apply
+    to us, "User-agent: PriceOfSizeBot/1.0" would not). RFC 9309 matches the product
+    token, case-insensitively: rewrite the lines so robotparser does exactly that."""
+    ours = _token(agent)
+    out = []
+    for raw in text.splitlines():
+        m = re.match(r"\s*user-agent\s*:\s*([^#]*)", raw, re.I)
+        if m:
+            token = _token(m.group(1))
+            name = "*" if token == "*" else ours if token == ours else _OTHER
+            out.append(f"User-agent: {name}")
+        else:
+            out.append(raw)
+    return out
+
+
 @lru_cache(maxsize=4096)
-def _parser(text: str) -> urllib.robotparser.RobotFileParser:
+def _parser(text: str, agent: str = PRODUCT_TOKEN) -> urllib.robotparser.RobotFileParser:
     rp = urllib.robotparser.RobotFileParser()
-    rp.parse(text.splitlines())
+    rp.parse(_our_groups(text, agent))
     return rp
 
 
@@ -34,7 +59,7 @@ def allowed(kind: str, text: str | None, url: str, agent: str = PRODUCT_TOKEN) -
         return True
     if kind == "unreachable":
         return False
-    return _parser(text or "").can_fetch(agent, url)
+    return _parser(text or "", agent).can_fetch(_token(agent), url)
 
 
 def crawl_delay(kind: str, text: str | None, agent: str = PRODUCT_TOKEN) -> float | None:
@@ -47,7 +72,7 @@ def crawl_delay(kind: str, text: str | None, agent: str = PRODUCT_TOKEN) -> floa
     if kind != "rules" or not text:
         return None
     groups = _delay_groups(text)
-    values = groups.get(agent.lower()) or groups.get("*") or []
+    values = groups.get(_token(agent)) or groups.get("*") or []
     return max(values) if values else None
 
 
@@ -75,16 +100,19 @@ def _delay_groups(text: str) -> dict[str, list[float]]:
             except ValueError:
                 continue
         elif key == "request-rate" and "/" in value:
-            try:
-                n, secs = value.split("/", 1)
-                secs = secs.strip().rstrip("smhSMH") or "1"
-                delay = float(secs) / float(n)
-            except (ValueError, ZeroDivisionError):
+            # "1/5" (seconds), "1/10s", "1/1m", "3/1h", optionally a time window after it
+            m = re.match(r"\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*([smh]?)", value, re.I)
+            if not m:
                 continue
+            n, span, unit = float(m.group(1)), float(m.group(2)), m.group(3).lower()
+            seconds = span * {"": 1, "s": 1, "m": 60, "h": 3600}[unit]
+            if n <= 0:
+                continue
+            delay = seconds / n
         if delay is not None and delay >= 0:
             for a in agents:
                 # product-token match: "PriceOfSizeBot" also matches "priceofsizebot/0.1"
-                groups.setdefault(a.split("/")[0], []).append(min(delay, 3600.0))
+                groups.setdefault(_token(a), []).append(min(delay, 3600.0))
     return groups
 
 

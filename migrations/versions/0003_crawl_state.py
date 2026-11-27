@@ -53,6 +53,10 @@ def upgrade() -> None:
         "domain_egress_state",
         sa.Column("consecutive_403", sa.Integer(), server_default="0", nullable=False),
     )
+    op.add_column(
+        "domain_egress_state",
+        sa.Column("consecutive_blocks", sa.Integer(), server_default="0", nullable=False),
+    )
     op.add_column("domain_state", sa.Column("robots_status", sa.Text(), nullable=True))
     op.add_column("domain_state", sa.Column("robots_http_status", sa.SmallInteger(), nullable=True))
     op.add_column("domain_state", sa.Column("robots_crawl_delay_s", sa.Float(), nullable=True))
@@ -112,6 +116,7 @@ def downgrade() -> None:
     op.drop_column("domain_state", "robots_crawl_delay_s")
     op.drop_column("domain_state", "robots_http_status")
     op.drop_column("domain_state", "robots_status")
+    op.drop_column("domain_egress_state", "consecutive_blocks")
     op.drop_column("domain_egress_state", "consecutive_403")
     op.drop_column("domain_egress_state", "consecutive_errors")
     op.drop_column("domain_egress_state", "latency_base_ms")
