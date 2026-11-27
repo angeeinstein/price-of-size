@@ -278,6 +278,30 @@ async def test_activating_two_versions_at_once_leaves_one_active(app):
     assert len(active) == 1
 
 
+async def test_activating_a_version_loaded_before_another_was_activated(app):
+    sm = app.state.sessionmaker
+    async with sm() as s:
+        a = Parser(domain="holz.example", version=1, kind="declarative", artifact=SPEC,
+                   validation_score=1.0, active=True)  # fmt: skip
+        b = Parser(domain="holz.example", version=2, kind="declarative", artifact=SPEC,
+                   validation_score=1.0, active=False)  # fmt: skip
+        s.add_all([a, b])
+        await s.commit()
+        ids = (a.id, b.id)
+    async with sm() as first:
+        stale = await first.get(Parser, ids[0])  # active, as loaded
+        await first.commit()  # (expire_on_commit off: it stays as loaded)
+        async with sm() as second:  # meanwhile B becomes the active version
+            await site_parsers.set_active(second, await second.get(Parser, ids[1]), True, "t")
+            await second.commit()
+        await site_parsers.set_active(first, stale, True, "test")
+        await first.commit()
+        assert stale.active
+    async with sm() as s:
+        active = (await s.execute(select(Parser.version).where(Parser.active))).scalars().all()
+    assert active == [1]
+
+
 def test_condensed_html_for_the_llm():
     t = site_parser.condensed_html(_html(1))
     assert t.startswith("<body>") and "tracking" not in t and "color:red" not in t

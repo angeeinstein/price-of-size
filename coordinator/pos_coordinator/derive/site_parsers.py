@@ -436,17 +436,19 @@ async def store_parser(
 
 async def set_active(session: AsyncSession, p: Parser, on: bool, actor: str) -> None:
     await lock_domain(session, p.domain)
+    # under the lock, the state as committed by whoever held it before: the row as
+    # loaded may be stale (another version activated meanwhile)
+    await session.refresh(p)
     if on:
         site_parser.parse(p.artifact)  # never activate what cannot run
-        # (under the lock: a version another transaction activated is committed, and
-        # this statement sees it)
         await session.execute(
             update(Parser)
             .where(Parser.domain == p.domain, Parser.active, Parser.id != p.id)
             .values(active=False)
         )
-        await session.flush()
-    p.active = on
+    # in SQL, not by the attribute: an unchanged attribute writes nothing
+    await session.execute(update(Parser).where(Parser.id == p.id).values(active=on))
+    await session.refresh(p)
     session.add(
         AuditLog(
             actor=actor,
