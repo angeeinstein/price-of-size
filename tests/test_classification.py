@@ -643,3 +643,23 @@ async def test_none_fits_withdraws_an_earlier_llm_label(sessionmaker):
         assert (await s.get(Product, a)).category_id is None
     assert await _current(sessionmaker, a) is None
     assert (await _current(sessionmaker, b)).tier == "manual"  # a person's stays
+
+
+async def test_paths_that_cannot_be_sampled_do_not_block_proposals(sessionmaker, monkeypatch):
+    monkeypatch.setattr(proposals, "PER_ROUND", 1)
+    await _taxonomy(sessionmaker)
+    async with sessionmaker() as s:  # the biggest path: products without a title
+        for i in range(10):
+            s.add(Product(match_key=f"url:https://shop.example/x{i}", source="shop",
+                          attributes={"category_path": ["Sale"]}))  # fmt: skip
+        await s.commit()
+    await _products(sessionmaker, ["Regal A", "Regal B", "Regal C"], path=["Regale"])
+    await _embed_all(sessionmaker)
+    fake = FakeClient()
+    llm = LlmService(sessionmaker, lambda: fake)
+    assert await proposals.schedule(sessionmaker, llm, force=True) == {
+        "mapping_proposals_queued": 1
+    }
+    async with sessionmaker() as s:
+        row = (await s.execute(select(LlmBatch))).scalar_one()
+    assert row.requests["0"]["meta"]["path"] == "Regale"

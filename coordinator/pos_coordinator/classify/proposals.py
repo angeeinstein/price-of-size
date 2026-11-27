@@ -1,8 +1,8 @@
 """LLM proposals for shop category mappings (tier 1), for a person to spot-check.
 
-A shop's category path with at least `category_mapping_min_products` products and
-no mapping yet goes to the stronger model (the `category_mapping` role, Sonnet by
-default) with a few of its product titles and a shortlist of taxonomy nodes: the
+A shop's category path with at least `category_mapping_min_products` products
+(with a title and a vector) and no mapping yet goes to the stronger model (the
+`category_mapping` role, Sonnet by default) with a few of its product titles and a shortlist of taxonomy nodes: the
 CANDIDATES nearest to the centroid of its products' embeddings. The answer becomes a
 mapping with method "llm", its confidence and the model's one-line reason, and
 classifies the products under that path at once. "None fits" becomes an
@@ -91,8 +91,12 @@ def prompt(source: str, path: str, titles: list[str], candidates: list[str]) -> 
 
 _PATHS_SQL = f"""
     WITH paths AS (
+      -- only products that can be sampled (a title and a vector): a path of others
+      -- would take a place in every round and never get proposed
       SELECT p.source, {shopmap.PATH_SQL} AS path, count(*) AS products
-      FROM product p WHERE p.source IS NOT NULL
+      FROM product p
+      JOIN embedding e ON e.product_id = p.id AND e.model = :mk
+      WHERE p.source IS NOT NULL AND p.title IS NOT NULL
       GROUP BY 1, 2
     )
     SELECT paths.source, paths.path FROM paths
@@ -163,6 +167,7 @@ async def _schedule(sm: async_sessionmaker[AsyncSession], llm: Any) -> dict[str,
                     text(_PATHS_SQL),
                     {
                         "min": int(cfg["category_mapping_min_products"]),
+                        "mk": embedding.MODEL_KEY,
                         "v": v,
                         "limit": PER_ROUND + len(busy),
                     },
