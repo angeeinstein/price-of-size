@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pos_shared.extract import EXTRACT_VERSION, jsonld, price_rules, spectext
+from pos_shared.extract import EXTRACT_VERSION, appstate, jsonld, price_rules, spectext
 from pos_shared.extract.model import Extraction
 
 
@@ -12,6 +12,12 @@ def extract_evidence(evidence: dict[str, Any]) -> Extraction:
     locale = (snip.get("lang") or "")[:2].lower() or None
     ex = Extraction(extract_version=EXTRACT_VERSION)
     pairs = jsonld.extract(snip.get("json_ld") or [], ex, locale)
+    state_pairs = appstate.pairs(
+        snip.get("app_state") or [], locale, {"gtin": ex.gtin, "sku": ex.sku, "mpn": ex.mpn}
+    )
+    if state_pairs:
+        ex.sources.append("app_state")
+        pairs += state_pairs
     html_pairs = spectext.pairs_from_html(
         (snip.get("tables") or [])
         + (snip.get("definition_lists") or [])

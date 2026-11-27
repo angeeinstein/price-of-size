@@ -1,7 +1,8 @@
 """Recognise refusals: CAPTCHAs, bot walls, rate limiting.
 
-The system never tries to get around these. A block marks the domain; the
-block log lets the analysis quantify the resulting sample bias.
+The plain HTTP fetch does not get past these (it runs no JavaScript). A block
+marks the domain; the block log lets the analysis quantify the resulting sample
+bias, and an operator can unblock a domain or give it another fetch mode.
 """
 
 import re
@@ -28,7 +29,9 @@ BLOCK_MARKERS: list[tuple[str, re.Pattern[str]]] = [
         "botwall:generic",
         re.compile(
             r"(are you a (human|robot)|verify you are (a )?human|unusual traffic from your computer"
-            r"|bitte bestätigen sie, dass sie kein roboter sind)",
+            r"|bitte bestätigen sie, dass sie kein roboter sind"
+            r"|sichere verbindung wird überprüft|verifying (your connection|you are human)"
+            r"|checking (if the site connection is secure|your browser))",
             re.I,
         ),
     ),

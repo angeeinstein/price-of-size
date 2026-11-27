@@ -69,6 +69,9 @@ def test_same_site_redirects():
 
 async def test_worker_spaces_requests_after_the_limiter():
     """Overdue jobs for one domain must not burst out when the limiter frees up."""
+    from pos_worker.fetch import breaker
+
+    breaker.reset()  # a pause left by another test would skip the fetches
     sent = []
 
     async def fake_fetch(client, url, max_bytes):
@@ -77,7 +80,7 @@ async def test_worker_spaces_requests_after_the_limiter():
 
     class Job:
         def __init__(self, i):
-            self.payload = {"url": f"https://a.example/{i}", "delay_s": 0, "interval_s": 0.3}
+            self.payload = {"url": f"https://spacing.example/{i}", "delay_s": 0, "interval_s": 0.3}
 
     orig = fetch_handlers.http.fetch
     fetch_handlers.http.fetch = lambda c, u, max_bytes=0: fake_fetch(c, u, max_bytes)
@@ -88,7 +91,8 @@ async def test_worker_spaces_requests_after_the_limiter():
     finally:
         fetch_handlers.http.fetch = orig
     gaps = [b - a for a, b in zip(sent, sent[1:], strict=False)]
-    assert len(sent) == 3 and all(g >= fetch_handlers.MIN_INTERVAL_S - 0.05 for g in gaps)
+    assert len(sent) == 3, sent
+    assert all(g >= fetch_handlers.MIN_INTERVAL_S - 0.05 for g in gaps), gaps
 
 
 # --- with the database -------------------------------------------------------------
@@ -455,3 +459,36 @@ async def test_the_overview_stream_gives_back_its_request_connection():
     request = MagicMock()
     await panel_api.stream(request, viewer=MagicMock(), session=session)
     session.close.assert_awaited_once()
+
+
+async def test_sitemap_url_pattern_limits_followed_children(sessionmaker):
+    from pos_coordinator.models import Source
+
+    async with sessionmaker() as s:
+        src = Source(
+            name="ikea",
+            type="scraper",
+            config=discovery.validate_config({"sitemap_url_pattern": r"prod-de-AT_\d+\.xml$"}),
+        )
+        s.add(src)
+        await s.flush()
+        index = Job(
+            type="fetch_sitemap",
+            payload={"url": "https://www.ikea.com/sitemaps/sitemap.xml", "source": "ikea"},
+            domain="www.ikea.com",
+        )
+        children = [
+            f"https://www.ikea.com/sitemaps/{n}.xml"
+            for n in ("prod-de-AT_1", "prod-de-AT_2", "prod-fr-FR_1", "cat-de-AT_1")
+        ]
+        await discovery._follow(s, index, {"sitemaps": children, "urls": []}, src)
+        queued = sorted(
+            (
+                await s.execute(
+                    select(Job.payload["url"].astext).where(Job.type == "fetch_sitemap")
+                )
+            ).scalars()
+        )
+        assert queued == children[:2]
+    with pytest.raises(discovery.SourceConfigError):
+        discovery.validate_config({"sitemap_url_pattern": "("})
