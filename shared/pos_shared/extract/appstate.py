@@ -248,7 +248,7 @@ def main_product(state: list[dict], main: dict[str, str | None] | None = None) -
     groups = {k: its for k, its in groups.items() if any(_measures(i["node"]) for i in its)}
     matched = [k for k, its in groups.items() if main and any(_matches(it, main) for it in its)]
     if len(matched) == 1:
-        return groups[matched[0]]
+        return _one_representation(groups[matched[0]], paths[matched[0]])
 
     def depth(key: str) -> int:
         return min(len(_TOKEN.findall(p)) for p in paths[key])
@@ -260,7 +260,26 @@ def main_product(state: list[dict], main: dict[str, str | None] | None = None) -
     top = [k for k in candidates if depth(k) == top_depth]
     if len(top) != 1:
         return []  # several products side by side: none is the page's for sure
-    return groups[top[0]]
+    return _one_representation(groups[top[0]], paths[top[0]])
+
+
+def _one_representation(items: list[dict], owners: list[str]) -> list[dict]:
+    """One product described under several owners (page state and a component's props)
+    is read from one of them, else its boxes would count twice: the one that measures
+    most, the shallowest of those. Genuinely separate boxes share an owner and stay."""
+    by_owner: dict[str, list[dict]] = {}
+    for it, owner in zip(items, owners, strict=True):
+        by_owner.setdefault(owner, []).append(it)
+    if len(by_owner) == 1:
+        return items
+    best = min(
+        by_owner,
+        key=lambda o: (
+            -sum(1 for it in by_owner[o] if _measures(it["node"])),
+            len(_TOKEN.findall(o)),
+        ),
+    )
+    return by_owner[best]
 
 
 def _box_list(path: str) -> str | None:

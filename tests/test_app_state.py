@@ -329,3 +329,13 @@ def test_package_segments(segment, package):
     from pos_shared.extract import appstate
 
     assert appstate.is_package_segment(segment) is package
+
+
+def test_a_product_repeated_in_component_props_is_counted_once():
+    product = {"sku": "A", "name": "Regal", "packages": [_pkg(10)]}
+    state = {"page": {"product": product}, "component": {"props": {"product": dict(product)}}}
+    html = _page(state).replace('"name": "Regal', '"sku": "A", "name": "Regal', 1)
+    snip = snippets.capture(html, "https://shop.example/p/11")
+    ex = extract_evidence({"status": 200, "verdict": {"kind": "ok"}, "snippets": snip})
+    pkg = next(m for m in ex.measurements if m.basis == "package")
+    assert pkg.mass_kg == pytest.approx(10) and pkg.a_m == pytest.approx(1.0)
