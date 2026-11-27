@@ -291,3 +291,33 @@ async def test_a_review_waits_for_the_derive_runner(app):
         await runner.commit()
     await task
     assert review.FLAG in (await _offer(sm, odd.id)).flags
+
+
+async def test_the_outlier_pass_never_undoes_a_review_meanwhile(app):
+    import asyncio
+
+    sm, _, odd = await _shelves(app)
+    async with sm() as s:
+        await outliers.run(s)
+        await s.commit()
+    async with sm() as s:  # the price is corrected: the next pass clears the flag
+        (await s.get(Product, odd.id)).canonical_price_eur = 99
+        await s.commit()
+    o = await _offer(sm, odd.id)
+    async with sm() as reviewer:  # a review rejects the offer, not committed yet
+        locked = await reviewer.get(Offer, o.id, with_for_update=True)
+        locked.flags = sorted(set(locked.flags) | {review.FLAG})
+        await reviewer.flush()
+
+        async def outlier_pass():
+            async with sm() as s:
+                r = await outliers.run(s)
+                await s.commit()
+                return r
+
+        task = asyncio.create_task(outlier_pass())
+        await asyncio.sleep(0.3)
+        await reviewer.commit()
+    assert (await task)["cleared"] == 1
+    flags = (await _offer(sm, odd.id)).flags
+    assert review.FLAG in flags and outliers.FLAG not in flags

@@ -162,7 +162,7 @@ async def run(session: AsyncSession) -> dict[str, int]:
     )
     out = {"category_outliers": len(findings), "flagged": 0, "cleared": 0}
     for oid in have - set(want):
-        o = await session.get(Offer, oid)
+        o = await _locked(session, oid)
         o.flags = sorted(set(o.flags or []) - {FLAG})
         o.fields = {k: v for k, v in (o.fields or {}).items() if k != "category_check"}
         out["cleared"] += 1
@@ -174,7 +174,7 @@ async def run(session: AsyncSession) -> dict[str, int]:
             "group_kg": str(f.group_kg) if f.group_kg else None,
             "group_m3": str(f.group_m3) if f.group_m3 else None,
         }
-        o = await session.get(Offer, oid)
+        o = await _locked(session, oid)
         if FLAG in (o.flags or []) and (o.fields or {}).get("category_check") == check:
             continue
         o.flags = sorted(set(o.flags or []) | {FLAG})
@@ -182,6 +182,12 @@ async def run(session: AsyncSession) -> dict[str, int]:
         out["flagged"] += oid not in have
     await session.flush()
     return out
+
+
+async def _locked(session: AsyncSession, oid: uuid.UUID) -> Offer:
+    """The offer, locked and read again: its flags as they are now (a price review may
+    have changed them since the query above), so this write never undoes another."""
+    return await session.get(Offer, oid, with_for_update=True, populate_existing=True)
 
 
 _last_run = 0.0
