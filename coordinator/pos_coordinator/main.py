@@ -1,7 +1,7 @@
 """`pos-coordinator` command.
 
 serve     run the API (default)
-migrate   upgrade the database schema to head
+migrate   upgrade the database schema to head (a newer schema is kept: rollbacks)
 check     self-test for the node agent: config, database, signing key
 backup    pg_dump the database into POS_BACKUP_DIR
 """
@@ -80,9 +80,10 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     if args.cmd == "migrate":
-        from alembic import command
+        from pos_coordinator import schema
+        from pos_coordinator.config import get_settings
 
-        command.upgrade(_alembic_config(), "head")
+        schema.upgrade(_alembic_config(), get_settings().database_url)
         return
     if args.cmd == "check":
         sys.exit(asyncio.run(_check()))

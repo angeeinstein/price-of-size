@@ -130,7 +130,11 @@ inactive slot stopped, and updates when the signed desired release differs:
    `{"target_version": "X.Y.Z"}`), watch its `agent_status`, then the rest.
    The coordinator itself: `PUT /api/admin/settings/coordinator.target_version`.
 4. **Rollback** is the same with the previous version (already present in the
-   other slot, so it is just a container start).
+   other slot, so it is just a container start). A rolled-back coordinator keeps
+   the newer database schema (`migrate` says so and changes nothing): migrations
+   only add, and removals land a release after the code stopped using them, so
+   the previous release runs on it. Go back one release at a time; for anything
+   further, restore the pre-migration dump in the backup directory.
 
 `install.sh --update` updates the installer-managed parts (agent bootstrap,
 simple-mode worker). In agent mode the coordinator steers versions.
