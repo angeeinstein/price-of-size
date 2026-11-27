@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from pos_coordinator import maintenance, rawstore, signing_key
 from pos_coordinator.api import admin, crawl, jobs, nodes, raw, releases
+from pos_coordinator.api import taxonomy as taxonomy_api
 from pos_coordinator.api.deps import Session
 from pos_coordinator.config import Settings, get_settings
 from pos_coordinator.db import make_engine, make_sessionmaker
@@ -106,7 +107,7 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
     async def version():
         return {"version": __version__, "api_version": API_VERSION}
 
-    for module in (nodes, jobs, raw, releases, admin, crawl, panel_api):
+    for module in (nodes, jobs, raw, releases, admin, crawl, taxonomy_api, panel_api):
         app.include_router(module.router)
     app.add_middleware(panel_static.SecurityHeaders)
     dist = panel_static.find_dist(settings.panel_dist)

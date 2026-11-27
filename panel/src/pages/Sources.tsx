@@ -22,12 +22,13 @@ function SourceEditor({ source, onDone }: { source?: SourceRow; onDone: () => vo
   const [name, setName] = useState(source?.name ?? "");
   const [config, setConfig] = useState(source ? JSON.stringify(source.config, null, 2) : EXAMPLE);
   const [status, setStatus] = useState(source?.status ?? "active");
+  const [type, setType] = useState(source?.type ?? "scraper");
   const [error, setError] = useState<string | null>(null);
   const save = useMutation({
     mutationFn: async () => {
       let parsed: unknown;
       try { parsed = JSON.parse(config); } catch { throw new Error("config is not valid JSON"); }
-      return api.put(`/api/admin/sources/${encodeURIComponent(name)}`, { type: "scraper", status, config: parsed as Record<string, unknown> });
+      return api.put(`/api/admin/sources/${encodeURIComponent(name)}`, { type, status, config: parsed as Record<string, unknown> });
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["sources"] }); onDone(); },
     onError: (e) => setError(e instanceof ApiError || e instanceof Error ? e.message : String(e)),
@@ -36,6 +37,11 @@ function SourceEditor({ source, onDone }: { source?: SourceRow; onDone: () => vo
     <CardBody className="space-y-3 border-b border-line">
       <div className="flex gap-3">
         <div className="w-64"><Label>Name</Label><Input value={name} disabled={!!source} onChange={(e) => setName(e.target.value)} /></div>
+        <div><Label>Type</Label>
+          <select value={type} onChange={(e) => setType(e.target.value)} className="h-9 rounded-md border border-line bg-panel px-2 text-sm">
+            {["scraper", "api"].map((t) => <option key={t}>{t}</option>)}
+          </select>
+        </div>
         <div><Label>Status</Label>
           <select value={status} onChange={(e) => setStatus(e.target.value)} className="h-9 rounded-md border border-line bg-panel px-2 text-sm">
             {["active", "paused", "disabled"].map((s) => <option key={s}>{s}</option>)}

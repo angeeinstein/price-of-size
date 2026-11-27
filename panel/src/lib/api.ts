@@ -96,3 +96,10 @@ export type SourceRow = { name: string; type: string; status: string;
 
 export type ReleaseRow = { manifest: { version: string; images: Record<string, string>;
   created_at: string }; signature: string; key_id: string; notes: string | null };
+
+export type CategoryPathRow = { source: string; path: string; products: number;
+  mapping_id: string | null; taxonomy_node_id: string | null; method: string | null;
+  confidence: number | null; node_path: string | null; node_external_id: string | null };
+
+export type TaxonomyHit = { id: string; external_id: string; path: string;
+  local_path: string | null; is_custom: boolean };
