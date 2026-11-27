@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 
 from pos_coordinator import runtime_settings
 from pos_coordinator.api.deps import CurrentAdmin, CurrentViewer, SensitiveAdmin, Session
-from pos_coordinator.crawl import discovery, scheduler
+from pos_coordinator.crawl import apisources, discovery, scheduler
 from pos_coordinator.models import (
     AuditLog,
     DomainEgressState,
@@ -210,7 +210,10 @@ async def put_source(name: str, body: SourceIn, admin: CurrentAdmin, session: Se
     if not name or len(name) > 100:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "bad source name")
     try:
-        discovery.validate_config(body.config)
+        if body.type == "api":
+            apisources.validate_config(body.config)
+        else:
+            discovery.validate_config(body.config)
     except discovery.SourceConfigError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
     src = (await session.execute(select(Source).where(Source.name == name))).scalar_one_or_none()
@@ -239,7 +242,13 @@ async def discover_source(name: str, admin: CurrentAdmin, session: Session):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown source")
     if src.status != "active":
         raise HTTPException(status.HTTP_409_CONFLICT, f"source is {src.status}")
-    queued = await discovery.discover(session, src)
+    try:
+        if src.type == "api":
+            queued = await apisources.discover(session, src)
+        else:
+            queued = await discovery.discover(session, src)
+    except discovery.SourceConfigError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
     session.add(AuditLog(actor=admin.name, action="source.discover", target=name, details=queued))
     await session.commit()
     return queued

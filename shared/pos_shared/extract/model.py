@@ -12,9 +12,13 @@ class OfferCandidate:
     availability: str | None = None  # in_stock | out_of_stock | discontinued | preorder | ...
     condition: str | None = None  # new | used | refurbished | damaged
     seller: str | None = None
-    price_kind: str = "item"  # item | unit_price | from_price | aggregate_low
+    price_kind: str = "item"  # item | unit_price | from_price | aggregate_low | older_cost
     method: str = "jsonld"
     confidence: float = 0.9
+    # The date a price refers to when it is not the fetch's (a unit cost from a
+    # reference source: "1869-01-01"), and how that date was found.
+    as_of: str | None = None
+    as_of_method: str | None = None
 
 
 @dataclass

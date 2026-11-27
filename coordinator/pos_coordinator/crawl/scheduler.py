@@ -33,7 +33,9 @@ from pos_shared.ids import uuid7
 
 log = logging.getLogger(__name__)
 
-FETCH_TYPES = ("fetch_http", "fetch_robots", "fetch_sitemap")
+FETCH_TYPES = ("fetch_http", "fetch_robots", "fetch_sitemap", "fetch_api")
+# API queries are governed by the API's usage policy, not robots.txt (see apisources)
+NOT_ROBOTS_GATED = ("fetch_robots", "fetch_api")
 PAGE_TYPES = ("fetch_http", "fetch_sitemap")  # subject to robots.txt rules
 LOOKAHEAD_S = 60.0
 JITTER = 0.2  # slots are spaced interval * U(1 - JITTER, 1 + JITTER)
@@ -399,7 +401,7 @@ async def _lease_domain(
         ).scalar_one_or_none()
         if sample:  # idempotent: at most one active robots job per domain
             await ensure_robots_job(session, domain, urls.robots_url(sample))
-    allowed_types = types if rules_usable else [t for t in types if t == "fetch_robots"]
+    allowed_types = types if rules_usable else [t for t in types if t in NOT_ROBOTS_GATED]
     has_allowed = (
         await session.execute(
             select(Job.id)
