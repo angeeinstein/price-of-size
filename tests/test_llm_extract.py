@@ -243,3 +243,67 @@ def test_an_answer_never_changes_a_product_identity():
     ex = Extraction(extract_version="t", title="Regal", mpn="R-80")
     llm_page.apply(ex, ANSWER, "de")
     assert ex.brand is None  # a brand would turn the url: key into a bm: key
+
+
+def _ld_page(gtin, title, category=None, dims=None):
+    product = {"@type": "Product", "name": title, "gtin13": gtin,
+               "offers": {"@type": "Offer", "price": "199", "priceCurrency": "EUR"}}  # fmt: skip
+    if category:
+        product["category"] = category
+    tables = [f"<table><tr><th>Maße</th><td>{dims}</td></tr></table>"] if dims else []
+    return {
+        "status": 200,
+        "verdict": {"kind": "ok"},
+        "snippets": {
+            "lang": "de",
+            "title": title,
+            "json_ld": [json.dumps(product)],
+            "tables": tables,
+            "definition_lists": [],
+            "spec_blocks": [],
+            "price_blocks": [],
+        },  # fmt: skip
+    }
+
+
+async def _product(sm):
+    async with sm() as s:
+        return (await s.execute(select(Product))).scalar_one()
+
+
+async def test_breadcrumbs_of_another_shop_never_become_the_products(app):
+    sm, store = app.state.sessionmaker, app.state.rawstore
+    gtin = "4006381333931"
+    await _fetch(sm, store, _ld_page(gtin, "Regal", dims="80 x 40 x 180 cm"),
+                 "https://a.example/p", "a")  # fmt: skip
+    await _fetch(sm, store, _ld_page(gtin, "Regal", "Möbel > Regale", "80 x 40 x 180 cm"),
+                 "https://b.example/p", "b")  # fmt: skip
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    p = await _product(sm)
+    assert p.source == "a" and p.attributes["category_path"] == []
+
+
+async def test_the_earliest_fetch_with_breadcrumbs_names_the_category(app):
+    sm, store = app.state.sessionmaker, app.state.rawstore
+    gtin = "4006381333931"
+    # the earlier page has no breadcrumbs (and no sizes: the LLM is asked about it)
+    first = await _fetch(sm, store, _ld_page(gtin, "Regal"), "https://a.example/p1", "a")
+    await _fetch(sm, store, _ld_page(gtin, "Regal", "Möbel > Spätere", "80 x 40 x 180 cm"),
+                 "https://a.example/p2", "a")  # fmt: skip
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    assert (await _product(sm)).attributes["category_path"] == ["Möbel", "Spätere"]
+    fake = FakeClient()
+    llm = LlmService(sm, lambda: fake)
+    assert await llm_tier.schedule(sm, llm, store) == {"llm_extractions_queued": 1}
+    (bid,) = fake.batches
+    answer = {**ANSWER, "category_path": ["Möbel", "Frühere"]}
+    fake.batches[bid]["status"] = "ended"
+    fake.batches[bid]["results"] = [_answer("0", json.dumps(answer))]
+    await llm.poll_batches()
+    async with sm() as s:
+        assert (await s.execute(select(LlmExtraction.fetch_id))).scalar_one() == first
+    # the earlier fetch's breadcrumbs (from the answer) take precedence, as in a rebuild
+    assert (await _product(sm)).attributes["category_path"] == ["Möbel", "Frühere"]
+    result = await stage.rebuild(sm, store, settle=NOW)
+    assert result["identical"], result
+    assert (await _product(sm)).attributes["category_path"] == ["Möbel", "Frühere"]

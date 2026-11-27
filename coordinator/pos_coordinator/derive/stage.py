@@ -271,6 +271,12 @@ async def _derive_one(session, store: RawStore, f: RawFetch, fx: RateCache, repo
     return {pid} if pid is not None else set()
 
 
+def _provenance(f: RawFetch) -> str:
+    """A fetch's place in the derive order, as a string that sorts like it."""
+    at = f.received_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    return f"{at}|{f.id}"
+
+
 def _as_of(value: str | None):
     """'1999-01-04' -> date; None for anything else."""
     from datetime import date
@@ -311,7 +317,14 @@ async def _write(
         else "bulk_unit"
         if any(m.true_volume_m3 for m in ex.measurements)
         else None,
-        attributes={"category_path": ex.category_path, "sku": ex.sku, "variants": ex.variants},
+        attributes={
+            "category_path": ex.category_path,
+            "sku": ex.sku,
+            "variants": ex.variants,
+            # which fetch the breadcrumbs came from: (received_at, id) sorts in the
+            # order the derive stage reads fetches
+            "category_from": _provenance(f) if ex.category_path else None,
+        },
         match_method=key.split(":", 1)[0],
         match_confidence=1.0 if key.startswith("gtin") else 0.8,
     )
@@ -321,12 +334,32 @@ async def _write(
             "title": func.coalesce(Product.title, stmt.excluded.title),
             "brand": func.coalesce(Product.brand, stmt.excluded.brand),
             "dimensionality": func.coalesce(Product.dimensionality, stmt.excluded.dimensionality),
-            # the first page with breadcrumbs gives the product its shop category
+            # The product's shop category is the breadcrumbs of the earliest fetch, of
+            # the product's own shop, that has any: the same whatever order fetches
+            # and LLM answers arrive in (a page derived again keeps its place).
             "attributes": case(
                 (
-                    func.coalesce(Product.attributes["category_path"], text("'[]'::jsonb"))
-                    == text("'[]'::jsonb"),
-                    Product.attributes.op("||")(stmt.excluded.attributes),
+                    and_(
+                        Product.source.is_not_distinct_from(stmt.excluded.source),
+                        func.coalesce(
+                            stmt.excluded.attributes["category_path"], text("'[]'::jsonb")
+                        )
+                        != text("'[]'::jsonb"),
+                        or_(
+                            func.coalesce(Product.attributes["category_path"], text("'[]'::jsonb"))
+                            == text("'[]'::jsonb"),
+                            func.coalesce(Product.attributes["category_from"].astext, "")
+                            > stmt.excluded.attributes["category_from"].astext,
+                        ),
+                    ),
+                    Product.attributes.op("||")(
+                        func.jsonb_build_object(
+                            "category_path",
+                            stmt.excluded.attributes["category_path"],
+                            "category_from",
+                            stmt.excluded.attributes["category_from"],
+                        )
+                    ),
                 ),
                 else_=Product.attributes,
             ),
