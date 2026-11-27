@@ -42,6 +42,19 @@ DEFAULTS: dict[str, Any] = {
     "job_lease_s": 300,
     "job_retention_days": 14,  # finished job rows (results and raw evidence stay)
     "failed_job_retention_days": 60,
+    # Classification. k-NN guesses at or above this vote share are kept; products
+    # without a classification or with a weaker one than `classify_llm_below_confidence`
+    # go to the LLM (a batch of at most `classify_llm_per_round` at a time). Shop
+    # categories with at least `category_mapping_min_products` products get LLM
+    # mapping proposals. Bumping the generation runs every classifier again.
+    "classify_knn_min_confidence": 0.8,
+    "classify_llm": True,
+    "classify_llm_below_confidence": 0.8,
+    "classify_llm_per_round": 1000,
+    "classify_llm_sample_fraction": 0.02,  # labelled by the LLM whatever their tier
+    "category_mapping_proposals": True,
+    "category_mapping_min_products": 3,
+    "classification_generation": 0,
     "llm_models": {
         "default": "claude-haiku-5-5",
         "parser_generation": "claude-sonnet-5-5",
@@ -49,6 +62,10 @@ DEFAULTS: dict[str, Any] = {
         "parser_chat": "claude-sonnet-5-5",
     },
 }
+
+
+def _fraction(v: Any) -> bool:
+    return isinstance(v, int | float) and not isinstance(v, bool) and 0 <= v <= 1
 
 
 def _int_in(lo: int, hi: int):
@@ -80,6 +97,14 @@ VALIDATORS: dict[str, Any] = {
     **BLOCK_VALIDATORS,
     "user_agent": lambda v: isinstance(v, str) and 3 <= len(v) <= 200,
     "html_keep_sample_fraction": lambda v: isinstance(v, int | float) and 0 <= v <= 1,
+    "classify_knn_min_confidence": lambda v: _fraction(v),
+    "classify_llm": lambda v: isinstance(v, bool),
+    "classify_llm_below_confidence": lambda v: _fraction(v),
+    "classify_llm_per_round": _int_in(1, 5_000),
+    "classify_llm_sample_fraction": lambda v: _fraction(v),
+    "category_mapping_proposals": lambda v: isinstance(v, bool),
+    "category_mapping_min_products": _int_in(1, 1_000_000),
+    "classification_generation": _int_in(0, 1_000_000),
 }
 
 

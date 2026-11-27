@@ -142,6 +142,15 @@ async def run_once(
             await session.commit()
     except Exception:
         log.exception("classification by shop mappings failed")
+    try:
+        async with sm() as session:
+            from pos_coordinator.classify import knn
+
+            res = await knn.classify(session)
+            out["knn_classified"] = res["knn_classified"]
+            await session.commit()
+    except Exception:
+        log.exception("k-NN classification failed")
     if any(out.values()):
         log.info("maintenance: %s", out)
     return out

@@ -6,9 +6,10 @@ path follow it. Mappings are made by hand in the panel or API (later also propos
 by the LLM, spot-checked by a person) and are curated data: a rebuild of the
 derived layer keeps them and classifies again.
 
-A product has at most one current classification. A higher tier (manual, LLM) is
-never overwritten by a shop mapping; a changed mapping re-classifies the products
-it had classified, and an "unmappable" path withdraws them.
+A product has at most one current classification (see common.py for the order of
+the tiers). A shop mapping replaces a k-NN guess but never a manual or LLM
+classification; a changed mapping re-classifies the products it had classified,
+and an "unmappable" path withdraws them.
 """
 
 import re
@@ -25,6 +26,7 @@ VERSION = "shopmap-1"
 SEP = " > "
 MAX_PATH_CHARS = 1000
 METHODS = ("manual", "llm", "rule", "import")
+LOWER_TIERS = ["knn"]  # tiers a shop mapping replaces (common.RANK)
 
 # Whitespace collapsed in a path: the same characters in Python and SQL (Python's
 # own notion of whitespace is wider than PostgreSQL's).
@@ -61,6 +63,7 @@ async def set_mapping(
     method: str = "manual",
     confidence: float | None = None,
     actor: str | None = None,
+    note: str | None = None,
 ) -> CategoryMapping:
     """Map (source, path) to a node (None: no fitting category). The previous mapping
     stays as history."""
@@ -87,6 +90,7 @@ async def set_mapping(
         method=method,
         confidence=confidence if confidence is not None else (1.0 if method == "manual" else None),
         created_by=actor,
+        note=note,
     )
     session.add(m)
     await session.flush()
@@ -98,11 +102,14 @@ async def category_paths(
     source: str | None = None,
     unmapped_only: bool = False,
     q: str | None = None,
+    method: str | None = None,
     limit: int = 200,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     """Category paths seen per source, with product counts and their current mapping,
-    most frequent first (mapping the big ones first classifies the most products)."""
+    most frequent first (mapping the big ones first classifies the most products).
+    `method` keeps paths whose current mapping was made that way ("llm": the
+    proposals still to spot-check)."""
     sql = f"""
         WITH paths AS (
           SELECT p.source, {PATH_SQL} AS path, count(*) AS products
@@ -111,14 +118,15 @@ async def category_paths(
           GROUP BY 1, 2
         )
         SELECT paths.source, paths.path, paths.products, m.id AS mapping_id,
-               m.taxonomy_node_id, m.method, m.confidence, n.path AS node_path,
-               n.external_id AS node_external_id
+               m.taxonomy_node_id, m.method, m.confidence, m.note, m.created_by,
+               n.path AS node_path, n.external_id AS node_external_id
         FROM paths
         LEFT JOIN category_mapping m
           ON m.is_current AND m.source = paths.source AND m.category_path = paths.path
         LEFT JOIN taxonomy_node n ON n.id = m.taxonomy_node_id
         WHERE paths.path <> ''
           AND (NOT :unmapped OR m.id IS NULL)
+          AND (CAST(:method AS text) IS NULL OR m.method = :method)
           AND (CAST(:q AS text) IS NULL OR paths.path ILIKE '%' || :q || '%')
         ORDER BY paths.products DESC, paths.source, paths.path
         LIMIT :limit OFFSET :offset
@@ -129,6 +137,7 @@ async def category_paths(
             "source": source,
             "unmapped": unmapped_only,
             "q": q,
+            "method": method,
             "limit": min(max(limit, 1), 1000),
             "offset": max(offset, 0),
         },
@@ -137,8 +146,9 @@ async def category_paths(
 
 
 async def classify(session: AsyncSession, limit: int = 5000) -> dict[str, int]:
-    """Bring shop-mapping classifications in line with the current mappings; at most
-    `limit` products per call (the maintenance loop calls again)."""
+    """Bring shop-mapping classifications in line with the current mappings (node and
+    confidence: a confirmed LLM mapping is more certain); at most `limit` products
+    per call (the maintenance loop calls again)."""
     rows = (
         await session.execute(
             text(f"""
@@ -154,15 +164,17 @@ async def classify(session: AsyncSession, limit: int = 5000) -> dict[str, int]:
                 LEFT JOIN classification c ON c.product_id = prod.id AND c.is_current
                 WHERE prod.path <> ''
                   AND (
-                    (c.id IS NULL AND m.taxonomy_node_id IS NOT NULL)
+                    ((c.id IS NULL OR c.tier = ANY(CAST(:lower AS text[])))
+                     AND m.taxonomy_node_id IS NOT NULL)
                     OR (c.tier = :tier
-                        AND c.taxonomy_node_id IS DISTINCT FROM m.taxonomy_node_id)
+                        AND (c.taxonomy_node_id IS DISTINCT FROM m.taxonomy_node_id
+                             OR c.confidence IS DISTINCT FROM coalesce(m.confidence, 0.9)))
                   )
                 ORDER BY prod.id
                 LIMIT :limit
                 FOR UPDATE OF m SKIP LOCKED
             """),
-            {"tier": TIER, "limit": limit},
+            {"tier": TIER, "lower": LOWER_TIERS, "limit": limit},
         )
     ).all()
     out = {"classified": 0, "withdrawn": 0}

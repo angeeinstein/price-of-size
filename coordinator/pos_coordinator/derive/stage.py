@@ -576,19 +576,37 @@ async def loop(sm: async_sessionmaker[AsyncSession], store: RawStore, interval_s
 DERIVED_TABLES = (Measurement, Classification, Embedding, Offer, Product)
 
 
+# Classification tiers the rebuild itself redoes; the others (k-NN, LLM) need the
+# embeddings first and come back afterwards (the LLM's answers from the ledger).
+SYNC_TIERS = ("shop_mapping",)
+
+
 async def snapshot(session: AsyncSession) -> dict[str, Any]:
     out = {}
     for model in DERIVED_TABLES:
         q = select(func.count()).select_from(model)
         if model is Classification:
-            q = q.where(Classification.is_current)  # history rows are not rebuilt
+            # history rows are not rebuilt; tiers that come back later are counted apart
+            q = q.where(Classification.is_current, Classification.tier.in_(SYNC_TIERS))
         out[model.__tablename__] = (await session.execute(q)).scalar_one()
+    out["classification_async"] = (
+        await session.execute(
+            select(func.count()).where(
+                Classification.is_current, Classification.tier.not_in(SYNC_TIERS)
+            )
+        )
+    ).scalar_one()
+    sync_cls = (
+        select(Classification.product_id, Classification.taxonomy_node_id)
+        .where(Classification.is_current, Classification.tier.in_(SYNC_TIERS))
+        .subquery()
+    )
     digest = hashlib.sha256()
     for row in (
         await session.execute(
-            select(Product.match_key, Product.canonical_price_eur, Product.category_id).order_by(
-                Product.match_key
-            )
+            select(Product.match_key, Product.canonical_price_eur, sync_cls.c.taxonomy_node_id)
+            .outerjoin(sync_cls, sync_cls.c.product_id == Product.id)
+            .order_by(Product.match_key)
         )
     ).all():
         digest.update(repr(tuple(row)).encode())
@@ -596,7 +614,7 @@ async def snapshot(session: AsyncSession) -> dict[str, Any]:
     return out
 
 
-ASYNC_DERIVED = {"embedding"}
+ASYNC_DERIVED = {"embedding", "classification_async"}
 
 
 def _comparable(snap: dict[str, Any]) -> dict[str, Any]:
@@ -648,6 +666,6 @@ async def rebuild(
         "fetches": report.fetches,
         "classified": classified,
         "version": VERSION,
-        # embeddings come back later, computed by workers: reported, not compared
+        # embeddings and the k-NN and LLM tiers come back later: reported, not compared
         "identical": _comparable(before) == _comparable(after),
     }
