@@ -351,3 +351,42 @@ async def test_huge_sitemaps_are_queued_in_parts(sessionmaker):
 def test_an_unresolved_robots_redirect_is_not_allow_all():
     assert robots.status_kind(301) == "unreachable"
     assert robots.status_kind(204) == "rules"
+
+
+async def test_a_same_host_redirect_is_queued_through_robots(sessionmaker):
+    """Codex finding: /product -> /private/product must face Disallow: /private/."""
+    async with sessionmaker() as s:
+        n = await _node(s)
+        cfg = await _cfg(s)
+        await scheduler.enqueue_urls(s, ["https://shop.example/product"], "t")
+        await _ready(s, "shop.example", "User-agent: *\nDisallow: /private/\n")
+        job = (await s.execute(select(Job).where(Job.type == "fetch_http"))).scalar_one()
+        job.status = "done"
+        out = {"verdict": "ok", "status": 301, "redirect_to": "https://shop.example/private/p"}
+        r = JobResult(job_id=job.id, attempt=1, outcome=JobOutcome.done, output=out)
+        await feedback.apply(s, n, {job.id: job}, [r], cfg)
+        moved = (
+            await s.execute(select(Job).where(Job.payload["url"].astext.like("%/private/%")))
+        ).scalar_one()
+        assert moved.status == "queued"
+        assert await scheduler.lease_fetch(s, n, ["fetch_http"], 5, cfg) == []
+        await s.refresh(moved)
+        assert (moved.status, moved.last_error) == ("failed", "robots_disallowed")
+
+
+async def test_disabled_robots_enforcement_crawls_despite_unreachable_robots(sessionmaker):
+    async with sessionmaker() as s:
+        n = await _node(s)
+        await scheduler.enqueue_urls(s, ["https://down.example/p/1"], "t")
+        await s.execute(
+            update(DomainState).values(
+                robots_status="unreachable",
+                robots_next_check_at=func.now() + timedelta(hours=1),
+                pages_fetched=scheduler.SLOW_START_PAGES,
+            )
+        )
+        await s.execute(update(Job).where(Job.type == "fetch_robots").values(status="done"))
+        assert await scheduler.lease_fetch(s, n, ["fetch_http"], 5, await _cfg(s)) == []
+        off = await _cfg(s, respect_robots_txt=False)
+        got = await scheduler.lease_fetch(s, n, ["fetch_http"], 5, off)
+        assert [h.job.payload["url"] for h in got] == ["https://down.example/p/1"]

@@ -12,9 +12,11 @@ What a shop (or a sitemap, or a redirect) can make a worker do is limited here:
   metadata addresses, also not via DNS rebinding). The worker usually sits in
   someone's home or office network; a crafted sitemap or redirect must not reach
   into it. `POS_WORKER_ALLOW_PRIVATE_TARGETS=1` lifts this (tests, lab shops).
-- **Redirects:** followed only on the same host (http -> https, trailing slashes).
-  A redirect to another host ends the fetch with the 3xx and its Location: the
-  coordinator decides whether that host may be fetched (robots.txt, rate slots).
+- **Redirects:** pages and sitemaps follow none. A redirect ends the fetch with
+  the 3xx and its Location, and the coordinator queues the target like any URL:
+  through robots.txt (a redirect to a disallowed path must not slip through) and
+  the rate schedule. Only robots.txt itself follows its redirects (RFC 9309),
+  across hosts, every hop through the address check.
 """
 
 import asyncio
@@ -232,12 +234,8 @@ class _Decoder:
         return b"".join(out)
 
 
-def _same_host(a: str, b: str) -> bool:
-    return (urlsplit(a).hostname or "").lower() == (urlsplit(b).hostname or "").lower()
-
-
 async def _get(
-    client: httpx.AsyncClient, url: str, res: Response, max_bytes: int, cross_host: bool
+    client: httpx.AsyncClient, url: str, res: Response, max_bytes: int, follow: bool
 ) -> None:
     for _ in range(MAX_REDIRECTS + 1):
         if urlsplit(url).scheme not in ("http", "https"):
@@ -252,8 +250,8 @@ async def _get(
             location = r.headers.get("location")
             if r.status_code in REDIRECTS and location:
                 target = urljoin(str(r.url), location)
-                if not cross_host and not _same_host(target, str(r.url)):
-                    res.redirected_to = target  # the coordinator decides about that host
+                if not follow:
+                    res.redirected_to = target  # the coordinator decides about it
                     return
                 url = target
                 continue
@@ -276,15 +274,15 @@ async def fetch(
     url: str,
     max_bytes: int = MAX_BODY_BYTES,
     total_timeout_s: float = TOTAL_TIMEOUT_S,
-    cross_host_redirects: bool = False,
+    follow_redirects: bool = False,
 ) -> Response:
-    """`cross_host_redirects`: robots.txt only (RFC 9309 follows its redirects across
-    hosts, e.g. to www. or a CDN); every hop still passes the address check."""
+    """`follow_redirects`: robots.txt only (RFC 9309 follows its redirects, also to
+    www. or a CDN); every hop still passes the address check."""
     started = time.monotonic()
     res = Response(url=url)
     try:
         async with asyncio.timeout(total_timeout_s):
-            await _get(client, url, res, max_bytes, cross_host_redirects)
+            await _get(client, url, res, max_bytes, follow_redirects)
     except (TimeoutError, httpx.TimeoutException):
         res.error = "timeout"
     except BadEncoding:

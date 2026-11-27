@@ -29,7 +29,7 @@ from pos_shared.api import JobOutcome, JobResult
 
 log = logging.getLogger(__name__)
 RETRY_VERDICTS = ("throttled", "error", "blocked")
-MAX_REDIRECT_HOPS = 3  # across hosts; same-host redirects are followed by the worker
+MAX_REDIRECT_HOPS = 5  # pages and sitemaps; the worker follows none itself
 
 
 def reinterpret(job_type: str, result: JobResult) -> JobResult:
@@ -109,7 +109,7 @@ async def apply(
             resumed.append((ds.domain, list(ds.pending_discovery)))
             ds.pending_discovery = None
         target = r.output.get("redirect_to")
-        if job.type == "fetch_http" and isinstance(target, str):
+        if job.type in ("fetch_http", "fetch_sitemap") and isinstance(target, str):
             redirects.append((job, target))
     for job, target in redirects:
         await _follow_redirect(session, job, target)
@@ -143,17 +143,21 @@ def same_site(a: str, b: str) -> bool:
 
 
 async def _follow_redirect(session: AsyncSession, job: Job, target: str) -> None:
-    """A page moved to another host: fetch it there, through that host's robots.txt
-    and rate schedule, if it is the same site and not a redirect loop."""
+    """A page (or sitemap) redirected: fetch the target as its own job, through its
+    host's robots.txt and rate schedule, if it is the same site and not a loop."""
     hops = int(job.payload.get("redirect_hops") or 0) + 1
     if hops > MAX_REDIRECT_HOPS or not same_site(job.payload.get("url", ""), target):
         return
+    extra = {"redirect_hops": hops}
+    if job.payload.get("depth") is not None:
+        extra["depth"] = job.payload["depth"]  # a sitemap keeps its nesting depth
     await scheduler.enqueue_urls(
         session,
         [target],
         job.payload.get("source"),
         job.priority,
-        extra_payload={"redirect_hops": hops},
+        job_type=job.type,
+        extra_payload=extra,
         skip_done_within=timedelta(days=1),
     )
 

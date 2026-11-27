@@ -261,7 +261,7 @@ async def lease_fetch(
                   -- servable now: usable robots.txt rules, or a robots.txt fetch to hand
                   -- out (or to create, when due); domains waiting for one are skipped
                   AND (
-                      d.robots_status IN ('rules', 'none')
+                      d.robots_status IN ('rules', 'none') OR NOT :respect_robots
                       OR EXISTS (
                           SELECT 1 FROM job r
                           WHERE r.domain = d.domain AND r.type = 'fetch_robots'
@@ -291,6 +291,7 @@ async def lease_fetch(
                     "types": types,
                     "n": min(max_jobs * 2 + 8, MAX_DOMAINS_PER_LEASE),
                     "slow_start": SLOW_START_PAGES,
+                    "respect_robots": cfg.respect_robots_txt,
                     "fetch_types": list(FETCH_TYPES),
                 },
             )
@@ -365,7 +366,9 @@ async def _lease_domain(
 
     # Pages only with usable rules: "unreachable" (5xx/network) means disallow-all
     # until robots.txt can be fetched again (RFC 9309), so pages wait for it.
-    rules_usable = ds.robots_status in ("rules", "none")
+    # Without robots.txt enforcement (an operator's decision) pages need no rules; robots
+    # .txt is still fetched and stored.
+    rules_usable = ds.robots_status in ("rules", "none") or not cfg.respect_robots_txt
     # Refetched when due: after 24 h, or an hour after it was unreachable (not on
     # every lease: a failing robots.txt must not be hammered).
     due = ds.robots_next_check_at is None or ds.robots_next_check_at <= now

@@ -376,3 +376,17 @@ async def test_offers_waiting_for_a_rate_are_converted_when_it_arrives(world):
     assert jp.price_eur == Decimal("110.0000") and "no_fx_rate" not in jp.flags
     assert product.canonical_price_eur == Decimal("105.0000")  # both pages count now
     assert await stage.backfill_fx(sm) == 0  # nothing left
+
+
+def test_a_page_with_several_offers_votes_once_whatever_their_order():
+    """Codex finding: a placeholder after the real price must not void the page."""
+    real, placeholder = _o(1, "https://a/1", 1, "100"), _o(2, "https://a/1", 1, "0.01")
+    placeholder[4].append("placeholder_price")
+    for order in ([real, placeholder], [placeholder, real]):
+        flags, canonical = stage.price_checks(order)
+        assert canonical == Decimal("100") and flags[1] == set()
+    variants = [_o(1, "https://a/1", 2, "499"), _o(2, "https://a/1", 2, "549")]
+    assert stage.price_checks(variants)[1] == Decimal("524")  # one vote: their median
+    older = _o(3, "https://a/1", 1, "50000")  # a jump to the next visit flags that visit
+    flags, _ = stage.price_checks([older, *variants])
+    assert flags[1] == flags[2] == {"price_jump"}

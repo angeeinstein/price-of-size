@@ -88,22 +88,24 @@ async def test_internal_addresses_are_refused(monkeypatch):
     assert http.public_address("93.184.216.34") and http.public_address("2a00:1450::1")
 
 
-async def test_redirects_only_on_the_same_host(lab):
+async def test_pages_follow_no_redirects_robots_txt_does(lab):
+    """A page redirect goes back to the coordinator (robots.txt of the target path, rate
+    slots); only robots.txt follows its redirects itself."""
     async with Server() as s:
-        s.routes["/a"] = respond(status=301, headers=["Location: /b"])
-        s.routes["/b"] = respond(b"landed")
-        s.routes["/away"] = respond(status=302, headers=[f"Location: http://localhost:{s.port}/b"])
+        s.routes["/a"] = respond(status=301, headers=["Location: /private/b"])
+        s.routes["/private/b"] = respond(b"landed")
         s.routes["/ftp"] = respond(status=302, headers=["Location: ftp://x.example/f"])
         s.routes["/loop"] = respond(status=302, headers=["Location: /loop"])
         async with http.make_client("t") as c:
             r = await http.fetch(c, s.url("/a"))
-            assert r.body == b"landed" and r.final_url.endswith("/b")
-            r = await http.fetch(c, s.url("/away"))
-            assert r.status == 302 and r.redirected_to == f"http://localhost:{s.port}/b"
-            assert r.body == b""
-            r = await http.fetch(c, s.url("/ftp"))
-            assert r.redirected_to == "ftp://x.example/f"  # another host: not followed
-            assert (await http.fetch(c, s.url("/loop"))).error == "redirects"
+            assert r.status == 301 and r.body == b""
+            assert r.redirected_to == s.url("/private/b")  # same host: still not followed
+            r = await http.fetch(c, s.url("/a"), follow_redirects=True)
+            assert r.body == b"landed" and r.final_url.endswith("/private/b")
+            r = await http.fetch(c, s.url("/ftp"), follow_redirects=True)
+            assert r.error == "bad_url"  # never a non-http scheme
+            r = await http.fetch(c, s.url("/loop"), follow_redirects=True)
+            assert r.error == "redirects"
 
 
 async def test_one_deadline_for_the_whole_fetch(lab):
@@ -155,5 +157,5 @@ async def test_robots_txt_follows_redirects_to_other_hosts(lab):
         async with http.make_client("t") as c:
             pages = await http.fetch(c, s.url("/robots.txt"))
             assert pages.redirected_to and pages.body == b""  # pages: not followed
-            r = await http.fetch(c, s.url("/robots.txt"), cross_host_redirects=True)
+            r = await http.fetch(c, s.url("/robots.txt"), follow_redirects=True)
             assert r.status == 200 and r.body.startswith(b"User-agent: *")

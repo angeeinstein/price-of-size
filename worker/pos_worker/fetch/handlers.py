@@ -254,7 +254,7 @@ async def fetch_http(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
 async def fetch_robots(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
     url = str(job.payload["url"])  # https://host/robots.txt
     domain = urlsplit(url).hostname or ""
-    got = await _gated_fetch(job, url, ROBOTS_MAX_BYTES, cross_host_redirects=True)
+    got = await _gated_fetch(job, url, ROBOTS_MAX_BYTES, follow_redirects=True)
     if got is None:
         return _skipped(job, domain)
     fetched_at, res = got
@@ -365,6 +365,7 @@ async def fetch_sitemap(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
             "retry_after_s": res.retry_after_s,
             "verdict": verdict.kind,
             "reason": verdict.reason,
+            "redirect_to": res.redirected_to,
             "sitemap_kind": parsed.kind if parsed else None,
             "url_count": len(parsed.urls) if parsed else 0,
             "sitemap_count": len(parsed.sitemaps) if parsed else 0,

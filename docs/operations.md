@@ -166,7 +166,9 @@ curl -X POST https://pos.example.org/api/admin/crawl/urls -H "Authorization: Bea
 URLs are normalised (tracking parameters dropped) and queued once. Per domain:
 
 * robots.txt is fetched first and stored; with `respect_robots_txt` on (default)
-  disallowed URLs fail without a request. Crawl-delay / Request-rate cap the rate.
+  disallowed URLs fail without a request, and an unreachable robots.txt holds a
+  domain's pages back until it can be read. With it off, pages go regardless
+  (robots.txt is still fetched and kept). Crawl-delay / Request-rate cap the rate.
 * Rate slots are scheduled per (domain, egress group), starting at
   `base_rate_rps` (1 request per 5 s). After 20 clean responses the rate rises
   by 10 % up to `max_rate_rps`; 429/503/timeouts/rising latency halve it and
@@ -180,9 +182,10 @@ URLs are normalised (tracking parameters dropped) and queued once. Per domain:
   per-domain `rate_rps` override) hold across all nodes and egress groups.
 * Workers fetch public addresses only: a sitemap or redirect pointing into the
   node's own network (router, NAS, cloud metadata) is refused
-  (`blocked_address`). Redirects to another host are not followed by the worker;
-  a redirect within the same site (`www.` or not) is queued for that host, through
-  its robots.txt and rate schedule. For a lab shop on a private address, set
+  (`blocked_address`). Workers follow no page redirects themselves: a redirect
+  within the same site (`www.` or not, up to 5 hops) is queued as its own job,
+  through robots.txt and the rate schedule, so it cannot lead to a disallowed
+  path. robots.txt itself follows its redirects, as RFC 9309 asks. For a lab shop on a private address, set
   `POS_WORKER_ALLOW_PRIVATE_TARGETS=1` on that node. `GET /api/admin/domains?blocked=true`, history in
   `GET /api/admin/domains/<domain>/events`, unblock or cap a domain with
   `PATCH /api/admin/domains/<domain>` (`{"unblock": true}`, `{"rate_rps": 0.1}`).

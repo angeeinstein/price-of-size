@@ -377,34 +377,55 @@ def _far(a: Decimal, b: Decimal, factor: Decimal) -> bool:
 def price_checks(offers: list[tuple[Any, str, Any, Decimal | None, list[str]]]):
     """Offers of one product as (id, url, observed_on, price_eur, flags).
 
-    Returns (new flags per offer id, canonical price). One page counts once:
-    its latest observation stands for it, so a shop fetched daily does not
-    outvote a shop fetched once. The canonical price is the median of the
-    pages whose latest price passes every check.
+    Returns (new flags per offer id, canonical price). One page counts once: its
+    latest observation (one fetch) stands for it, so a shop fetched daily does not
+    outvote a shop fetched once. A fetch that found several offers (variants, a
+    placeholder beside the real price) votes with the median of its valid ones, in
+    whatever order the page listed them. The canonical price is the median of the
+    pages whose vote passes every check.
     """
     flags: dict[Any, set[str]] = {o[0]: set(o[4] or []) - CHECK_FLAGS for o in offers}
-    history: dict[str, list] = {}
-    for o in sorted(offers, key=lambda o: (o[2], str(o[0]))):
-        history.setdefault(o[1] or str(o[0]), []).append(o)
-    latest = []
-    for obs in history.values():
-        priced = [o for o in obs if o[3] is not None]
-        for prev, cur in zip(priced, priced[1:], strict=False):
-            if _far(cur[3], prev[3], JUMP_FACTOR):
-                flags[cur[0]].add("price_jump")
-        last = obs[-1]
-        if last[3] is not None and not (NOT_A_VALID_PRICE & flags[last[0]]):
-            latest.append(last)
-    if len(latest) == 2 and _far(latest[0][3], latest[1][3], OUTLIER_FACTOR):
-        for o in latest:  # two pages that disagree: neither is believed
-            flags[o[0]].add("price_disagreement")
+
+    def valid(o) -> bool:
+        return o[3] is not None and not (NOT_A_VALID_PRICE & flags[o[0]])
+
+    # url -> observation time -> the offers of that fetch
+    pages: dict[str, dict[Any, list]] = {}
+    for o in offers:
+        pages.setdefault(o[1] or str(o[0]), {}).setdefault(o[2], []).append(o)
+
+    def vote(obs: list) -> Decimal | None:
+        prices = [o[3] for o in obs if valid(o)]
+        return statistics.median(prices) if prices else None
+
+    latest: list[tuple[Decimal, list]] = []  # (page vote, the offers behind it)
+    for observations in pages.values():
+        history = [(when, obs, vote(obs)) for when, obs in sorted(observations.items())]
+        voted = [(obs, v) for _, obs, v in history if v is not None]
+        for (_, prev), (obs, cur) in zip(voted, voted[1:], strict=False):
+            if _far(cur, prev, JUMP_FACTOR):
+                for o in obs:
+                    flags[o[0]].add("price_jump")
+        _, last_obs, last_vote = history[-1]
+        if last_vote is not None:
+            latest.append((last_vote, [o for o in last_obs if valid(o)]))
+    if len(latest) == 2 and _far(latest[0][0], latest[1][0], OUTLIER_FACTOR):
+        for _, obs in latest:  # two pages that disagree: neither is believed
+            for o in obs:
+                flags[o[0]].add("price_disagreement")
+        latest = []
     elif len(latest) >= 3:
-        median = statistics.median(o[3] for o in latest)
-        for o in latest:
-            if _far(o[3], median, OUTLIER_FACTOR):
-                flags[o[0]].add("cross_source_outlier")
-    valid = [o[3] for o in latest if not (NOT_A_VALID_PRICE & flags[o[0]])]
-    return flags, (statistics.median(valid) if valid else None)
+        median = statistics.median(v for v, _ in latest)
+        kept = []
+        for v, obs in latest:
+            if _far(v, median, OUTLIER_FACTOR):
+                for o in obs:
+                    flags[o[0]].add("cross_source_outlier")
+            else:
+                kept.append((v, obs))
+        latest = kept
+    votes = [v for v, _ in latest]
+    return flags, (statistics.median(votes) if votes else None)
 
 
 async def _canonical_prices(session: AsyncSession, product_ids: set) -> None:
