@@ -22,12 +22,14 @@ from pos_shared.version import API_VERSION, __version__, is_compatible
 from pos_worker import cgroup, identity
 from pos_worker.client import CoordinatorClient, CoordinatorError, IncompatibleCoordinator
 from pos_worker.config import WorkerSettings
+from pos_worker.fetch import handlers as fetch_handlers  # registers the fetch handlers
 from pos_worker.handlers import HANDLERS, Handler, JobContext
 from pos_worker.spool import Spool
 
 log = logging.getLogger(__name__)
 
 EXIT_RESTART = 75  # tells the supervisor (Docker restart policy, systemd) to start us again
+JOB_OVERCOMMIT = 4  # jobs held per HTTP slot (most of them waiting for a rate slot)
 
 
 @dataclass
@@ -80,6 +82,7 @@ class Worker:
         self.heartbeat_interval = 15.0
         self.limits = cgroup.read_limits(settings.cgroup_root, settings.state_dir)
         self.slots = self._compute_slots()
+        fetch_handlers.set_concurrency(self.slots.http)
         self.active: dict[uuid.UUID, ActiveJob] = {}
         self.exit_code = 0
         self._stop = asyncio.Event()
@@ -135,8 +138,11 @@ class Worker:
             # Lease renewal keeps running while jobs drain.
             if self.active:
                 await asyncio.wait([a.task for a in self.active.values()], timeout=drain_timeout_s)
-            for a in self.active.values():
+            unfinished = list(self.active.values())
+            for a in unfinished:
                 a.task.cancel()
+            await asyncio.gather(*(a.task for a in unfinished), return_exceptions=True)
+            await self._release_unfinished(unfinished)
             for t in loops:
                 t.cancel()
             await asyncio.gather(*loops, return_exceptions=True)
@@ -147,6 +153,19 @@ class Worker:
             await self.client.aclose()
             self.spool.close()
         return self.exit_code
+
+    async def _release_unfinished(self, unfinished: list[ActiveJob]) -> None:
+        """Give the leases of jobs that did not finish back to the coordinator, so they
+        are rescheduled now instead of when their lease expires (minutes later)."""
+        leases = [api.LeaseRef(job_id=a.job.id, attempt=a.job.attempt) for a in unfinished]
+        self.active.clear()
+        if not leases:
+            return
+        try:
+            resp = await self.client.release(leases)
+            log.info("released %d unfinished jobs", len(resp.released))
+        except Exception as e:  # shutting down: never let this block the exit
+            log.warning("could not release unfinished jobs (their leases will expire): %s", e)
 
     # --- resources ---------------------------------------------------------
 
@@ -163,11 +182,16 @@ class Worker:
     async def _resource_loop(self) -> None:
         while True:
             await asyncio.sleep(self.settings.resource_poll_s)
-            self.limits = cgroup.read_limits(self.settings.cgroup_root, self.settings.state_dir)
+            try:
+                self.limits = cgroup.read_limits(self.settings.cgroup_root, self.settings.state_dir)
+            except Exception:
+                log.exception("reading resource limits failed; keeping the previous ones")
+                continue
             new = self._compute_slots()
             if new != self.slots:
                 log.info("concurrency %s -> %s", self.slots, new)
                 self.slots = new
+                fetch_handlers.set_concurrency(new.http)
                 self._capacity_freed.set()
 
     # --- heartbeat / control ----------------------------------------------
@@ -213,6 +237,7 @@ class Worker:
             log.info("desired state: %s", resp.desired.model_dump(mode="json"))
             self.desired = resp.desired
             self.slots = self._compute_slots()
+            fetch_handlers.set_concurrency(self.slots.http)
             self._capacity_freed.set()
         for cmd in resp.commands:
             await self._run_command(cmd)
@@ -309,6 +334,8 @@ class Worker:
                 log.error("coordinator refused our API version %s", API_VERSION)
             except (CoordinatorError, httpx.HTTPError) as e:
                 log.warning("heartbeat failed: %s", e)
+            except Exception:  # a loop must never die: log, then try again next round
+                log.exception("heartbeat failed unexpectedly")
             await asyncio.sleep(self.heartbeat_interval)
 
     async def _run_command(self, cmd: api.Command) -> None:
@@ -343,7 +370,9 @@ class Worker:
     # --- jobs ----------------------------------------------------------------
 
     def _free_slots(self) -> int:
-        return max(self.slots.http - len(self.active), 0)
+        # Fetch jobs mostly wait for their rate slot, so hold more jobs than slots;
+        # the fetch semaphore keeps real concurrent requests at slots.http.
+        return max(self.slots.http * JOB_OVERCOMMIT - len(self.active), 0)
 
     def _job_types(self) -> list[str]:
         types = [t for t in self.handlers if t != "fetch_browser" or self.slots.browser > 0]
@@ -374,6 +403,8 @@ class Worker:
                 self.compatible = False
             except (CoordinatorError, httpx.HTTPError) as e:
                 log.warning("lease failed: %s", e)
+            except Exception:
+                log.exception("lease failed unexpectedly")
             if got == 0:
                 self._capacity_freed.clear()
                 with contextlib.suppress(TimeoutError):
@@ -440,6 +471,8 @@ class Worker:
                 await self.renew_leases_once()
             except (CoordinatorError, httpx.HTTPError) as e:
                 log.warning("lease renewal failed (will retry): %s", e)
+            except Exception:
+                log.exception("lease renewal failed unexpectedly")
             await asyncio.sleep(self.settings.lease_check_s)
 
     # --- results -------------------------------------------------------------
@@ -466,6 +499,8 @@ class Worker:
                 await self.flush_once()
             except (CoordinatorError, httpx.HTTPError) as e:
                 log.warning("flush failed (results stay spooled): %s", e)
+            except Exception:
+                log.exception("flush failed unexpectedly (results stay spooled)")
             self._result_ready.clear()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(

@@ -4,7 +4,7 @@ import hmac
 import ipaddress
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy import func, select
@@ -76,18 +76,66 @@ CurrentNode = Annotated[Node, Depends(current_node)]
 
 @dataclass(frozen=True)
 class Admin:
+    """Who is calling an admin endpoint: the bootstrap token or a panel user."""
+
     name: str
+    role: str = "admin"  # admin | viewer
+    session: Any = None  # UserSession for panel users, None for the bootstrap token
+    user_id: Any = None
 
 
-def current_admin(request: Request, settings: AppSettings) -> Admin:
-    """Bootstrap admin auth via POS_ADMIN_TOKEN. Replaced by panel accounts (passkeys/TOTP)."""
-    token = _bearer(request)
-    if not settings.admin_token or not hmac.compare_digest(token, settings.admin_token):
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+async def current_principal(request: Request, session: Session, settings: AppSettings) -> Admin:
+    """Bootstrap token (Authorization: Bearer POS_ADMIN_TOKEN) or a panel session cookie.
+
+    Cookie-authenticated state changes must carry the CSRF token; bearer-token
+    requests are not sent automatically by browsers, so they need none.
+    """
+    from pos_coordinator.panel import auth as panel_auth
+
+    header = request.headers.get("authorization", "")
+    if header:
+        token = _bearer(request)
+        if settings.admin_token and hmac.compare_digest(token, settings.admin_token):
+            return Admin(name="admin-token")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "admin authentication required")
-    return Admin(name="admin-token")
+    cookie = request.cookies.get(panel_auth.COOKIE)
+    if cookie:
+        loaded = await panel_auth.load_session(session, cookie)
+        if loaded is not None:
+            user_session, user = loaded
+            if request.method in UNSAFE_METHODS and not panel_auth.csrf_ok(
+                user_session, request.headers.get(panel_auth.CSRF_HEADER)
+            ):
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "missing or wrong CSRF token")
+            return Admin(name=user.username, role=user.role, session=user_session, user_id=user.id)
+    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "authentication required")
+
+
+def current_viewer(principal: Annotated[Admin, Depends(current_principal)]) -> Admin:
+    return principal
+
+
+def current_admin(principal: Annotated[Admin, Depends(current_principal)]) -> Admin:
+    if principal.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "admin role required")
+    return principal
+
+
+def recent_reauth(principal: Annotated[Admin, Depends(current_admin)]) -> Admin:
+    """Sensitive actions: a panel user must have re-entered password (+TOTP) recently."""
+    from pos_coordinator.panel import auth as panel_auth
+
+    if principal.session is not None and not panel_auth.recently_reauthenticated(principal.session):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "reauthentication required")
+    return principal
 
 
 CurrentAdmin = Annotated[Admin, Depends(current_admin)]
+CurrentViewer = Annotated[Admin, Depends(current_viewer)]
+SensitiveAdmin = Annotated[Admin, Depends(recent_reauth)]
 
 
 def client_ip(request: Request, settings: Settings) -> str | None:

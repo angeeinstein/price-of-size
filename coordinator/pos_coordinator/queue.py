@@ -33,6 +33,8 @@ from pos_shared.ids import uuid7
 
 RETRY_BASE_S = 30
 RETRY_MAX_S = 3600
+SKIP_RETRY_S = 120  # a job the worker skipped (domain paused there) comes back after this
+MAX_ATTEMPTS_WITH_SKIPS = 100  # a job skipped forever still ends some day
 
 
 @dataclass
@@ -108,7 +110,13 @@ async def extend(
             Job.node_id == node_id,
             Job.status == "leased",
         )
-        .values(lease_expires_at=func.now() + timedelta(seconds=lease_s), updated_at=func.now())
+        .values(
+            # never shorten a lease: fetch leases also cover the wait for their rate slot
+            lease_expires_at=func.greatest(
+                Job.lease_expires_at, func.now() + timedelta(seconds=lease_s)
+            ),
+            updated_at=func.now(),
+        )
         .returning(Job.id)
     )
     return list((await session.execute(stmt)).scalars().all())
@@ -119,9 +127,16 @@ def _retry_delay(attempts: int) -> timedelta:
 
 
 async def complete(
-    session: AsyncSession, node_id: uuid.UUID, results: list[JobResult]
+    session: AsyncSession,
+    node_id: uuid.UUID,
+    results: list[JobResult],
+    applied: dict[uuid.UUID, Job] | None = None,
 ) -> tuple[list[uuid.UUID], dict[str, str]]:
-    """Apply a batch of results. Returns (accepted ids, {job_id: rejection reason})."""
+    """Apply a batch of results. Returns (accepted ids, {job_id: rejection reason}).
+
+    `applied`, if given, receives the jobs whose result was stored by this call
+    (accepted replays are not in it), for follow-up processing.
+    """
     accepted: list[uuid.UUID] = []
     rejected: dict[str, str] = {}
     ids = [r.job_id for r in results]
@@ -150,6 +165,8 @@ async def complete(
             await _store_fetches(session, job, node_id, r)
         _apply(job, r)
         accepted.append(job.id)
+        if applied is not None:
+            applied[job.id] = job
     return accepted, rejected
 
 
@@ -181,6 +198,19 @@ def _apply(job: Job, r: JobResult) -> None:
         job.result = r.output
         job.last_error = None
         job.finished_at = func.now()
+    elif (
+        r.retryable
+        and (r.error or "").startswith("skipped:")
+        and job.max_attempts < MAX_ATTEMPTS_WITH_SKIPS
+    ):
+        # Not fetched at all (the worker's breaker held it back): the attempt does not
+        # count against the job. Attempt numbers stay unique (results quote them), so
+        # the budget grows instead of the counter going back.
+        job.status = "queued"
+        job.max_attempts += 1
+        job.last_error = r.error
+        job.not_before = func.now() + timedelta(seconds=SKIP_RETRY_S)
+        job.finished_at = None
     elif r.retryable and job.attempts < job.max_attempts:
         job.status = "queued"
         job.last_error = r.error
@@ -223,6 +253,32 @@ async def reap_expired(session: AsyncSession) -> tuple[int, int]:
         )
     )
     return requeued.rowcount, failed.rowcount
+
+
+async def release(
+    session: AsyncSession, node_id: uuid.UUID, leases: list[tuple[uuid.UUID, int]]
+) -> list[uuid.UUID]:
+    """A node hands back leases of jobs it did not run (e.g. it is shutting down while
+    they waited for their rate slot). They are queued again at once, and the attempt
+    is not counted. Only the lease holder of that exact attempt can do this."""
+    if not leases:
+        return []
+    stmt = (
+        update(Job)
+        .where(
+            tuple_(Job.id, Job.attempts).in_(leases),
+            Job.node_id == node_id,
+            Job.status == "leased",
+        )
+        .values(
+            status="queued",
+            attempts=func.greatest(Job.attempts - 1, 0),
+            lease_expires_at=None,
+            updated_at=func.now(),
+        )
+        .returning(Job.id)
+    )
+    return list((await session.execute(stmt)).scalars().all())
 
 
 async def release_node(session: AsyncSession, node_id: uuid.UUID) -> int:

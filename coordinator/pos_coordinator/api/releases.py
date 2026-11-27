@@ -15,7 +15,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from pos_coordinator.api.deps import CurrentAdmin, CurrentNode, Session, check_api_version
+from pos_coordinator.api.deps import (
+    CurrentNode,
+    CurrentViewer,
+    SensitiveAdmin,
+    Session,
+    check_api_version,
+)
 from pos_coordinator.models import AuditLog, Release
 from pos_shared import signing
 from pos_shared.api import VERSION_PATTERN, ReleaseManifest, SignedManifest
@@ -50,7 +56,7 @@ class ReleaseCreate(BaseModel):
 
 @admin_router.post("", status_code=status.HTTP_201_CREATED, response_model=SignedManifest)
 async def create_release(
-    body: ReleaseCreate, request: Request, admin: CurrentAdmin, session: Session
+    body: ReleaseCreate, request: Request, admin: SensitiveAdmin, session: Session
 ):
     try:
         manifest = ReleaseManifest(
@@ -83,7 +89,7 @@ async def create_release(
 
 
 @admin_router.get("")
-async def list_releases(admin: CurrentAdmin, session: Session) -> list[dict[str, Any]]:
+async def list_releases(admin: CurrentViewer, session: Session) -> list[dict[str, Any]]:
     rows = (await session.execute(select(Release).order_by(Release.created_at.desc()))).scalars()
     return [
         {**_signed(r).model_dump(mode="json"), "notes": r.notes, "created_at": r.created_at}
@@ -92,7 +98,7 @@ async def list_releases(admin: CurrentAdmin, session: Session) -> list[dict[str,
 
 
 @admin_router.get("/signing-key")
-async def get_signing_key(request: Request, admin: CurrentAdmin):
+async def get_signing_key(request: Request, admin: CurrentViewer):
     pub = signing_public_key(request)
     return {"public_key": pub, "key_id": signing.key_id(pub)}
 

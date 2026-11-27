@@ -26,6 +26,9 @@ class Settings(BaseSettings):
 
     # Honour CF-Connecting-IP / X-Forwarded-For when behind Cloudflare Tunnel or Caddy.
     trust_proxy_headers: bool = False
+    # Session cookies only over HTTPS (Cloudflare). Off only for local development.
+    cookie_secure: bool = True
+    panel_dist: Path | None = None  # built control panel; auto-detected if unset
 
     access_token_ttl_s: int = 15 * 60
     challenge_ttl_s: int = 60
@@ -33,6 +36,7 @@ class Settings(BaseSettings):
     default_job_lease_s: int = 300
     max_raw_object_bytes: int = 50 * 1024 * 1024
     reaper_interval_s: float = 15.0
+    derive_interval_s: float = 10.0
     node_offline_after_s: int = 90
 
 

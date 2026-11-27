@@ -117,3 +117,12 @@ async def admin(app):
 @pytest.fixture
 def sessionmaker(app):
     return app.state.sessionmaker
+
+
+@pytest.fixture(autouse=True)
+def _reset_fetch_breaker():
+    from pos_worker.fetch import breaker
+
+    breaker.reset()
+    yield
+    breaker.reset()

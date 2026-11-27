@@ -222,3 +222,20 @@ async def test_stale_renewal_response_does_not_cancel_a_newer_attempt(app, admin
     newer.task.cancel()
     old.task.cancel()
     await agent.client.aclose()
+
+
+async def test_stopping_worker_releases_jobs_it_did_not_run(app, admin, tmp_path, sessionmaker):
+    worker = await make_agent(app, admin, tmp_path / "a", "a")
+    await admin.post(
+        "/api/admin/jobs", json={"jobs": [{"type": "sleep", "payload": {"seconds": 600}}]}
+    )
+    task = asyncio.create_task(worker.run(drain_timeout_s=0.2))
+    for _ in range(100):
+        if worker.active:
+            break
+        await asyncio.sleep(0.05)
+    worker.stop()
+    assert await task == 0
+    async with sessionmaker() as s:
+        job = (await s.execute(select(Job))).scalar_one()
+    assert job.status == "queued" and job.attempts == 0  # back at once, attempt not counted

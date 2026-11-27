@@ -156,6 +156,11 @@ class CoordinatorClient:
         r = await self._call("POST", "/api/v1/jobs/extend", json=body.model_dump(mode="json"))
         return api.ExtendResponse.model_validate(r.json())
 
+    async def release(self, leases: list[api.LeaseRef]) -> api.ReleaseResponse:
+        body = api.ReleaseRequest(leases=leases)
+        r = await self._call("POST", "/api/v1/jobs/release", json=body.model_dump(mode="json"))
+        return api.ReleaseResponse.model_validate(r.json())
+
     async def push_results(self, results: list[dict[str, Any]]) -> api.ResultAck:
         r = await self._call("POST", "/api/v1/jobs/results", json={"results": results})
         return api.ResultAck.model_validate(r.json())

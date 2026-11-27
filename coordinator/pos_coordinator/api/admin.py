@@ -7,15 +7,22 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 
 from pos_coordinator import budget, queue, runtime_settings
-from pos_coordinator.api.deps import AppSettings, CurrentAdmin, Session
+from pos_coordinator.api.deps import (
+    AppSettings,
+    CurrentAdmin,
+    CurrentViewer,
+    SensitiveAdmin,
+    Session,
+)
 from pos_coordinator.models import (
     AuditLog,
     EnrollmentCode,
+    Job,
     Node,
     NodeCommand,
     NodeToken,
@@ -42,7 +49,7 @@ class EnrollmentCodeRequest(BaseModel):
 
 @router.post("/enrollment-codes", status_code=status.HTTP_201_CREATED)
 async def create_enrollment_code(
-    body: EnrollmentCodeRequest, admin: CurrentAdmin, session: Session, settings: AppSettings
+    body: EnrollmentCodeRequest, admin: SensitiveAdmin, session: Session, settings: AppSettings
 ):
     code = new_enrollment_code()
     expires = datetime.now(UTC) + timedelta(seconds=body.ttl_s or settings.enrollment_code_ttl_s)
@@ -89,7 +96,7 @@ def _node_view(n: Node, offline_after_s: int) -> dict[str, Any]:
 
 
 @router.get("/nodes")
-async def list_nodes(admin: CurrentAdmin, session: Session, settings: AppSettings):
+async def list_nodes(admin: CurrentViewer, session: Session, settings: AppSettings):
     nodes = (await session.execute(select(Node).order_by(Node.enrolled_at))).scalars().all()
     return [_node_view(n, settings.node_offline_after_s) for n in nodes]
 
@@ -112,7 +119,7 @@ async def _get_node(session, node_id: UUID) -> Node:
 async def update_node(
     node_id: UUID,
     body: DesiredStateUpdate,
-    admin: CurrentAdmin,
+    admin: SensitiveAdmin,
     session: Session,
     settings: AppSettings,
 ):
@@ -135,7 +142,7 @@ async def update_node(
 
 
 @router.post("/nodes/{node_id}/revoke")
-async def revoke_node(node_id: UUID, admin: CurrentAdmin, session: Session):
+async def revoke_node(node_id: UUID, admin: SensitiveAdmin, session: Session):
     node = await _get_node(session, node_id)
     node.revoked_at = func.now()
     await session.execute(delete(NodeToken).where(NodeToken.node_id == node_id))
@@ -161,7 +168,7 @@ async def send_command(node_id: UUID, body: CommandRequest, admin: CurrentAdmin,
 
 
 @router.get("/nodes/{node_id}/commands")
-async def list_commands(node_id: UUID, admin: CurrentAdmin, session: Session):
+async def list_commands(node_id: UUID, admin: CurrentViewer, session: Session):
     rows = (
         await session.execute(
             select(NodeCommand)
@@ -208,8 +215,84 @@ async def enqueue_jobs(body: EnqueueRequest, admin: CurrentAdmin, session: Sessi
     return {"ids": ids}
 
 
+JOB_STATUS_PATTERN = "^(queued|leased|done|failed|cancelled)$"
+
+
+@router.get("/jobs")
+async def list_jobs(
+    viewer: CurrentViewer,
+    session: Session,
+    status_: str | None = Query(
+        None, alias="status", pattern="^(queued|leased|done|failed|cancelled)$"
+    ),
+    type_: str | None = Query(None, alias="type", max_length=40),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    q = select(Job).order_by(Job.updated_at.desc()).limit(limit)
+    if status_:
+        q = q.where(Job.status == status_)
+    if type_:
+        q = q.where(Job.type == type_)
+    return [
+        {
+            "id": j.id,
+            "type": j.type,
+            "status": j.status,
+            "attempts": j.attempts,
+            "max_attempts": j.max_attempts,
+            "domain": j.domain,
+            "url": (j.payload or {}).get("url"),
+            "last_error": (j.last_error or "")[-2000:] or None,
+            "updated_at": j.updated_at,
+            "not_before": j.not_before,
+        }
+        for j in (await session.execute(q)).scalars()
+    ]
+
+
+class JobAction(BaseModel):
+    action: str = Field(pattern="^(retry|cancel)$")
+
+
+@router.post("/jobs/{job_id}")
+async def job_action(job_id: UUID, body: JobAction, admin: CurrentAdmin, session: Session):
+    job = await session.get(Job, job_id, with_for_update=True)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such job")
+    if body.action == "retry":
+        if job.status not in ("failed", "cancelled"):
+            raise HTTPException(status.HTTP_409_CONFLICT, f"job is {job.status}")
+        job.status, job.attempts, job.not_before = "queued", 0, func.now()
+        job.finished_at = None
+    else:
+        if job.status not in ("queued", "failed"):
+            raise HTTPException(status.HTTP_409_CONFLICT, f"job is {job.status}")
+        job.status, job.finished_at = "cancelled", func.now()
+    job.updated_at = func.now()
+    _audit(session, admin, f"job.{body.action}", str(job_id))
+    await session.commit()
+    return {"id": job_id, "action": body.action}
+
+
+@router.get("/audit")
+async def audit_log(viewer: CurrentViewer, session: Session, limit: int = Query(200, le=1000)):
+    rows = (
+        await session.execute(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit))
+    ).scalars()
+    return [
+        {
+            "at": a.created_at,
+            "actor": a.actor,
+            "action": a.action,
+            "target": a.target,
+            "details": a.details,
+        }
+        for a in rows
+    ]
+
+
 @router.get("/jobs/stats")
-async def job_stats(admin: CurrentAdmin, session: Session):
+async def job_stats(admin: CurrentViewer, session: Session):
     return await queue.queue_stats(session)
 
 
@@ -217,12 +300,12 @@ async def job_stats(admin: CurrentAdmin, session: Session):
 
 
 @router.get("/settings")
-async def get_settings(admin: CurrentAdmin, session: Session):
+async def get_settings(admin: CurrentViewer, session: Session):
     return await runtime_settings.get_all(session)
 
 
 @router.put("/settings/{key}")
-async def put_setting(key: str, body: dict[str, Any], admin: CurrentAdmin, session: Session):
+async def put_setting(key: str, body: dict[str, Any], admin: SensitiveAdmin, session: Session):
     if "value" not in body:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, 'body must be {"value": ...}')
     try:
@@ -237,6 +320,6 @@ async def put_setting(key: str, body: dict[str, Any], admin: CurrentAdmin, sessi
 
 
 @router.get("/budget")
-async def get_budget(admin: CurrentAdmin, session: Session):
+async def get_budget(admin: CurrentViewer, session: Session):
     s = await budget.status(session)
     return {**s.__dict__, "ahead_of_pace": s.ahead_of_pace}

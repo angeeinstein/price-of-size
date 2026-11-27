@@ -37,6 +37,64 @@ jobs:
           POS_DATABASE_URL: postgresql+psycopg://pos:pos@localhost:5432/pos_test
       - run: uv run pytest -q
 
+  panel:
+    # Typecheck and build the control panel, then drive it in a real browser against a
+    # real coordinator (login, every page, a CSRF-protected change, dark mode).
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: pos
+          POSTGRES_PASSWORD: pos
+          POSTGRES_DB: pos_panel
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pos" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      POS_DATABASE_URL: postgresql+psycopg://pos:pos@localhost:5432/pos_panel
+      POS_COOKIE_SECURE: "false"
+      POS_RAW_STORE_PATH: /tmp/pos-raw
+      POS_SIGNING_KEY_PATH: /tmp/pos-key.pem
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: panel/package-lock.json
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: npm ci --no-audit --no-fund
+        working-directory: panel
+      - run: npm run build
+        working-directory: panel
+      - run: npx playwright install --with-deps chromium
+        working-directory: panel
+      - run: uv sync --locked
+      - name: Coordinator with a panel user
+        run: |
+          uv run pos-coordinator migrate
+          echo "ci-panel-passphrase-1" | uv run pos-coordinator create-user admin --password-stdin
+          nohup uv run pos-coordinator serve --port 8000 > coordinator.log 2>&1 &
+          for i in $(seq 1 30); do curl -fs localhost:8000/healthz && break; sleep 1; done
+      - name: Browser smoke test
+        run: npm run e2e
+        working-directory: panel
+        env:
+          BASE_URL: http://localhost:8000
+          PANEL_PASSWORD: ci-panel-passphrase-1
+          SHOTS_DIR: ${{ runner.temp }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: panel-screenshots
+          path: ${{ runner.temp }}/*.png
+          if-no-files-found: ignore
+      - if: failure()
+        run: cat coordinator.log
+
   shell:
     runs-on: ubuntu-latest
     steps:

@@ -2,19 +2,41 @@
 
 import asyncio
 import contextlib
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from pos_coordinator import maintenance, signing_key
-from pos_coordinator.api import admin, jobs, nodes, raw, releases
+from pos_coordinator import maintenance, rawstore, signing_key
+from pos_coordinator.api import admin, crawl, jobs, nodes, raw, releases
 from pos_coordinator.api.deps import Session
 from pos_coordinator.config import Settings, get_settings
 from pos_coordinator.db import make_engine, make_sessionmaker
+from pos_coordinator.derive import fx
+from pos_coordinator.derive import stage as derive_stage
+from pos_coordinator.panel import api as panel_api
+from pos_coordinator.panel import static as panel_static
 from pos_coordinator.partitions import PartitionCache
 from pos_coordinator.rawstore import RawStore
 from pos_shared.version import API_VERSION, __version__
+
+
+async def fx_daily(sm) -> None:
+    """ECB reference rates, refreshed once a day (failures only delay conversion)."""
+    log = logging.getLogger("pos_coordinator.fx")
+    while True:
+        try:
+            async with sm() as session:
+                n = await fx.refresh_from_ecb(session)
+                await session.commit()
+            log.info("ECB rates refreshed (%d rows)", n)
+            await asyncio.sleep(24 * 3600)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # network or ECB down: retry in an hour
+            log.warning("ECB rate refresh failed: %s", e)
+            await asyncio.sleep(3600)
 
 
 def create_app(settings: Settings | None = None, *, run_maintenance: bool = True) -> FastAPI:
@@ -30,21 +52,33 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
         )
         app.state.engine = engine
         app.state.sessionmaker = make_sessionmaker(engine)
-        task = None
+        await rawstore.bind_to_database(app.state.sessionmaker, app.state.rawstore)
+        tasks: list[asyncio.Task] = []
         if run_maintenance:
-            task = asyncio.create_task(
-                maintenance.loop(
-                    app.state.sessionmaker,
-                    settings.reaper_interval_s,
-                    settings.agent_dir,
-                    app.state.signing_key,
+            tasks.append(
+                asyncio.create_task(
+                    maintenance.loop(
+                        app.state.sessionmaker,
+                        settings.reaper_interval_s,
+                        settings.agent_dir,
+                        app.state.signing_key,
+                    )
                 )
             )
+            tasks.append(
+                asyncio.create_task(
+                    derive_stage.loop(
+                        app.state.sessionmaker, app.state.rawstore, settings.derive_interval_s
+                    )
+                )
+            )
+            tasks.append(asyncio.create_task(fx_daily(app.state.sessionmaker)))
         try:
             yield
         finally:
-            if task is not None:
+            for task in tasks:
                 task.cancel()
+            for task in tasks:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
             await engine.dispose()
@@ -58,12 +92,23 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
     @app.get("/healthz")
     async def healthz(session: Session):
         await session.execute(text("SELECT 1"))
-        return {"ok": True, "version": __version__, "api_version": API_VERSION}
+        # A missing raw store is reported, not failed: health gates would otherwise roll
+        # back a healthy release because the NAS is down.
+        return {
+            "ok": True,
+            "version": __version__,
+            "api_version": API_VERSION,
+            "raw_store": app.state.rawstore.available(),
+        }
 
     @app.get("/api/v1/version")
     async def version():
         return {"version": __version__, "api_version": API_VERSION}
 
-    for module in (nodes, jobs, raw, releases, admin):
+    for module in (nodes, jobs, raw, releases, admin, crawl, panel_api):
         app.include_router(module.router)
+    app.add_middleware(panel_static.SecurityHeaders)
+    dist = panel_static.find_dist(settings.panel_dist)
+    if dist is not None:  # last: the SPA catch-all must not shadow the API
+        panel_static.mount(app, dist)
     return app

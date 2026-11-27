@@ -52,6 +52,21 @@ Private images: pass `--registry-user`, `--registry-token` (and
 `/etc/pos/registry.env` (0600) and handed to the agent, which pulls signed
 updates with them; re-runs and `--update` keep them unless new ones are given.
 
+### The control panel and the first admin
+
+The coordinator serves the control panel at its URL. Create the first admin on
+the coordinator host:
+
+```bash
+docker exec -it pos-coordinator-a pos-coordinator create-user admin --role admin
+```
+
+Then sign in, set up two-factor sign-in (Account page) and add further users
+(Users page). Admins change things, viewers only look. Sensitive actions
+(releases, node targets, revocation, settings, users) ask for the password again
+if the last sign-in is older than 10 minutes. Every admin action is in the audit
+log. The bootstrap `POS_ADMIN_TOKEN` keeps working for scripts.
+
 ### Without the agent ("simple mode")
 
 For machines where you do not want a container with access to the Docker
@@ -139,6 +154,57 @@ inactive slot stopped, and updates when the signed desired release differs:
 `install.sh --update` updates the installer-managed parts (agent bootstrap,
 simple-mode worker). In agent mode the coordinator steers versions.
 
+## Crawling
+
+Queue URLs (the control panel will do this; for now the admin API):
+
+```bash
+curl -X POST https://pos.example.org/api/admin/crawl/urls -H "Authorization: Bearer $POS_ADMIN_TOKEN" \
+  -H 'content-type: application/json' -d '{"source": "ikea", "urls": ["https://www.ikea.com/at/de/p/..."]}'
+```
+
+URLs are normalised (tracking parameters dropped) and queued once. Per domain:
+
+* robots.txt is fetched first and stored; with `respect_robots_txt` on (default)
+  disallowed URLs fail without a request. Crawl-delay / Request-rate cap the rate.
+* Rate slots are scheduled per (domain, egress group), starting at
+  `base_rate_rps` (1 request per 5 s). After 20 clean responses the rate rises
+  by 10 % up to `max_rate_rps`; 429/503/timeouts/rising latency halve it and
+  pause the domain (Retry-After honoured, cooldown doubling up to 6 h).
+* New domains get one request at a time until 10 pages answered (slow start).
+* A challenge page (CAPTCHA, bot wall) pauses a domain for an hour
+  (`block_suspected`); a second one in a row, or five 403s in a row, blocks it.
+  CAPTCHA widgets on ordinary pages (a newsletter form) do not count. Nothing
+  tries to get around a block.
+* robots.txt is the site's wish, not a per-IP budget: its `Crawl-delay` (and a
+  per-domain `rate_rps` override) hold across all nodes and egress groups.
+* Workers fetch public addresses only: a sitemap or redirect pointing into the
+  node's own network (router, NAS, cloud metadata) is refused
+  (`blocked_address`). Redirects to another host are not followed by the worker;
+  a redirect within the same site (`www.` or not) is queued for that host, through
+  its robots.txt and rate schedule. For a lab shop on a private address, set
+  `POS_WORKER_ALLOW_PRIVATE_TARGETS=1` on that node. `GET /api/admin/domains?blocked=true`, history in
+  `GET /api/admin/domains/<domain>/events`, unblock or cap a domain with
+  `PATCH /api/admin/domains/<domain>` (`{"unblock": true}`, `{"rate_rps": 0.1}`).
+* The crawler identifies itself with `user_agent` (default `PriceOfSizeBot/0.1`).
+
+### Sources and discovery
+
+A source describes where URLs come from. Sitemaps advertised in robots.txt,
+explicit sitemaps and seed pages are fetched through the same polite schedule;
+sitemap indexes are followed, and URLs matching `product_url_pattern` are queued
+as pages (other hosts than the sitemap's only with `allow_domains`).
+
+```bash
+curl -X PUT https://pos.example.org/api/admin/sources/ikea -H "Authorization: Bearer $POS_ADMIN_TOKEN" \
+  -H 'content-type: application/json' -d '{"type": "scraper", "config": {
+    "domains": ["www.ikea.com"], "product_url_pattern": "/at/de/p/[^/]+-\\d+/?$", "priority": 0}}'
+curl -X POST https://pos.example.org/api/admin/sources/ikea/discover -H "Authorization: Bearer $POS_ADMIN_TOKEN"
+```
+
+The first `discover` of a new domain queues its robots.txt (and seeds); once
+robots.txt is known, `discover` again queues the advertised sitemaps.
+
 ## Backups
 
 * **Database role:** `pos-db-backup.timer` dumps the database nightly
@@ -178,3 +244,11 @@ docker logs pos-worker-a                                   # the worker itself
   (restored from scratch?). Re-enroll the node: `install.sh --uninstall --purge
   --role node`, then install with a new code.
 * *Docker not running in an LXC:* enable nesting.
+* *`/healthz` says `"raw_store": false`, log says "raw store ... is not this
+  installation's store":* the raw store directory does not hold the marker
+  (`.pos-rawstore`) the database recorded on first start, usually because the
+  NAS is not mounted. Nothing is lost meanwhile: raw uploads are refused (nodes
+  retry), fetch jobs stay queued and derivation waits. Mount the NAS; it
+  recovers by itself. After *moving* the raw store on purpose, accept the new
+  location once with `docker exec pos-coordinator-a pos-coordinator
+  raw-store-adopt`.
