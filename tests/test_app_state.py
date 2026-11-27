@@ -251,3 +251,17 @@ def test_a_recommendation_without_identifiers_does_not_displace_the_product():
     _, ex = _extract(state)  # the JSON-LD has no sku: no match, fallback ranking
     pkg = next(m for m in ex.measurements if m.basis == "package")
     assert pkg.mass_kg == pytest.approx(10)
+
+
+def test_a_capture_cut_short_gives_no_package_total():
+    state = {"product": {"netWeight": "5 kg", "packages": [{"weight": "1 kg"} for _ in range(60)]}}
+    snip, ex = _extract(state)
+    assert snip["app_state"][-1] == {"truncated": True}
+    assert not [m for m in ex.measurements if m.basis == "package"]
+    assert [m.mass_kg for m in ex.measurements if m.mass_kg] == [pytest.approx(5)]
+    # within the limit: the full total
+    state["product"]["packages"] = state["product"]["packages"][:30]
+    snip, ex = _extract(state)
+    assert not any(it.get("truncated") for it in snip["app_state"])
+    pkg = next(m for m in ex.measurements if m.basis == "package")
+    assert pkg.mass_kg == pytest.approx(30)

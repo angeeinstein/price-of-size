@@ -245,9 +245,14 @@ def pairs(
     `main`: identifiers of the page's product from JSON-LD ({"gtin": ..., "sku": ...})."""
     out: list[tuple[str, str]] = []
     boxes: dict[str, list[dict]] = {}
+    # The worker hit a limit: some boxes may be missing, so neither one box's size nor
+    # a sum is the package (other values stay: each is complete on its own).
+    truncated = any(isinstance(it, dict) and it.get("truncated") for it in state)
     for item in main_product(state, main):
         path = item.get("path", "")
         root = package_root(path)
+        if root is not None and truncated:
+            continue
         context = _context(path)
         if context:
             # e.g. "maximum load weight": the spec-text tier reads it as a capacity

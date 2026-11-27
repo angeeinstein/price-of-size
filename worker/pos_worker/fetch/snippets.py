@@ -232,8 +232,13 @@ def _inside_package(path: str, owner) -> bool:
     return any(PACKAGE_PATH.search(seg) for seg in re.split(r"[.\[\]]+", below) if seg)
 
 
-def _state_nodes(obj, path: str, found: list, depth: int = 0, owner=None) -> None:
-    if depth > 40 or len(found) >= MAX_STATE_NODES:
+def _state_nodes(obj, path: str, found: list, meta: dict, depth: int = 0, owner=None) -> None:
+    """Collect size nodes into `found`; `meta["truncated"]` when one had to be left out
+    (limits): then the capture is incomplete and package totals must not be summed."""
+    if meta["truncated"]:
+        return
+    if depth > 40:
+        meta["truncated"] = True
         return
     if isinstance(obj, dict):
         keys = {_norm_key(k) for k in obj}
@@ -244,18 +249,29 @@ def _state_nodes(obj, path: str, found: list, depth: int = 0, owner=None) -> Non
             owner = {"path": path, "ids": ids}
         if len(keys & SIZE_KEYS) >= 2 or ({"weight", "netweight", "grossweight"} & keys):
             node = _compact(obj)
-            if node and len(json.dumps(node, default=str)) <= MAX_STATE_NODE_CHARS:
+            if not node:
+                pass
+            elif len(found) >= MAX_STATE_NODES or (
+                len(json.dumps(node, default=str)) > MAX_STATE_NODE_CHARS
+            ):
+                meta["truncated"] = True
+                return
+            else:
                 found.append({"path": path, "node": node, **({"owner": owner} if owner else {})})
         for k, v in obj.items():
             if isinstance(v, dict | list) and not MEDIA_HINT.search(str(k)):
-                _state_nodes(v, f"{path}.{k}" if path else str(k), found, depth + 1, owner)
+                _state_nodes(v, f"{path}.{k}" if path else str(k), found, meta, depth + 1, owner)
     elif isinstance(obj, list):
-        for i, v in enumerate(obj[:500]):
-            _state_nodes(v, f"{path}[{i}]", found, depth + 1, owner)
+        # No cap on the length: the script itself is bounded (MAX_STATE_SCRIPT_CHARS).
+        for i, v in enumerate(obj):
+            _state_nodes(v, f"{path}[{i}]", found, meta, depth + 1, owner)
 
 
 def _app_state(doc, budget) -> list[dict]:
+    """Size nodes of the page's state; a last {"truncated": true} entry if limits cut
+    the capture short."""
     found: list[dict] = []
+    meta = {"truncated": False}
     for el in doc.xpath(STATE_SCRIPT):
         text = el.text or ""
         if not text.strip() or len(text) > MAX_STATE_SCRIPT_CHARS:
@@ -264,14 +280,17 @@ def _app_state(doc, budget) -> list[dict]:
             data = json.loads(text)
         except (ValueError, RecursionError):
             continue
-        _state_nodes(data, "", found)
-        if len(found) >= MAX_STATE_NODES:
+        _state_nodes(data, "", found, meta)
+        if meta["truncated"]:
             break
     kept = []
     for item in found:
         if budget.take(json.dumps(item, default=str)) is None:
+            meta["truncated"] = True
             break
         kept.append(item)
+    if meta["truncated"]:
+        kept.append({"truncated": True})
     return kept
 
 
