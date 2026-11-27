@@ -6,7 +6,8 @@ coordinator's (the coordinator only adds to the API within one major version).
 """
 
 __version__ = "0.1.0"
-API_VERSION = "1.0"
+# 1.1: signing key in enrollment, GET /api/v1/nodes/signing-key, releases
+API_VERSION = "1.1"
 
 API_VERSION_HEADER = "X-POS-API-Version"
 

@@ -62,7 +62,9 @@ def load_or_create(state_dir: Path) -> Identity:
     return Identity(private_key=key, node_id=node_id, coordinator_signing_key=signing_key)
 
 
-def save_enrollment(state_dir: Path, node_id: uuid.UUID, coordinator_signing_key: str) -> None:
+def save_enrollment(
+    state_dir: Path, node_id: uuid.UUID, coordinator_signing_key: str | None
+) -> None:
     path = state_dir / IDENTITY_FILE
     tmp = path.with_suffix(".tmp")
     tmp.write_text(

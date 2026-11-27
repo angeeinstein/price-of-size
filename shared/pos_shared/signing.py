@@ -48,3 +48,27 @@ def verify(public_key_b64_: str, obj: Any, signature_b64: str) -> bool:
     except (InvalidSignature, ValueError):
         return False
     return True
+
+
+def open_signed_manifest(raw: Any, public_key: str | None):
+    """Verify a signed release manifest exactly as received, then parse it.
+
+    The signature covers the manifest as the coordinator signed it, so it is
+    checked over the received JSON, not over a re-serialization of the parsed
+    model: a node that does not know a field a newer coordinator added must
+    still accept the release (and never accept a modified one).
+    Returns (manifest, None) or (None, reason).
+    """
+    from pos_shared.api import ReleaseManifest
+
+    if not isinstance(raw, dict) or not isinstance(raw.get("manifest"), dict):
+        return None, "malformed signed manifest"
+    signature = raw.get("signature")
+    if public_key is None:
+        return None, "no pinned coordinator key"
+    if not isinstance(signature, str) or not verify(public_key, raw["manifest"], signature):
+        return None, "not signed by the pinned key"
+    try:
+        return ReleaseManifest.model_validate(raw["manifest"]), None
+    except ValueError as e:
+        return None, f"malformed manifest: {e}"
