@@ -197,3 +197,24 @@ def test_signed_manifest_is_verified_as_received():
     assert signing.open_signed_manifest(raw, other)[0] is None
     assert signing.open_signed_manifest(raw, None)[0] is None
     assert signing.open_signed_manifest({"manifest": "x"}, pub)[0] is None
+
+
+def test_rollback_keeps_a_newer_schema(migrated_db):
+    """Codex finding: an older coordinator's `migrate` meets a database revision it
+    does not know (the newer release migrated it) and must keep it, not fail."""
+    from sqlalchemy import create_engine, text
+
+    from pos_coordinator import schema
+    from tests.conftest import alembic_config
+
+    eng = create_engine(migrated_db)
+    with eng.begin() as c:
+        head = c.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        c.execute(text("UPDATE alembic_version SET version_num = '9999_from_the_future'"))
+    try:
+        assert schema.upgrade(alembic_config(), migrated_db) == "newer"
+    finally:
+        with eng.begin() as c:
+            c.execute(text("UPDATE alembic_version SET version_num = :h"), {"h": head})
+        eng.dispose()
+    assert schema.upgrade(alembic_config(), migrated_db) == "upgraded"  # at head: a no-op
