@@ -26,6 +26,8 @@ def upgrade() -> None:
         sa.Column("last_received_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_id", sa.UUID(), nullable=True),
         sa.Column("processed", sa.BigInteger(), server_default="0", nullable=False),
+        sa.Column("errors", sa.BigInteger(), server_default="0", nullable=False),
+        sa.Column("last_error", sa.Text(), nullable=True),
         sa.Column(
             "started_at",
             sa.DateTime(timezone=True),

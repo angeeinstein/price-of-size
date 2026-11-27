@@ -144,11 +144,10 @@ def test_variants_aggregate_offers_and_marketplace():
     ("ld", "blocks", "title", "flag"),
     [
         ({"price": "0.01"}, [], "x", "placeholder_price"),
-        ({"price": "9999"}, [], "x", "placeholder_price"),
+        ({"price": "99999"}, [], "x", "placeholder_price"),
         ({"price": "12", "availability": "OutOfStock"}, [], "x", "unavailable"),
         (
-            {
-                "price": "1.99",
+            {  # only a base price (per kg) is given: not the item price
                 "priceSpecification": {
                     "@type": "UnitPriceSpecification",
                     "price": "3.98",
@@ -236,3 +235,133 @@ def test_pack_size_rules(title, pack):
     from pos_shared.extract.price_rules import pack_size
 
     assert pack_size(title) == pack
+
+
+# --- regressions from the independent review (each input was confirmed broken) --------
+
+
+def _offer_ld(**offer):
+    return {"@type": "Product", "name": "x", "offers": {"@type": "Offer", **offer}}
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        '{"@type": "BreadcrumbList", "itemListElement": [{"position": "1", "name": "a"},'
+        ' {"position": 2, "name": "b"}, {"position": null, "name": "c"}]}',
+        json.dumps(_offer_ld(price="5", priceCurrency="EUR", priceSpecification=["x", 3])),
+        '{"@type": null, "name": "x"}',
+        '{"@type": ["Product", null, 7], "name": "x", "offers": {"price": "5"}}',
+        "[" * 5000 + "]" * 5000,
+        '{"@type": "Product", "offers": "free"}',
+    ],
+)
+def test_hostile_json_ld_never_raises(doc):
+    extract_evidence(evidence([doc]))
+
+
+@pytest.mark.parametrize("price", [float("nan"), float("inf"), True, "NaN"])
+def test_non_finite_and_boolean_prices_are_no_prices(price):
+    ex = extract_evidence(evidence([_offer_ld(price=price, priceCurrency="EUR")]))
+    assert ex.offers[0].price is None
+    doc = '{"@type": "Product", "name": "x", "offers": {"price": 1e400, "priceCurrency": "EUR"}}'
+    assert extract_evidence(evidence([doc])).offers[0].price is None  # json reads inf
+
+
+def test_negative_price_is_kept_and_flagged():
+    ex = extract_evidence(evidence([_offer_ld(price="-5,00", priceCurrency="EUR")]))
+    assert ex.offers[0].price == -5.0 and "placeholder_price" in ex.flags
+
+
+def test_base_price_beside_the_item_price_is_not_a_unit_price():
+    spec = {
+        "@type": "UnitPriceSpecification",
+        "price": "4.00",
+        "priceCurrency": "EUR",
+        "referenceQuantity": {"value": 1, "unitCode": "KGM"},
+    }
+    ex = extract_evidence(
+        evidence([_offer_ld(price="19.99", priceCurrency="EUR", priceSpecification=spec)])
+    )
+    assert ex.offers[0].price == 19.99 and ex.offers[0].price_kind == "item"
+    assert "unit_price" not in ex.flags
+
+
+def test_strikethrough_price_is_not_the_price():
+    specs = [
+        {"@type": "UnitPriceSpecification", "priceType": "https://schema.org/StrikethroughPrice",
+         "price": "99.00"},
+        {"@type": "UnitPriceSpecification", "price": "79.00"},
+    ]  # fmt: skip
+    ex = extract_evidence(evidence([_offer_ld(priceCurrency="EUR", priceSpecification=specs)]))
+    assert ex.offers[0].price == 79.0
+
+
+def test_aggregate_offer_details():
+    ld = {
+        "@type": "Product",
+        "name": "x",
+        "offers": {
+            "@type": "AggregateOffer",
+            "lowPrice": 0,
+            "priceCurrency": "EUR",
+            "offers": [{"@type": "Offer", "price": "12.00"}],
+        },
+    }
+    ex = extract_evidence(evidence([ld]))
+    low, nested = ex.offers
+    assert low.price == 0.0  # zero is a value (and a placeholder), not "missing"
+    assert nested.currency == "EUR"  # inherited from the AggregateOffer
+
+
+def test_main_product_is_the_page_entity_not_a_nested_one():
+    ld = {
+        "@type": "Product",
+        "name": "Sofa",
+        "review": {
+            "@type": "Review",
+            "itemReviewed": {"@type": "Product", "name": "Kissen", "offers": {"price": "9"}},
+        },
+    }
+    assert extract_evidence(evidence([ld])).title == "Sofa"
+
+
+def test_gtin_keys_skip_placeholders_and_variants_as_dict():
+    ld = {"@type": "Product", "name": "x", "gtin13": "n/a", "gtin": "4006381333931"}
+    assert extract_evidence(evidence([ld])).gtin == "4006381333931"
+    group = {"@type": "ProductGroup", "name": "x", "hasVariant": {"@type": "Product"}}
+    assert extract_evidence(evidence([group])).variants == 1
+
+
+def test_json_ld_quantities():
+    ld = {
+        "@type": "Product",
+        "name": "x",
+        "weight": "1,250 kg",  # a German page: 1.25 kg
+        "width": {"value": 40, "unitCode": "cm"},  # not a UN/CEFACT code, still clear
+    }
+    (m,) = extract_evidence(evidence([ld], lang="de")).measurements
+    assert m.mass_kg == pytest.approx(1.25) and m.a_m == pytest.approx(0.4)
+
+
+def test_spec_blocks_keep_line_boundaries():
+    blocks = ["<ul><li>Gewicht: 3 kg</li><li>Maße: 10 x 20 x 30 cm</li></ul>"]
+    (m,) = extract_evidence(evidence(spec_blocks=blocks)).measurements
+    assert m.mass_kg == 3.0 and m.a_m == pytest.approx(0.3)
+
+
+def test_load_capacity_is_not_the_mass_and_swiss_masse_are_dimensions():
+    rows = (
+        "<table><tr><th>Max. Benutzergewicht</th><td>120 kg</td></tr>"
+        "<tr><th>Belastbarkeit</th><td>150 kg</td></tr>"
+        "<tr><th>Gewicht</th><td>8 kg</td></tr>"
+        "<tr><th>Masse</th><td>60 x 60 x 100 cm</td></tr></table>"
+    )
+    (m,) = extract_evidence(evidence(tables=[rows])).measurements
+    assert m.mass_kg == 8.0 and m.a_m == pytest.approx(1.0)
+
+
+def test_without_packaging_is_the_product():
+    rows = "<table><tr><th>Gewicht ohne Verpackung</th><td>8 kg</td></tr></table>"
+    (m,) = extract_evidence(evidence(tables=[rows])).measurements
+    assert m.basis == "product"

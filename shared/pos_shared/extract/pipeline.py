@@ -11,7 +11,7 @@ def extract_evidence(evidence: dict[str, Any]) -> Extraction:
     snip = evidence.get("snippets") or {}
     locale = (snip.get("lang") or "")[:2].lower() or None
     ex = Extraction(extract_version=EXTRACT_VERSION)
-    pairs = jsonld.extract(snip.get("json_ld") or [], ex)
+    pairs = jsonld.extract(snip.get("json_ld") or [], ex, locale)
     html_pairs = spectext.pairs_from_html(
         (snip.get("tables") or [])
         + (snip.get("definition_lists") or [])

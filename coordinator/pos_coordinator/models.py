@@ -465,6 +465,8 @@ class DeriveCursor(Base):
     last_received_at: Mapped[datetime | None]
     last_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     processed: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    errors: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    last_error: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime] = created()
     updated_at: Mapped[datetime] = created()
 

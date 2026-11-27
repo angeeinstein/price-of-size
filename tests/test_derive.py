@@ -301,3 +301,55 @@ async def test_repeated_fetches_do_not_outvote_other_shops(world):
             .all()
         )
     assert outliers == ["c"] and product.canonical_price_eur == Decimal("115.0000")
+
+
+def test_placeholder_and_short_gtins_are_not_identities():
+    assert not stage.gtin_usable("0000000000000")  # a filler: valid check digit, no product
+    assert not stage.gtin_usable("17")  # an internal id, would pass once padded
+    assert not stage.gtin_usable("1111111111116")
+    assert stage.gtin_usable("4006381333931") and stage.gtin_usable("96385074")
+
+
+async def test_a_poisonous_fetch_is_skipped_not_blocking(world, monkeypatch):
+    sm, store = world
+    good = _evidence("4006381333931", "10", "EUR", name="Good")
+    await _fetch(sm, store, _evidence("", "10", "EUR", name="Bad"), "https://a.example/bad", "a")
+    await _fetch(
+        sm, store, _evidence("", "12345678901234", "EUR", name="Huge"), "https://a.example/x", "a"
+    )
+    await _fetch(sm, store, good, "https://a.example/good", "a")
+    real = stage.extract_evidence
+
+    def explode(evidence):
+        if evidence["snippets"]["title"] == "Bad":
+            raise RecursionError("a parser bug")
+        return real(evidence)
+
+    monkeypatch.setattr(stage, "extract_evidence", explode)
+    report = await stage.run_until_caught_up(sm, store, settle=NOW)
+    assert (report.fetches, report.errors) == (3, 1)
+    async with sm() as s:
+        cur = (await s.execute(select(DeriveCursor))).scalar_one()
+        titles = set((await s.execute(select(Product.title))).scalars())
+        huge = (
+            await s.execute(select(Offer).where(Offer.flags.contains(["invalid_price"])))
+        ).scalar_one()
+    assert titles == {"Good", "Huge"} and cur.errors == 1 and "RecursionError" in cur.last_error
+    assert huge.price is None  # 1.2e13 does not fit (nor is it a price): flagged, not stored
+
+
+async def test_an_unmounted_store_pauses_derivation(world):
+    sm, store = world
+    await _fetch(sm, store, _evidence("", "10", "EUR"), "https://a.example/1", "a")
+    store.bind(store.expected_id or "x")
+    marker = store.root / ".pos-rawstore"
+    saved = marker.read_text()
+    marker.unlink()  # what an unmounted NAS looks like: an empty directory
+    try:
+        report = await stage.run_until_caught_up(sm, store, settle=NOW)
+        assert report.store_unavailable and report.fetches == 0
+        async with sm() as s:
+            assert (await s.execute(select(func.count()).select_from(Offer))).scalar_one() == 0
+    finally:
+        marker.write_text(saved)
+    assert (await stage.run_until_caught_up(sm, store, settle=NOW)).fetches == 1

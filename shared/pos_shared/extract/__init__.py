@@ -5,4 +5,4 @@ how derived data is rebuilt. Nothing here decides which candidate wins; that is
 normalization's job, and every candidate keeps its method and confidence.
 """
 
-EXTRACT_VERSION = "1"
+EXTRACT_VERSION = "2"

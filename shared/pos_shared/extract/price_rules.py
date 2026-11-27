@@ -6,7 +6,9 @@ import re
 from pos_shared.extract.model import Extraction, OfferCandidate
 
 PLACEHOLDERS = {0.0, 0.01, 1.0}
-NINES = re.compile(r"^9{3,}(\.9+)?$")  # 999, 9999, 99999, 999.99, ...
+# 99999, 999999.99, 9999999.00: "price on request" fillers. Not 999 or 9999.99,
+# which are ordinary prices.
+NINES = re.compile(r"^9{5,}\.(?:9+|0+)$")
 
 
 def _rx(*alternatives: str) -> re.Pattern[str]:
@@ -49,7 +51,7 @@ def price_flags(offer: OfferCandidate) -> list[str]:
     p = offer.price
     if p is None:
         flags.append("no_price")
-    elif p < 0 or p in PLACEHOLDERS or NINES.match(f"{p:g}"):
+    elif p < 0 or p in PLACEHOLDERS or NINES.match(f"{p:.2f}"):
         flags.append("placeholder_price")
     if offer.availability in ("out_of_stock", "discontinued"):
         flags.append("unavailable")

@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from pos_coordinator import maintenance, signing_key
+from pos_coordinator import maintenance, rawstore, signing_key
 from pos_coordinator.api import admin, crawl, jobs, nodes, raw, releases
 from pos_coordinator.api.deps import Session
 from pos_coordinator.config import Settings, get_settings
@@ -52,6 +52,7 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
         )
         app.state.engine = engine
         app.state.sessionmaker = make_sessionmaker(engine)
+        await rawstore.bind_to_database(app.state.sessionmaker, app.state.rawstore)
         tasks: list[asyncio.Task] = []
         if run_maintenance:
             tasks.append(
@@ -91,7 +92,14 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
     @app.get("/healthz")
     async def healthz(session: Session):
         await session.execute(text("SELECT 1"))
-        return {"ok": True, "version": __version__, "api_version": API_VERSION}
+        # A missing raw store is reported, not failed: health gates would otherwise roll
+        # back a healthy release because the NAS is down.
+        return {
+            "ok": True,
+            "version": __version__,
+            "api_version": API_VERSION,
+            "raw_store": app.state.rawstore.available(),
+        }
 
     @app.get("/api/v1/version")
     async def version():

@@ -50,7 +50,11 @@ log = logging.getLogger(__name__)
 STAGE = "extract"
 VALIDATOR_VERSION = "2"
 VERSION = f"extract={EXTRACT_VERSION};units={UNITS_VERSION};validate={VALIDATOR_VERSION}"
-SETTLE = timedelta(seconds=30)
+# received_at is the start of the inserting transaction; a result transaction that
+# commits later becomes visible behind it. Result transactions take seconds (lock
+# timeouts of 10 s, retries), so ten minutes leaves a wide margin.
+SETTLE = timedelta(minutes=10)
+MAX_PRICE = Decimal("1e12")  # beyond any real offer (and below Numeric(18,4))
 
 # Offers with any of these flags do not count for a product's canonical price.
 NOT_A_VALID_PRICE = {
@@ -93,6 +97,8 @@ class BatchReport:
     measurements: int = 0
     products: int = 0
     missing_blobs: int = 0
+    errors: int = 0  # fetches whose derivation raised: logged, counted, skipped
+    store_unavailable: int = 0  # rounds that stopped because the raw store is not there
 
 
 def gtin_valid(gtin: str) -> bool:
@@ -104,8 +110,17 @@ def gtin_valid(gtin: str) -> bool:
     return (10 - total % 10) % 10 == digits[-1]
 
 
+def gtin_usable(gtin: str | None) -> bool:
+    """A real GTIN: right length, valid check digit, not a filler such as 0000000000000.
+    Short internal ids ("17") must not become GTINs by padding."""
+    if not gtin or not gtin_valid(gtin):
+        return False
+    body = gtin.lstrip("0")
+    return len(body) >= 7 and len(set(body[:-1])) > 1  # not all zeros / one repeated digit
+
+
 def match_key(ex: Extraction, url: str) -> str:
-    if ex.gtin and gtin_valid(ex.gtin.zfill(14) if len(ex.gtin) < 14 else ex.gtin):
+    if gtin_usable(ex.gtin):
         return f"gtin:{ex.gtin.zfill(14)}"
     if ex.brand and ex.mpn:
         return f"bm:{ex.brand.strip().lower()}|{ex.mpn.strip().lower()}"
@@ -191,20 +206,30 @@ async def process_batch(
     fetches = (await session.execute(q)).scalars().all()
     if not fetches:
         return report
+    if not store.available():
+        # An unmounted NAS looks like missing blobs: stop here, never skip past them.
+        report.store_unavailable = 1
+        return report
     fx = RateCache(session)
     touched: set = set()
     for f in fetches:
         report.fetches += 1
-        evidence = await asyncio.to_thread(_load, store, f.blob_sha256)
-        if evidence is None:
-            report.missing_blobs += 1
+        try:
+            # One fetch, one savepoint: a page that breaks a parser (or a value the
+            # database refuses) is logged and skipped, it never stops the stage.
+            async with session.begin_nested():
+                product_id = await _derive_one(session, store, f, fx, report)
+        except Exception as e:  # noqa: BLE001
+            report.errors += 1
+            cur.errors = (cur.errors or 0) + 1
+            cur.last_error = f"{f.id}: {type(e).__name__}: {e}"[:2000]
+            log.warning("derive: fetch %s failed: %s", f.id, cur.last_error, exc_info=True)
             continue
-        if "snippets" not in evidence:
-            continue  # robots.txt or sitemap evidence: nothing to derive
-        ex = await asyncio.to_thread(extract_evidence, evidence)
-        product_id = await _write(session, f, ex, fx, report)
         if product_id is not None:
             touched.add(product_id)
+    if not store.available():
+        await session.rollback()  # the store went away mid-batch: retry it all later
+        return BatchReport(store_unavailable=1)
     last = fetches[-1]
     cur.last_received_at, cur.last_id = last.received_at, last.id
     cur.processed = (cur.processed or 0) + report.fetches
@@ -212,6 +237,25 @@ async def process_batch(
     cur.updated_at = func.now()
     await _canonical_prices(session, touched)
     return report
+
+
+async def _derive_one(session, store: RawStore, f: RawFetch, fx: RateCache, report) -> Any:
+    evidence = await asyncio.to_thread(_load, store, f.blob_sha256)
+    if evidence is None:
+        report.missing_blobs += 1
+        return None
+    if not isinstance(evidence, dict) or "snippets" not in evidence:
+        return None  # robots.txt or sitemap evidence: nothing to derive
+    ex = await asyncio.to_thread(extract_evidence, evidence)
+    return await _write(session, f, ex, fx, report)
+
+
+def _money(value: float | None) -> Decimal | None:
+    """A price the derived layer can hold, or None (flagged by the caller)."""
+    if value is None:
+        return None
+    d = Decimal(str(value))
+    return d if d.is_finite() and abs(d) < MAX_PRICE else None
 
 
 async def _write(session, f: RawFetch, ex: Extraction, fx: RateCache, report) -> Any:
@@ -253,14 +297,17 @@ async def _write(session, f: RawFetch, ex: Extraction, fx: RateCache, report) ->
     first_offer_id = None
     for o in ex.offers:
         flags = set(price_flags(o)) | set(page_flags)
+        price = _money(o.price)
+        if o.price is not None and price is None:
+            flags.add("invalid_price")
         price_eur = fx_rate = None
-        if o.price is not None and o.currency:
+        if price is not None and o.currency:
             rate = await fx.rate(o.currency, day)
             if rate is None:
                 flags.add("no_fx_rate")
             else:
                 fx_rate = rate
-                price_eur = (Decimal(str(o.price)) / rate).quantize(Decimal("0.0001"))
+                price_eur = _money((price / rate).quantize(Decimal("0.0001")))
         offer = Offer(
             product_id=product_id,
             fetch_id=f.id,
@@ -268,7 +315,7 @@ async def _write(session, f: RawFetch, ex: Extraction, fx: RateCache, report) ->
             url=url,
             observed_on=f.fetched_at,
             raw_price=o.price_raw,
-            price=Decimal(str(o.price)) if o.price is not None else None,
+            price=price,
             currency=o.currency,
             fx_rate=fx_rate,
             price_eur=price_eur,
@@ -414,7 +461,9 @@ async def loop(sm: async_sessionmaker[AsyncSession], store: RawStore, interval_s
     while True:
         try:
             r = await run_until_caught_up(sm, store)
-            if r.fetches:
+            if r.store_unavailable:
+                log.warning("derive: raw store unavailable (NAS not mounted?); waiting")
+            elif r.fetches:
                 log.info("derive: %s", r)
         except asyncio.CancelledError:
             raise
@@ -451,11 +500,15 @@ async def rebuild(
     rows are cleared, their link to the raw fetch stays."""
     started = time.monotonic()
     async with sm() as session:
+        cur = await _cursor(session)  # holds a running derive loop off until commit
         before = await snapshot(session)
         await session.execute(update(GoldLabel).values(product_id=None, offer_id=None))
         for model in DERIVED_TABLES:
             await session.execute(delete(model))
-        await session.execute(delete(DeriveCursor).where(DeriveCursor.stage == STAGE))
+        cur.last_received_at = cur.last_id = cur.last_error = None
+        cur.processed = cur.errors = 0
+        cur.version = VERSION
+        cur.started_at = cur.updated_at = func.now()
         await session.commit()
     report = await run_until_caught_up(sm, store, settle=settle)
     async with sm() as session:

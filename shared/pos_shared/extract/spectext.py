@@ -15,6 +15,15 @@ from pos_shared.extract.model import MeasurementCandidate
 MASS_LABEL = re.compile(r"gewicht|weight|masse\b|\bmass\b", re.I)
 VOLUME_LABEL = re.compile(r"inhalt|volumen|fassungsverm|füllmenge|capacity|volume\b", re.I)
 DIMENSION_LABEL = re.compile(r"maße|masse\b|abmessung|dimension|größe\b|size\b|format", re.I)
+# What a thing can carry, not what it weighs: "Max. Benutzergewicht", "Tragkraft",
+# "Belastbarkeit", "max. weight capacity", "zulässiges Gesamtgewicht", "payload".
+LOAD_LABEL = re.compile(
+    r"benutzer|belastbar|belastung|trag(?:kraft|last|fähig|faehig)|capacity|\bmax|zulässig|"
+    r"zulaessig|payload|\bload\b|nutzlast|zuladung",
+    re.I,
+)
+# Elements that end a line of text (lxml's text_content() drops the boundary).
+LINE_BREAKS = {"br", "li", "p", "div", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "dt", "dd"}
 MAX_PAIRS = 400
 
 
@@ -39,8 +48,11 @@ def pairs_from_html(fragments: list[str]) -> list[tuple[str, str]]:
                     out.append((label, " ".join(el.text_content().split())))
                     label = None
         if not root.findall(".//tr") and not root.findall(".//dl"):
+            for el in root.iter():
+                if el.tag in LINE_BREAKS and el is not root:
+                    el.tail = "\n" + (el.tail or "")
             text = root.text_content()
-            for line in re.split(r"[\n;•|]|<br>", text):
+            for line in re.split(r"[\n;•|]", text):
                 if ":" in line:
                     label, _, value = line.partition(":")
                     if 0 < len(label.strip()) <= 60 and value.strip():
@@ -67,6 +79,8 @@ def measurements(pairs: list[tuple[str, str]], locale: str | None) -> list[Measu
         return groups[basis]
 
     for label, value in pairs:
+        if LOAD_LABEL.search(label) and not DIMENSION_LABEL.search(label):
+            continue
         if MASS_LABEL.search(label):
             q = units.parse_quantity(value, "mass", locale)
             if q:
@@ -76,14 +90,15 @@ def measurements(pairs: list[tuple[str, str]], locale: str | None) -> list[Measu
                 if g.mass_kg is None or (ng == "net" and g.net_or_gross != "net"):
                     g.mass_kg, g.net_or_gross = q.value, ng
                     g.raw[label] = value
-            continue
+                continue
+            # no mass: Swiss "Masse" means dimensions (Maße); fall through
         if VOLUME_LABEL.search(label):
             q = units.parse_quantity(value, "volume", locale)
             if q:
                 g = group(label)
                 g.true_volume_m3 = g.true_volume_m3 or q.value
                 g.raw[label] = value
-            continue
+                continue
         dims = units.parse_dimensions(value, locale)
         if dims and (DIMENSION_LABEL.search(label) or units.basis_of(label) != "unknown"):
             g = group(label)

@@ -2,6 +2,7 @@
 
 import pytest
 
+from pos_shared import units
 from pos_shared.units import (
     axis_of,
     basis_of,
@@ -113,3 +114,24 @@ def test_net_gross_and_axes():
     assert axis_of("Länge") == "length"
     assert axis_of("Ø") == "diameter"
     assert axis_of("Farbe") is None
+
+
+@pytest.mark.parametrize(
+    ("text", "locale", "value"),
+    [
+        ("0.250 kg", "de", 0.25),  # a leading zero never starts a thousands group
+        ("0,299 kg", "en", 0.299),
+        ("20, 25, 30 cm", "de", 20.0),  # a list, not 2025.3
+        ("1 299,50 €", "de", 1299.5),
+        ("1 299,50", "de", 1299.5),
+    ],
+)
+def test_number_edge_cases(text, locale, value):
+    assert units.parse_number(text, locale) == pytest.approx(value)
+
+
+@pytest.mark.parametrize(
+    "label", ["Gewicht ohne Verpackung", "Maße (unverpackt)", "Weight without packaging"]
+)
+def test_negated_packaging_is_the_product(label):
+    assert units.basis_of(label) == "product"

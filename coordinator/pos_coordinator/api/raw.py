@@ -13,7 +13,7 @@ from pos_coordinator.api.deps import (
     get_rawstore,
 )
 from pos_coordinator.models import RawObject
-from pos_coordinator.rawstore import KINDS, SHA256_RE, HashMismatch, RawStore
+from pos_coordinator.rawstore import KINDS, SHA256_RE, HashMismatch, RawStore, StoreUnavailable
 
 router = APIRouter(prefix="/api/v1/raw", dependencies=[Depends(check_api_version)])
 
@@ -31,8 +31,19 @@ async def exists(kind: str, sha256: str, node: CurrentNode, session: Session, st
     a row (upload interrupted between the two) counts as missing, so the next upload
     adds the row instead of being skipped."""
     _check(kind, sha256)
+    _available(store)
     row = await session.get(RawObject, sha256)
     return Response(status_code=200 if row is not None and store.exists(kind, sha256) else 404)
+
+
+def _available(store: RawStore) -> None:
+    if not store.available():
+        # Nodes keep the object in their spool and try again.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "raw store unavailable",
+            headers={"Retry-After": "60"},
+        )
 
 
 @router.put("/{kind}/{sha256}", status_code=status.HTTP_201_CREATED)
@@ -56,10 +67,14 @@ async def upload(
             raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "object too large")
         chunks.append(chunk)
     data = b"".join(chunks)
+    _available(store)
     try:
         created = store.put(kind, sha256, data)
     except HashMismatch as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    except StoreUnavailable:
+        _available(store)  # it went away just now
+        raise
     await session.execute(
         pg_insert(RawObject)
         .values(sha256=sha256, size_bytes=size, kind=kind, uploaded_by_node_id=node.id)

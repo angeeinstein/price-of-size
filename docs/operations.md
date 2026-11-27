@@ -230,3 +230,11 @@ docker logs pos-worker-a                                   # the worker itself
   (restored from scratch?). Re-enroll the node: `install.sh --uninstall --purge
   --role node`, then install with a new code.
 * *Docker not running in an LXC:* enable nesting.
+* *`/healthz` says `"raw_store": false`, log says "raw store ... is not this
+  installation's store":* the raw store directory does not hold the marker
+  (`.pos-rawstore`) the database recorded on first start, usually because the
+  NAS is not mounted. Nothing is lost meanwhile: raw uploads are refused (nodes
+  retry), fetch jobs stay queued and derivation waits. Mount the NAS; it
+  recovers by itself. After *moving* the raw store on purpose, accept the new
+  location once with `docker exec pos-coordinator-a pos-coordinator
+  raw-store-adopt`.

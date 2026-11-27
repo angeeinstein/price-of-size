@@ -201,3 +201,30 @@ async def test_job_list_retry_cancel_and_audit(admin):
     assert again[0]["status"] == "queued" and again[0]["attempts"] == 0
     actions = [a["action"] for a in (await admin.get("/api/admin/audit")).json()]
     assert "job.retry" in actions and "job.cancel" in actions
+
+
+async def test_no_fetch_jobs_while_the_raw_store_is_away(http, admin, app):
+    key, pub = keypair()
+    node_id = (await enroll(http, admin, pub)).json()["node_id"]
+    auth = {"Authorization": f"Bearer {await login(http, node_id, key)}"}
+    await admin.post("/api/admin/jobs", json={"jobs": [{"type": "dummy_fetch"}, {"type": "noop"}]})
+    marker = app.state.rawstore.root / ".pos-rawstore"
+    saved = marker.read_text()
+    marker.unlink()  # the NAS is not mounted
+    try:
+        assert (await http.get("/healthz")).json()["raw_store"] is False
+        r = await http.post(
+            "/api/v1/jobs/lease",
+            json={"job_types": ["dummy_fetch", "noop"], "max_jobs": 10},
+            headers=auth,
+        )
+        assert [j["type"] for j in r.json()["jobs"]] == ["noop"]
+        assert (
+            await http.head(f"/api/v1/raw/snippets/{'a' * 64}", headers=auth)
+        ).status_code == 503
+    finally:
+        marker.write_text(saved)
+    r = await http.post(
+        "/api/v1/jobs/lease", json={"job_types": ["dummy_fetch"], "max_jobs": 10}, headers=auth
+    )
+    assert [j["type"] for j in r.json()["jobs"]] == ["dummy_fetch"]

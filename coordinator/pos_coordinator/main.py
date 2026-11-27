@@ -70,19 +70,28 @@ async def _derived_cmd(cmd: str) -> int:
     from pos_coordinator.config import get_settings
     from pos_coordinator.db import make_engine, make_sessionmaker
     from pos_coordinator.derive import fx, stage
-    from pos_coordinator.rawstore import RawStore
+    from pos_coordinator.rawstore import RawStore, bind_to_database
 
     settings = get_settings()
     engine = make_engine(settings.database_url)
     sm = make_sessionmaker(engine)
     try:
+        store = RawStore(settings.raw_store_path)
+        if cmd == "raw-store-adopt":
+            store_id = await bind_to_database(sm, store, adopt=True)
+            print(f"the database now belongs to the raw store at {store.root} (id {store_id})")
+            return 0
+        await bind_to_database(sm, store)
         if cmd == "fx-refresh":
             async with sm() as s:
                 n = await fx.refresh_from_ecb(s)
                 await s.commit()
             print(f"stored {n} rates")
             return 0
-        result = await stage.rebuild(sm, RawStore(settings.raw_store_path))
+        if not store.available():
+            print(f"raw store {store.root} is not available (NAS mounted?)", file=sys.stderr)
+            return 1
+        result = await stage.rebuild(sm, store)
         print(_json.dumps(result, indent=2, default=str))
         return 0 if result["identical"] else 2
     finally:
@@ -151,6 +160,10 @@ def main() -> None:
         "rebuild-derived", help="rebuild drill: drop derived rows, derive again from raw, compare"
     )
     sub.add_parser("fx-refresh", help="load ECB euro reference rates now")
+    sub.add_parser(
+        "raw-store-adopt",
+        help="after moving the raw store: make the database accept the store mounted now",
+    )
     bk = sub.add_parser("backup", help="pg_dump the database")
     bk.add_argument("--out", type=Path, default=None)
     bk.add_argument("--label", default="manual")
@@ -165,7 +178,7 @@ def main() -> None:
         return
     if args.cmd == "check":
         sys.exit(asyncio.run(_check()))
-    if args.cmd in ("rebuild-derived", "fx-refresh"):
+    if args.cmd in ("rebuild-derived", "fx-refresh", "raw-store-adopt"):
         sys.exit(asyncio.run(_derived_cmd(args.cmd)))
     if args.cmd == "create-user":
         sys.exit(asyncio.run(_create_user(args)))

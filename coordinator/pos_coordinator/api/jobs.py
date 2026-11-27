@@ -15,6 +15,9 @@ router = APIRouter(prefix="/api/v1/jobs", dependencies=[Depends(check_api_versio
 HTML_SIZE_CACHE_S = 300
 
 
+RAW_UPLOADING = frozenset(scheduler.FETCH_TYPES) | {"dummy_fetch"}
+
+
 @router.post("/lease", response_model=api.LeaseResponse)
 async def lease(body: api.LeaseRequest, request: Request, node: CurrentNode, session: Session):
     if node.desired_run_state != "running":
@@ -22,6 +25,10 @@ async def lease(body: api.LeaseRequest, request: Request, node: CurrentNode, ses
     types = body.job_types
     if node.desired_job_types is not None:
         types = [t for t in types if t in node.desired_job_types]
+    if not request.app.state.rawstore.available():
+        # Their evidence could not be stored: leave them queued (and the shops alone)
+        # until the raw store is back, instead of failing and re-fetching them.
+        types = [t for t in types if t not in RAW_UPLOADING]
     if not types:
         return api.LeaseResponse(jobs=[])
 

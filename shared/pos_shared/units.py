@@ -13,7 +13,7 @@ page language as `locale`.
 import re
 from dataclasses import dataclass, field
 
-UNITS_VERSION = "1"
+UNITS_VERSION = "2"
 
 LENGTH_M = {
     "mm": 0.001,
@@ -102,7 +102,10 @@ UNIT_CODES = {
     "CMQ": ("volume", 1e-6),
 }
 
-_NUM = r"\d[\d.,'’  ]*\d|\d"
+# Digits with "." / "," inside, or thousands grouped by (thin) spaces or apostrophes:
+# "1 299,50", "1'299.50". A space only groups exactly three digits, so lists such
+# as "20, 25, 30 cm" stay separate numbers.
+_NUM = r"\d{1,3}(?:[ \u00a0\u202f\u2009'’]\d{3})+(?:[.,]\d+)?(?![\d.,])|\d[\d.,]*\d|\d"
 
 
 def parse_number(text: str, locale: str | None = None) -> float | None:
@@ -110,7 +113,7 @@ def parse_number(text: str, locale: str | None = None) -> float | None:
     m = re.search(_NUM, text)
     if not m:
         return None
-    s = re.sub(r"['’  ]", "", m.group(0))  # thin/narrow spaces, apostrophes
+    s = re.sub(r"['’ \u00a0\u202f\u2009]", "", m.group(0))  # spaces, apostrophes
     commas, dots = s.count(","), s.count(".")
     if commas and dots:
         dec = "," if s.rfind(",") > s.rfind(".") else "."
@@ -121,7 +124,8 @@ def parse_number(text: str, locale: str | None = None) -> float | None:
         tail = s.rsplit(sep, 1)[1]
         if n > 1:
             s = s.replace(sep, "")  # several: thousands separators
-        elif len(tail) == 3 and len(s.split(sep)[0]) <= 3:
+        elif len(tail) == 3 and len(s.split(sep)[0]) <= 3 and s.split(sep)[0] != "0":
+            # ("0.250" is a decimal in every locale: no thousands group starts with 0)
             # "1.299" / "1,299": ambiguous; the locale decides which one groups thousands
             thousands = "." if (locale or "").startswith("de") else ","
             s = s.replace(sep, "") if sep == thousands else s.replace(sep, ".")
@@ -224,8 +228,18 @@ NET_WORDS = re.compile(r"netto|\bnet\b|eigengewicht|leergewicht", re.I)
 GROSS_WORDS = re.compile(r"brutto|gross|gesamtgewicht|versandgewicht|shipping weight", re.I)
 
 
+# "Gewicht ohne Verpackung", "Maße (unverpackt)", "weight without packaging"
+NOT_PACKAGED = re.compile(
+    r"unverpackt|\b(?:ohne|without|excl\.?|exkl\.?|excluding|not including)\s+"
+    r"(?:\w+\s+)?(?:verpack|packag|karton|carton|box)",
+    re.I,
+)
+
+
 def basis_of(label: str) -> str:
     """'product' | 'package' | 'unknown' from a label such as 'Paketmaße'."""
+    if NOT_PACKAGED.search(label):
+        return "product"
     if PACKAGE_WORDS.search(label):
         return "package"
     if PRODUCT_WORDS.search(label):

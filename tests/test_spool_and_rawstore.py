@@ -73,3 +73,27 @@ async def test_interrupted_upload_is_completed_by_the_next_one(app, admin, tmp_p
     async with sessionmaker() as s:
         assert (await s.execute(select(RawObject.sha256))).scalar_one() == sha
     await worker.client.aclose()
+
+
+def test_rawstore_identity_guards_against_an_unmounted_nas(tmp_path):
+    import pytest
+
+    from pos_coordinator.rawstore import RawStore, StoreUnavailable
+
+    nas = RawStore(tmp_path / "raw")
+    store_id = nas.bind(None)  # first start: a new store
+    data = b"x"
+    sha = hashlib.sha256(data).hexdigest()
+    assert nas.put("snippets", sha, data) and nas.available()
+    # later: the NAS is not mounted, the coordinator sees an empty mount point
+    empty = RawStore(tmp_path / "mountpoint")
+    (tmp_path / "mountpoint").mkdir()
+    assert empty.bind(store_id) == store_id and not empty.available()
+    with pytest.raises(StoreUnavailable):
+        empty.put("snippets", sha, data)
+    with pytest.raises(StoreUnavailable):
+        empty.exists("snippets", sha)
+    assert not list((tmp_path / "mountpoint").iterdir())  # nothing written to local disk
+    # a restart with the NAS back adopts nothing new and works
+    again = RawStore(tmp_path / "raw")
+    assert again.bind(store_id) == store_id and again.exists("snippets", sha)
