@@ -563,3 +563,34 @@ async def test_a_proposal_never_overwrites_a_mapping_made_meanwhile(sessionmaker
             .all()
         )
     assert m.method == "manual" and m.taxonomy_node_id == shelf
+
+
+async def test_a_shop_mapping_change_never_undoes_a_classifier_meanwhile(sessionmaker):
+    import asyncio
+
+    await _taxonomy(sessionmaker)
+    shelf = await _node(sessionmaker, "Furniture > Shelving")
+    aircraft = await _node(sessionmaker, "Vehicles & Parts > Vehicles > Aircraft")
+    (a,) = await _products(sessionmaker, ["Regal"], path=["Möbel", "Regale"])
+    async with sessionmaker() as s:
+        await shopmap.set_mapping(s, "shop", "Möbel > Regale", shelf)
+        await shopmap.classify(s)
+        await shopmap.set_mapping(s, "shop", "Möbel > Regale", None)  # now unmappable
+        await s.commit()
+    async with sessionmaker() as llm_side:  # an LLM answer lands, not committed yet
+        await common.assign(llm_side, a, aircraft, "llm", 0.9, "v")
+
+        async def mapping_pass():
+            async with sessionmaker() as s:
+                r = await shopmap.classify(s)
+                await s.commit()
+                return r
+
+        task = asyncio.create_task(mapping_pass())
+        await asyncio.sleep(0.3)
+        await llm_side.commit()
+    assert (await task)["withdrawn"] == 0
+    cur = await _current(sessionmaker, a)
+    assert cur.tier == "llm"
+    async with sessionmaker() as s:
+        assert (await s.get(Product, a)).category_id == aircraft

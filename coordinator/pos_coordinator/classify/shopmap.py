@@ -19,7 +19,8 @@ from typing import Any
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pos_coordinator.models import CategoryMapping, Classification, Product, TaxonomyNode
+from pos_coordinator.classify import common
+from pos_coordinator.models import CategoryMapping, TaxonomyNode
 
 TIER = "shop_mapping"
 VERSION = "shopmap-1"
@@ -59,10 +60,8 @@ async def lock_path(session: AsyncSession, source: str, path: str) -> None:
     """Serialise changes to one (source, path) until the transaction ends: a person's
     mapping and an LLM proposal arriving at the same time never overwrite each other
     unseen."""
-    from pos_coordinator.classify.common import lock_key
-
     await session.execute(
-        select(func.pg_advisory_xact_lock(lock_key(f"mapping\x1f{source}\x1f{path}")))
+        select(func.pg_advisory_xact_lock(common.lock_key(f"mapping\x1f{source}\x1f{path}")))
     )
 
 
@@ -191,29 +190,15 @@ async def classify(session: AsyncSession, limit: int = 5000) -> dict[str, int]:
     ).all()
     out = {"classified": 0, "withdrawn": 0}
     for r in rows:
-        if r.cls_id is not None:
-            await session.execute(
-                update(Classification).where(Classification.id == r.cls_id).values(is_current=False)
-            )
+        # under the product's lock, against its classification as it is now (another
+        # classifier may have written it since the query): a more trusted tier stays
         if r.node_id is None:
-            out["withdrawn"] += 1
-            await session.execute(
-                update(Product).where(Product.id == r.product_id).values(category_id=None)
-            )
+            out["withdrawn"] += await common.withdraw(session, r.product_id, TIER)
             continue
-        session.add(
-            Classification(
-                product_id=r.product_id,
-                taxonomy_node_id=r.node_id,
-                tier=TIER,
-                confidence=r.confidence if r.confidence is not None else 0.9,
-                classifier_version=VERSION,
-            )
+        confidence = r.confidence if r.confidence is not None else 0.9
+        out["classified"] += await common.assign(
+            session, r.product_id, r.node_id, TIER, confidence, VERSION
         )
-        await session.execute(
-            update(Product).where(Product.id == r.product_id).values(category_id=r.node_id)
-        )
-        out["classified"] += 1
     await session.flush()
     return out
 
