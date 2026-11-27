@@ -47,6 +47,11 @@ Files it writes: `/etc/pos/` (mode 0700) holds `install.conf`, `release.json`
 and the env files (`worker.env`, `coordinator.env`, `database.env`, all 0600).
 Secrets live only there, never in the repository.
 
+Private images: pass `--registry-user`, `--registry-token` (and
+`--registry-server`, default `ghcr.io`) once. They are kept in
+`/etc/pos/registry.env` (0600) and handed to the agent, which pulls signed
+updates with them; re-runs and `--update` keep them unless new ones are given.
+
 ### Without the agent ("simple mode")
 
 For machines where you do not want a container with access to the Docker

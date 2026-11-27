@@ -54,6 +54,22 @@ before=$(docker inspect -f '{{.State.StartedAt}}' pos-worker-a)
 $I --role node --non-interactive --release-file "$RELEASE_FILE" --coordinator local
 [[ "$(docker inspect -f '{{.State.StartedAt}}' pos-worker-a)" == "$before" ]] || fail "worker was restarted"
 
+if [[ -n "${REGISTRY_SERVER:-}" ]]; then
+  # An open registry accepts any login, so dummy credentials exercise the path.
+  step "registry credentials survive a re-run without them"
+  $I --role node --non-interactive --release-file "$RELEASE_FILE" --coordinator local \
+    --registry-server "$REGISTRY_SERVER" --registry-user ci --registry-token not-a-secret
+  agent_env() { docker inspect -f '{{.Config.Env}}' pos-agent-worker; }
+  agent_env | grep -q POS_AGENT_REGISTRY_USERNAME=ci || fail "agent has no registry credentials"
+  [[ "$(stat -c %a /etc/pos/registry.env)" == 600 ]] || fail "registry.env must be 0600"
+  before=$(docker inspect -f '{{.State.StartedAt}}' pos-agent-worker)
+  $I --role node --non-interactive --release-file "$RELEASE_FILE" --coordinator local
+  [[ "$(docker inspect -f '{{.State.StartedAt}}' pos-agent-worker)" == "$before" ]] \
+    || fail "the agent was recreated by a re-run without credentials"
+  agent_env | grep -q "POS_AGENT_REGISTRY_SERVER=$REGISTRY_SERVER" || fail "registry credentials lost"
+  wait_for 90 "node online after the agent change" node_online
+fi
+
 step "a config change reaches the running worker"
 $I --role node --non-interactive --release-file "$RELEASE_FILE" --coordinator local \
   --name renamed-node

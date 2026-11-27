@@ -31,7 +31,8 @@ DOCKER_LOG_OPTS=(--log-opt max-size=10m --log-opt max-file=3)
 
 ROLE="" VERSION="" MODE="" COORDINATOR_URL="" ENROLL_CODE="" NODE_NAME=""
 DB_URL="" RAW_STORE="" BACKUP_DIR="" HTTP_PORT="" PG_ALLOW="" PG_DATA_DIR=""
-CF_ID="" CF_SECRET="" REG_USER="" REG_TOKEN="" RELEASE_FILE=""
+CF_ID="" CF_SECRET="" REG_USER="" REG_TOKEN="" REG_SERVER="" RELEASE_FILE=""
+REGISTRY_ENV=()
 ACTION=install NONINTERACTIVE=0 PURGE=0 ASSUME_YES=0
 
 usage() {
@@ -54,7 +55,8 @@ Options:
   --pg-allow CIDR[,..]   database: networks allowed to connect (default: private ranges)
   --pg-data-dir PATH     database: data directory (first install only)
   --registry-user U      only for private images (GHCR user + token with read:packages)
-  --registry-token T
+  --registry-token T      (kept in /etc/pos/registry.env: re-runs need not repeat them)
+  --registry-server H    registry of the private images (default ghcr.io)
   --release-file PATH    use a local release.json instead of downloading it (testing)
   --non-interactive      never prompt; fail if something required is missing
   --yes                  answer yes to confirmations (e.g. --uninstall --purge)
@@ -80,6 +82,7 @@ while [[ $# -gt 0 ]]; do
     --pg-data-dir) PG_DATA_DIR="$2"; shift ;;
     --registry-user) REG_USER="$2"; shift ;;
     --registry-token) REG_TOKEN="$2"; shift ;;
+    --registry-server) REG_SERVER="$2"; shift ;;
     --release-file) RELEASE_FILE="$2"; shift ;;
     --non-interactive) NONINTERACTIVE=1 ;;
     --yes|-y) ASSUME_YES=1 ;;
@@ -228,10 +231,37 @@ ensure_docker() {
   ok "docker $(docker version --format '{{.Server.Version}}')"
 }
 
+# Registry credentials (private images) are kept in a root-only file, so a re-run or
+# --update without --registry-user/--registry-token keeps them: the agent pulls
+# signed updates with them, not with the host's docker login.
+load_registry() {
+  local file=$ETC/registry.env
+  if [[ -n "$REG_USER" || -n "$REG_TOKEN" ]]; then
+    [[ -n "$REG_USER" && -n "$REG_TOKEN" ]] || die "--registry-user and --registry-token go together"
+    REG_SERVER=${REG_SERVER:-ghcr.io}
+    write_env "$file" "POS_AGENT_REGISTRY_USERNAME=$REG_USER" "POS_AGENT_REGISTRY_PASSWORD=$REG_TOKEN" \
+      "POS_AGENT_REGISTRY_SERVER=$REG_SERVER"
+  elif [[ -f "$file" ]]; then
+    REG_USER=$(env_get "$file" POS_AGENT_REGISTRY_USERNAME)
+    REG_TOKEN=$(env_get "$file" POS_AGENT_REGISTRY_PASSWORD)
+    REG_SERVER=$(env_get "$file" POS_AGENT_REGISTRY_SERVER)
+  fi
+  REG_SERVER=${REG_SERVER:-ghcr.io}
+}
+
+# Passed to the agents, which pull signed updates themselves.
+registry_env() {
+  REGISTRY_ENV=()
+  [[ -n "$REG_USER" ]] || return 0
+  REGISTRY_ENV=(-e "POS_AGENT_REGISTRY_USERNAME=$REG_USER" -e "POS_AGENT_REGISTRY_PASSWORD=$REG_TOKEN"
+    -e "POS_AGENT_REGISTRY_SERVER=$REG_SERVER")
+}
+
 docker_login() {
+  load_registry
   if [[ -n "$REG_USER" && -n "$REG_TOKEN" ]]; then
-    echo "$REG_TOKEN" | docker login ghcr.io -u "$REG_USER" --password-stdin >/dev/null
-    ok "logged in to ghcr.io as $REG_USER"
+    echo "$REG_TOKEN" | docker login "$REG_SERVER" -u "$REG_USER" --password-stdin >/dev/null
+    ok "logged in to $REG_SERVER as $REG_USER"
   fi
 }
 
@@ -415,7 +445,7 @@ install_node() {
     -e POS_AGENT_STATE_VOLUME=pos-worker-state \
     -e POS_AGENT_SERVICE_ENV_FILE=/etc/pos/worker.env \
     -e "POS_AGENT_WORKER_ON_NETWORK=$on_net" \
-    ${REG_USER:+-e "POS_AGENT_REGISTRY_USERNAME=$REG_USER" -e "POS_AGENT_REGISTRY_PASSWORD=$REG_TOKEN"} --
+    "${REGISTRY_ENV[@]}" --
   info "waiting for the worker to connect (up to 2 minutes)"
   for _ in $(seq 1 60); do
     if worker_healthy_since "$started_at"; then
@@ -466,7 +496,7 @@ install_coordinator() {
     -e "POS_AGENT_HOST_RAW_STORE=$RAW_STORE" \
     -e "POS_AGENT_HOST_BACKUP_DIR=$coord_backups" \
     -e "POS_AGENT_HTTP_PORT=$HTTP_PORT" \
-    ${REG_USER:+-e "POS_AGENT_REGISTRY_USERNAME=$REG_USER" -e "POS_AGENT_REGISTRY_PASSWORD=$REG_TOKEN"} --
+    "${REGISTRY_ENV[@]}" --
   info "waiting for the coordinator (migrations run on first start)"
   for _ in $(seq 1 90); do
     if curl -fsS "http://127.0.0.1:$HTTP_PORT/healthz" >/dev/null 2>&1; then
@@ -758,6 +788,7 @@ main() {
 
   ensure_docker
   docker_login
+  registry_env
   resolve_release
   if [[ -n "$INSTALLED_VERSION" && "$INSTALLED_VERSION" != "$VERSION" ]]; then
     info "installed: $INSTALLED_VERSION, installing: $VERSION"

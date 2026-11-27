@@ -78,7 +78,7 @@ jobs:
                 --arg a "$(digest localhost:5000/pos-agent:0.1.0)" \
                 --arg caddy "$(digest caddy:2.8-alpine)" \
             '{version: "0.1.0", images: {coordinator: $c, worker: $w, agent: $a, caddy: $caddy}}' > release.json
-          sudo RELEASE_FILE="$PWD/release.json" \
+          sudo RELEASE_FILE="$PWD/release.json" REGISTRY_SERVER=localhost:5000 \
                DB_URL='postgresql+psycopg://pos:pos@{gw}:5432/pos_inst' deploy/test/install_test.sh
       - name: Logs on failure
         if: failure()
