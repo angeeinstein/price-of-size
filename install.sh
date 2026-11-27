@@ -401,8 +401,11 @@ install_node() {
     [[ -n "$ids" ]] && docker rm -f $ids >/dev/null
     local img; img=$(image worker); pull "$img"
     local net=bridge; [[ $on_net == true ]] && net=$NET
+    # --env-file is read at creation only: fingerprint its content, so a changed
+    # configuration (rotated token, new URL) recreates the container.
+    local env_hash; env_hash=$(sha256sum "$env_file" | cut -c1-16)
     run_container pos-worker "$img" --restart unless-stopped --init --shm-size 1g \
-      --network "$net" --env-file "$env_file" \
+      --network "$net" --env-file "$env_file" --label "org.price-of-size.env=$env_hash" \
       -v pos-worker-state:/var/lib/pos-worker --stop-timeout 120 --
     return
   fi

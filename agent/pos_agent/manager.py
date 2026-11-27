@@ -206,6 +206,14 @@ class Manager:
         slot = st.active
         assert slot is not None
         current = st.slots[slot]
+        # Never two workers at once: stop (drain) the inactive slot *before* starting the
+        # active one. After an agent restart mid-update, the new slot may still run while
+        # the recorded active slot is stopped.
+        idle_name = self.service.container_name(other(slot))
+        idle = await self.docker.inspect(idle_name)
+        if idle is not None and idle["State"].get("Running"):
+            log.warning("inactive slot %s was running; stopping it", other(slot))
+            await self.docker.stop(idle_name, self.settings.drain_timeout_s)
         name = self.service.container_name(slot)
         info = await self.docker.inspect(name)
         if info is None:
@@ -218,11 +226,6 @@ class Manager:
         elif not info["State"].get("Running") and not info["State"].get("Restarting"):
             log.warning("%s is not running (%s); starting", name, info["State"].get("Status"))
             await self.docker.start(name)
-        # Never two workers at once: the inactive slot must stay stopped.
-        idle = await self.docker.inspect(self.service.container_name(other(slot)))
-        if idle is not None and idle["State"].get("Running"):
-            log.warning("inactive slot %s was running; stopping it", other(slot))
-            await self.docker.stop(self.service.container_name(other(slot)), 30)
 
     async def update(self, st: AgentState, manifest: ReleaseManifest) -> None:
         version = manifest.version

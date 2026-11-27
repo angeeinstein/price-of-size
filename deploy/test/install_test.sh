@@ -75,6 +75,11 @@ $I --role node --mode simple --non-interactive --release-file "$RELEASE_FILE" --
 docker inspect pos-agent-worker >/dev/null 2>&1 && fail "agent still present in simple mode"
 docker inspect pos-worker-a >/dev/null 2>&1 && fail "agent-managed worker still present in simple mode"
 wait_for 60 "simple-mode worker online" node_online
+$I --role node --mode simple --non-interactive --release-file "$RELEASE_FILE" --coordinator local \
+  --name simple-renamed
+docker inspect -f '{{.Config.Env}}' pos-worker | grep -q POS_WORKER_NAME=simple-renamed \
+  || fail "simple-mode worker kept its old configuration"
+wait_for 60 "simple-mode worker online after the config change" node_online
 
 step "uninstall keeps data; reinstall needs no new enrollment code"
 $I --uninstall --role node >/dev/null

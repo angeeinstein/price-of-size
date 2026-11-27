@@ -421,3 +421,21 @@ async def test_caddy_publishes_on_loopback_and_is_fixed_if_not(env, key, tmp_pat
     await m.reconcile_once()
     fixed = docker.containers["pos-caddy"]["HostConfig"]["PortBindings"]["80/tcp"][0]
     assert fixed["HostIp"] == "127.0.0.1"
+
+
+async def test_recovery_stops_the_other_slot_before_starting_the_active_one(env, key):
+    """Codex finding: agent restarted mid-update; the new slot still runs while the
+    recorded active slot is stopped. Never two workers at the same time."""
+    docker = FakeDocker()
+    m, clock = make_manager(env, docker)
+    docker.on_start = healthy_worker(env, clock)
+    await m.reconcile_once()  # slot a active
+    await docker.stop("pos-worker-a")
+    await docker.create("pos-worker-b", {"Image": D2, "Cmd": ["pos-worker"]})
+    await docker.start("pos-worker-b")
+    docker.events.clear()
+    await m.reconcile_once()
+    ops = [(e[0], e[1]) for e in docker.events if e[0] in ("start", "stop")]
+    assert ops.index(("stop", "pos-worker-b")) < ops.index(("start", "pos-worker-a"))
+    assert docker.containers["pos-worker-a"]["State"]["Running"]
+    assert not docker.containers["pos-worker-b"]["State"]["Running"]
