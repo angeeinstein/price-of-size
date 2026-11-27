@@ -11,6 +11,7 @@ never overwritten by a shop mapping; a changed mapping re-classifies the product
 it had classified, and an "unmappable" path withdraws them.
 """
 
+import re
 import uuid
 from typing import Any
 
@@ -25,18 +26,30 @@ SEP = " > "
 MAX_PATH_CHARS = 1000
 METHODS = ("manual", "llm", "rule", "import")
 
-# the product's category path as one string, as mappings store it
-PATH_SQL = (
-    "array_to_string(ARRAY(SELECT jsonb_array_elements_text(CASE WHEN "
-    "jsonb_typeof(p.attributes->'category_path') = 'array' THEN "
-    "p.attributes->'category_path' ELSE '[]'::jsonb END)), ' > ')"
-)
+# Whitespace collapsed in a path: the same characters in Python and SQL (Python's
+# own notion of whitespace is wider than PostgreSQL's).
+_WS = " \t\n\v\f\r "
+_WS_RE = re.compile(f"[{re.escape(_WS)}]+")
+_WS_SQL = "'[' || chr(32) || chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(160) || ']+'"
+
+# The product's category path as one string, normalised exactly like path_string():
+# segments joined with " > ", split again at every ">", whitespace collapsed, empty
+# parts dropped, at most MAX_PATH_CHARS.
+PATH_SQL = f"""left(array_to_string(ARRAY(
+    SELECT btrim(regexp_replace(part, {_WS_SQL}, ' ', 'g'))
+    FROM regexp_split_to_table(array_to_string(ARRAY(
+        SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(p.attributes->'category_path')
+            = 'array' THEN p.attributes->'category_path' ELSE '[]'::jsonb END)), ' > '), '>')
+        WITH ORDINALITY AS t(part, n)
+    WHERE btrim(regexp_replace(part, {_WS_SQL}, ' ', 'g')) <> ''
+    ORDER BY n), ' > '), {MAX_PATH_CHARS})"""
 
 
 def path_string(segments: list[Any] | str) -> str:
-    if isinstance(segments, str):
-        segments = segments.split(">")
-    parts = [" ".join(str(s).split()) for s in segments]
+    """'Home >  Office  Chairs' and ["Home ", "Office  Chairs"] -> 'Home > Office Chairs'.
+    Must stay in step with PATH_SQL: mappings and products meet by exact equality."""
+    text = segments if isinstance(segments, str) else SEP.join(str(s) for s in segments)
+    parts = [_WS_RE.sub(" ", p).strip(" ") for p in text.split(">")]
     return SEP.join(p for p in parts if p)[:MAX_PATH_CHARS]
 
 

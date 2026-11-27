@@ -193,3 +193,90 @@ async def test_taxonomy_and_mapping_api(admin, sessionmaker):
         )
     ).json()
     assert [h["is_current"] for h in history] == [True]
+
+
+async def test_paths_are_normalised_the_same_in_python_and_sql(sessionmaker):
+    from sqlalchemy import text
+
+    cases = [
+        ["Home ", "Office  Chairs"],
+        ["Möbel &\tWohnen", "  ", "Regale > Wandregale"],
+        ["A>B", ">", "C"],
+        ["x" * 600, "y" * 600],
+    ]
+    async with sessionmaker() as s:
+        await _products(s, [("shop", c) for c in cases] + [("shop", "not a list")])
+        rows = (
+            await s.execute(
+                text(f"SELECT p.title, {shopmap.PATH_SQL} AS path FROM product p ORDER BY p.title")
+            )
+        ).all()
+    got = {r.title: r.path for r in rows}
+    for i, c in enumerate(cases):
+        assert got[f"p{i}"] == shopmap.path_string(c), c
+    assert got["p0"] == "Home > Office Chairs"
+    assert got["p1"] == "Möbel & Wohnen > Regale > Wandregale"
+    assert got["p2"] == "A > B > C"
+    assert len(got["p3"]) == shopmap.MAX_PATH_CHARS
+    assert got["p4"] == ""
+    assert shopmap.path_string("Home >  Office  Chairs") == "Home > Office Chairs"
+
+
+async def test_the_rebuild_drill_classifies_again(app, sessionmaker):
+    """Categories are derived: a rebuild drops them and must classify again from the
+    (kept) mappings, or the drill would not reproduce the derived layer."""
+    import hashlib
+    import json
+    from datetime import UTC, datetime
+
+    import zstandard
+
+    from pos_coordinator.derive import stage
+    from pos_coordinator.models import RawFetch
+    from pos_shared.ids import uuid7
+
+    sm, store = app.state.sessionmaker, app.state.rawstore
+    ld = {"@type": "Product", "name": "Regal", "offers": {"price": "49", "priceCurrency": "EUR"}}
+    crumbs = {
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Produkte"},
+            {"@type": "ListItem", "position": 2, "name": "Regale  "},
+        ],
+    }
+    evidence = {
+        "status": 200,
+        "verdict": {"kind": "ok"},
+        "snippets": {"lang": "de", "json_ld": [json.dumps(ld), json.dumps(crumbs)]},
+    }
+    blob = zstandard.ZstdCompressor().compress(json.dumps(evidence).encode())
+    sha = hashlib.sha256(blob).hexdigest()
+    store.put("snippets", sha, blob)
+    async with sessionmaker() as s:
+        await _import(s)
+        s.add(
+            RawFetch(
+                id=uuid7(),
+                fetched_at=datetime.now(UTC),
+                url="https://shop.example/p/1",
+                final_url="https://shop.example/p/1",
+                status=200,
+                mode="http",
+                blob_sha256=sha,
+                source="shop",
+            )
+        )
+        await s.commit()
+    await stage.run_until_caught_up(sm, store, settle=stage.timedelta(0))
+    async with sessionmaker() as s:
+        (path,) = [p["path"] for p in await shopmap.category_paths(s)]
+        assert path == "Produkte > Regale"
+        node = (
+            await s.execute(select(TaxonomyNode.id).where(TaxonomyNode.external_id == "6356"))
+        ).scalar_one()
+        await shopmap.set_mapping(s, "shop", path, node)
+        await s.commit()
+    assert await stage.classify_until_settled(sm) == 1
+    result = await stage.rebuild(sm, store, settle=stage.timedelta(0))
+    assert result["identical"], result
+    assert result["classified"] == 1 and result["after"]["classification"] == 1
