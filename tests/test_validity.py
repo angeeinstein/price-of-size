@@ -234,3 +234,29 @@ async def test_price_checks_endpoint(app, admin):
         "latest"
     ] == []
     assert (await admin.get("/api/admin/price-checks", params={"verdict": "x"})).status_code == 422
+
+
+def test_a_group_of_repeated_prices_still_shows_its_outliers():
+    root = uuid.uuid4()
+    rows = [(uuid.uuid4(), root, 10.0 * 20, 20.0, None) for _ in range(20)]  # all 10 EUR/kg
+    odd = uuid.uuid4()
+    rows.append((odd, root, 1000.0 * 20, 20.0, None))
+    found = outliers.find(rows, {root: None}, z_limit=3.5)
+    assert set(found) == {odd} and found[odd].z_kg > 3.5
+
+
+async def test_mass_and_volume_may_come_from_different_measurements(app):
+    from pos_coordinator.models import Measurement
+
+    sm, _, odd = await _shelves(app)
+    async with sm() as s:  # weight and size split over two rows, the size row first
+        for m in (await s.execute(select(Measurement))).scalars().all():
+            s.add(Measurement(product_id=m.product_id, basis="product", basis_method="labelled",
+                              mass_kg=m.mass_kg))  # fmt: skip
+            m.mass_kg = None
+        await s.commit()
+        r = await outliers.run(s)
+        await s.commit()
+    assert r["category_outliers"] == 1
+    o = await _offer(sm, odd.id)
+    assert o.fields["category_check"]["z_kg"] > 3.5 and o.fields["category_check"]["z_m3"] > 3.5

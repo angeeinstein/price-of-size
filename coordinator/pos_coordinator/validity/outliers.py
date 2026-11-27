@@ -2,7 +2,8 @@
 category (docs/spec.md, "Detection pipeline", step 3).
 
 Prices per unit spread over orders of magnitude, so the comparison is on the log
-scale with a robust z-score: (x - median) / (1.4826 * MAD). A category with fewer
+scale with a robust z-score: (x - median) / (1.4826 * MAD), or with the mean
+absolute deviation where more than half the values are equal (MAD 0). A category with fewer
 than MIN_GROUP comparable products borrows its parent's distribution (the closest
 ancestor with enough). A product beyond `category_outlier_z` on either measure gets
 the flag `category_outlier` on the offers behind its price; the flag does not drop
@@ -33,19 +34,29 @@ VERSION = "outlier-1"
 FLAG = "category_outlier"
 MIN_GROUP = 20
 MAD_SCALE = 1.4826  # MAD of a normal distribution -> its standard deviation
+MEAN_AD_SCALE = 1.2533  # mean absolute deviation -> standard deviation (normal)
 INTERVAL_S = 3600.0
 
+# Mass and volume each from the best clean measurement that has it (the product's own
+# first): a weight from the spec table and dimensions from JSON-LD both count.
 _ROWS_SQL = """
-    SELECT p.id, p.category_id, p.canonical_price_eur, m.mass_kg, m.volume_m3
+    SELECT p.id, p.category_id, p.canonical_price_eur, mass.mass_kg, vol.volume_m3
     FROM product p
-    JOIN LATERAL (
-      SELECT mass_kg, coalesce(true_volume_m3, a_m * b_m * c_m) AS volume_m3
-      FROM measurement
-      WHERE product_id = p.id AND cardinality(flags) = 0
+    LEFT JOIN LATERAL (
+      SELECT mass_kg FROM measurement
+      WHERE product_id = p.id AND cardinality(flags) = 0 AND mass_kg > 0
       ORDER BY (basis = 'product') DESC, id
       LIMIT 1
-    ) m ON true
+    ) mass ON true
+    LEFT JOIN LATERAL (
+      SELECT coalesce(true_volume_m3, a_m * b_m * c_m) AS volume_m3 FROM measurement
+      WHERE product_id = p.id AND cardinality(flags) = 0
+        AND coalesce(true_volume_m3, a_m * b_m * c_m) > 0
+      ORDER BY (basis = 'product') DESC, id
+      LIMIT 1
+    ) vol ON true
     WHERE p.category_id IS NOT NULL AND p.canonical_price_eur > 0
+      AND (mass.mass_kg IS NOT NULL OR vol.volume_m3 IS NOT NULL)
 """
 
 
@@ -56,6 +67,16 @@ class Finding:
     z_m3: float | None
     group_kg: uuid.UUID | None
     group_m3: uuid.UUID | None
+
+
+def scale(values: list[float], med: float) -> float:
+    """The robust spread behind the z-score: 1.4826 * MAD; when more than half of the
+    values are equal (MAD 0), 1.2533 * the mean absolute deviation instead, as the
+    modified z-score does, so a group of repeated prices still shows its outliers."""
+    mad = statistics.median(abs(v - med) for v in values)
+    if mad > 0:
+        return MAD_SCALE * mad
+    return MEAN_AD_SCALE * statistics.fmean(abs(v - med) for v in values)
 
 
 def find(
@@ -92,14 +113,14 @@ def find(
         for n, vs in groups.items():
             if len(vs) >= min_group:
                 med = statistics.median(vs)
-                mad = statistics.median(abs(v - med) for v in vs)
-                if mad > 0:
-                    stats[n] = (med, mad)
+                spread = scale(vs, med)
+                if spread > 0:
+                    stats[n] = (med, spread)
         for pid, v in vals.items():
             for n in chains[node_of[pid]]:
                 if n in stats:
-                    med, mad = stats[n]
-                    z[metric][pid] = ((v - med) / (MAD_SCALE * mad), n)
+                    med, spread = stats[n]
+                    z[metric][pid] = ((v - med) / spread, n)
                     break
     out = {}
     for pid in set(z["kg"]) | set(z["m3"]):
