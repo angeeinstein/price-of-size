@@ -302,6 +302,23 @@ currency that arrives before its rate is stored with `no_fx_rate` and converted
 (and its product's price recomputed) once the rate is there;
 `pos-coordinator fx-refresh` does both at once.
 
+## Embeddings
+
+Workers turn product texts (title, shop category path, size and mass) and taxonomy
+categories (English and German path) into vectors locally: `embed` jobs with
+multilingual-e5-small, pinned to one revision of its ONNX export. On the first embed
+job a worker downloads the two model files (about 490 MB) from huggingface.co into
+`<state dir>/models` and checks their SHA-256; afterwards it needs no network for
+them. The model takes about 500 MB of RAM: nodes with less than 1.5 GB, or with
+`POS_WORKER_EMBED=false`, take no embed jobs. Embed jobs come after fetches (lower
+priority); at most 40 are queued at once, taxonomy categories first.
+
+Vectors are stored per model key (`e5-small@<revision>/t1`): a new model or text
+format gives a new key and everything is embedded again, never mixed. A product whose
+text changed is embedded again too. A rebuild of the derived layer drops product
+vectors (workers compute them again; the rebuild drill reports, not compares them);
+taxonomy vectors stay.
+
 ## LLM (Claude API)
 
 Only the coordinator calls the Claude API. Without a key the LLM stages stay idle;

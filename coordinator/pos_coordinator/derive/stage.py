@@ -596,6 +596,13 @@ async def snapshot(session: AsyncSession) -> dict[str, Any]:
     return out
 
 
+ASYNC_DERIVED = {"embedding"}
+
+
+def _comparable(snap: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in snap.items() if k not in ASYNC_DERIVED}
+
+
 async def classify_until_settled(sm: async_sessionmaker[AsyncSession]) -> int:
     """Classification by shop mappings over all products (in batches); part of the
     rebuild, since categories belong to the derived layer while mappings survive it."""
@@ -641,5 +648,6 @@ async def rebuild(
         "fetches": report.fetches,
         "classified": classified,
         "version": VERSION,
-        "identical": before == after,
+        # embeddings come back later, computed by workers: reported, not compared
+        "identical": _comparable(before) == _comparable(after),
     }

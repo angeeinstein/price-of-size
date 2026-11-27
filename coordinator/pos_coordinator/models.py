@@ -640,6 +640,20 @@ class Embedding(Base):
     product_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("product.id"), primary_key=True)
     model: Mapped[str] = mapped_column(Text, primary_key=True)
     vector: Mapped[Any] = mapped_column(Vector())
+    # hash of the text embedded: a changed product text is embedded again
+    text_hash: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created()
+
+
+class TaxonomyEmbedding(Base):
+    """A taxonomy node's vector (English and German path), per embedding model. Not
+    derived from raw data: kept across rebuilds of the derived layer."""
+
+    __tablename__ = "taxonomy_embedding"
+    node_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("taxonomy_node.id"), primary_key=True)
+    model: Mapped[str] = mapped_column(Text, primary_key=True)
+    vector: Mapped[Any] = mapped_column(Vector())
+    text_hash: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = created()
 
 
