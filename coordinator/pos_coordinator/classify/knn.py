@@ -73,6 +73,7 @@ class Examples:
     node_ids: list[uuid.UUID]
     vectors: np.ndarray  # (n, DIM) float32
     loaded_at: float
+    generation: int | None = None  # the generation they were loaded for
 
     @property
     def epoch(self) -> int:
@@ -84,13 +85,18 @@ _examples: Examples | None = None
 _lock = asyncio.Lock()
 
 
-async def examples(session: AsyncSession, refresh: bool = False) -> Examples:
+async def examples(
+    session: AsyncSession, refresh: bool = False, generation: int | None = None
+) -> Examples:
+    """The examples, reloaded after EXAMPLES_TTL_S, on request, and whenever the
+    generation changes (a "run again" must see the labels as they are now)."""
     global _examples
     async with _lock:
         if (
             not refresh
             and _examples is not None
             and time.monotonic() - _examples.loaded_at < EXAMPLES_TTL_S
+            and (generation is None or _examples.generation == generation)
         ):
             return _examples
         rows = (
@@ -124,6 +130,7 @@ async def examples(session: AsyncSession, refresh: bool = False) -> Examples:
             node_ids=[k[1] for k in kept],
             vectors=common.stack([vecs[k[0]] for k in kept]),
             loaded_at=time.monotonic(),
+            generation=generation,
         )
         return _examples
 
@@ -185,11 +192,12 @@ async def classify(session: AsyncSession, limit: int = PER_ROUND) -> dict[str, i
     out = {"knn_classified": 0, "knn_unsure": 0}
     if not await common.try_lock(session, "knn"):
         return out  # another coordinator is at it
-    ex = await examples(session)
+    cfg = await runtime_settings.get_all(session)
+    gen = int(cfg["classification_generation"])
+    ex = await examples(session, generation=gen)
     if len(ex.node_ids) < MIN_EXAMPLES:
         return out
-    cfg = await runtime_settings.get_all(session)
-    v = version(ex, int(cfg["classification_generation"]))
+    v = version(ex, gen)
     threshold = float(cfg["classify_knn_min_confidence"])
     rows = (
         await session.execute(

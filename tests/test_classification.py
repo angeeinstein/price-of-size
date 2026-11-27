@@ -663,3 +663,27 @@ async def test_paths_that_cannot_be_sampled_do_not_block_proposals(sessionmaker,
     async with sessionmaker() as s:
         row = (await s.execute(select(LlmBatch))).scalar_one()
     assert row.requests["0"]["meta"]["path"] == "Regale"
+
+
+async def test_run_again_uses_the_labels_as_they_are_now(sessionmaker, monkeypatch):
+    shelf, item = await _labelled_world(sessionmaker, monkeypatch)
+    (q,) = await _products(sessionmaker, ["Regal Eiche Buche"], prefix="q")
+    await _embed_all(sessionmaker)
+    async with sessionmaker() as s:
+        await knn.classify(s)  # loads (and caches) the examples
+        await s.commit()
+    assert (await _current(sessionmaker, q)).taxonomy_node_id == shelf
+    async with sessionmaker() as s:  # a person corrects the shelf labels
+        shelves = (
+            (await s.execute(select(Product.id).where(Product.title == "Regal Eiche")))
+            .scalars()
+            .all()
+        )
+        for pid in shelves:
+            await common.assign(s, pid, item, "manual", 1.0, "person")
+        await s.commit()
+    await _set(sessionmaker, "classification_generation", 1)  # "run again", within the TTL
+    async with sessionmaker() as s:
+        await knn.classify(s)
+        await s.commit()
+    assert (await _current(sessionmaker, q)).taxonomy_node_id == item
