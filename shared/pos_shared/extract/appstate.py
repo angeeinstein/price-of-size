@@ -365,17 +365,48 @@ def pairs(
             _emit(_measures(item["node"]), "", out, package=False)
         else:
             boxes.setdefault(root, []).append(item)
-    if len(boxes) == 1:
-        _emit(_merged(next(iter(boxes.values()))), "package ", out, package=True)
-    elif boxes:
-        # Several boxes: only their total mass is meaningful, not any one box's size.
-        masses = []
-        for items in boxes.values():
-            box = _merged(items)
-            text = box.get("gross weight") or box.get("weight")
-            q = units.parse_quantity(text, "mass", locale) if text else None
-            if q is None:
-                return out  # one box without a weight: no total
-            masses.append(q.value)
-        out.append(("package total gross weight", _num(sum(masses), "kg")))
+    _packages(boxes, locale, out)
     return out
+
+
+def _inside(root: str, other: str) -> bool:
+    return other.startswith(root + ".") or other.startswith(root + "[")
+
+
+def _packages(boxes: dict[str, list[dict]], locale: str | None, out: list) -> None:
+    """Package pairs from the boxes of one product. A package object that holds other
+    boxes ("shipping": {weight, packages: [...]}) is their summary, not one more box:
+    the innermost boxes are what is shipped."""
+    if not boxes:
+        return
+    leaves = [r for r in boxes if not any(_inside(r, o) for o in boxes)]
+    summaries = [r for r in boxes if r not in leaves]
+    if len(leaves) == 1:
+        box = _merged(boxes[leaves[0]])
+        for r in summaries:  # a shipment of one box: its summary fills gaps only
+            for label, text in _merged(boxes[r]).items():
+                box.setdefault(label, text)
+        _emit(box, "package ", out, package=True)
+        return
+
+    def mass(root: str) -> float | None:
+        box = _merged(boxes[root])
+        text = box.get("gross weight") or box.get("weight")
+        q = units.parse_quantity(text, "mass", locale) if text else None
+        return q.value if q else None
+
+    # Several boxes: only their total mass is meaningful, not any one box's size.
+    masses = [mass(r) for r in leaves]
+    if all(m is not None for m in masses):
+        total = sum(masses)  # type: ignore[arg-type]
+    else:
+        # A box without a weight: the declared weight of a summary holding all boxes,
+        # else no total.
+        top = [r for r in summaries if not any(_inside(o, r) for o in summaries)]
+        if len(top) != 1 or not all(_inside(top[0], r) for r in leaves):
+            return
+        declared = mass(top[0])
+        if declared is None:
+            return
+        total = declared
+    out.append(("package total gross weight", _num(total, "kg")))

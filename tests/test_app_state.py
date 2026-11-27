@@ -351,3 +351,20 @@ def test_a_payload_wrapper_is_not_a_load_rating():
     state["payload"]["product"]["maxPayload"] = {"weight": "100 kg", "note": "x"}
     _, ex = _extract(state)
     assert sorted(m.mass_kg for m in ex.measurements if m.mass_kg) == pytest.approx([10, 12])
+
+
+def test_a_shipping_summary_is_not_one_more_box():
+    shipping = {"weight": "12 kg", "packages": [{"weight": "10 kg"}, {"weight": "2 kg"}]}
+    _, ex = _extract({"product": {"shipping": shipping}})
+    pkg = next(m for m in ex.measurements if m.basis == "package")
+    assert pkg.mass_kg == pytest.approx(12)
+    # a box without a weight: the declared shipment weight
+    shipping["packages"][1] = {"height": "50 cm", "itemNumber": "B"}
+    _, ex = _extract({"product": {"shipping": shipping}})
+    pkg = next(m for m in ex.measurements if m.basis == "package")
+    assert pkg.mass_kg == pytest.approx(12)
+    # a shipment of one box: the box, its gaps filled from the summary
+    one = {"weight": "12 kg", "packages": [_pkg(12) | {"weight": None}]}
+    _, ex = _extract({"product": {"shipping": one}})
+    pkg = next(m for m in ex.measurements if m.basis == "package")
+    assert pkg.mass_kg == pytest.approx(12) and pkg.a_m == pytest.approx(1)
