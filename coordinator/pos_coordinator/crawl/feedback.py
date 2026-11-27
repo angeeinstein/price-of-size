@@ -224,6 +224,7 @@ def _apply_rate(
         out.get("elapsed_ms"),
         out.get("retry_after_s"),
         top,
+        cfg.block_policy(ds.overrides),
     )
     eg.rate_rps = state.rate_rps
     eg.clean_streak = state.clean_streak
@@ -263,3 +264,41 @@ def _apply_rate(
                 details={"cooldown_s": d.cooldown_s, "http_status": out.get("status")},
             )
         )
+
+
+async def retry_blocked(session: AsyncSession, settings: dict[str, Any]) -> int:
+    """Blocked domains whose `block_retry_after_h` (setting or domain override) has
+    passed are tried again. Their refusal counters stay: if the next answer is a
+    refusal again, the domain is blocked again at once; a clean answer resets them."""
+    cfg_default = settings.get("block_retry_after_h")
+    now = (await session.execute(select(func.now()))).scalar_one()
+    retried = 0
+    rows = (
+        await session.execute(
+            select(DomainState)
+            .where(DomainState.block_status == "blocked", DomainState.blocked_at.is_not(None))
+            .with_for_update(skip_locked=True)
+        )
+    ).scalars()
+    for ds in rows:
+        hours = (ds.overrides or {}).get("block_retry_after_h", cfg_default)
+        if hours is None or ds.blocked_at > now - timedelta(hours=float(hours)):
+            continue
+        reason = ds.block_reason
+        ds.block_status, ds.block_reason, ds.blocked_at = "ok", None, None
+        for g in (
+            await session.execute(
+                select(DomainEgressState).where(DomainEgressState.domain == ds.domain)
+            )
+        ).scalars():
+            g.cooldown_until = None
+        session.add(
+            DomainEvent(
+                domain=ds.domain,
+                kind="unblocked",
+                reason="auto_retry",
+                details={"after_h": hours, "block_reason": reason},
+            )
+        )
+        retried += 1
+    return retried

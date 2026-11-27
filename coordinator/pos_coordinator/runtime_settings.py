@@ -14,6 +14,14 @@ from pos_coordinator.models import Setting
 
 DEFAULTS: dict[str, Any] = {
     "respect_robots_txt": True,
+    # Block policy (per-domain overrides under the same names in domain overrides):
+    # challenge pages (CAPTCHA, bot wall) in a row before a domain is blocked, the pause
+    # after the first one, 403s in a row that count as a block, and after how many hours
+    # a blocked domain is tried again (None: stays blocked until unblocked in the panel).
+    "block_challenge_run": 2,
+    "block_suspect_pause_s": 3600,
+    "block_forbidden_run": 5,
+    "block_retry_after_h": None,
     "rate_limit_scope": "per_egress_ip",  # or "global"
     "base_rate_rps": 0.2,  # 1 request per 5 s per domain
     "max_rate_rps": 2.0,  # adaptive ceiling per domain
@@ -42,6 +50,19 @@ DEFAULTS: dict[str, Any] = {
     },
 }
 
+
+def _int_in(lo: int, hi: int):
+    return lambda v: isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+
+
+BLOCK_VALIDATORS: dict[str, Any] = {
+    "block_challenge_run": _int_in(1, 50),
+    "block_suspect_pause_s": _int_in(0, 7 * 86400),
+    "block_forbidden_run": _int_in(1, 1000),
+    "block_retry_after_h": lambda v: v is None or _int_in(1, 24 * 365)(v),
+}
+BLOCK_KEYS = tuple(BLOCK_VALIDATORS)
+
 VALIDATORS: dict[str, Any] = {
     "rate_limit_scope": lambda v: v in ("global", "per_egress_ip"),
     "base_rate_rps": lambda v: isinstance(v, int | float) and 0 < v <= 10,
@@ -56,6 +77,7 @@ VALIDATORS: dict[str, Any] = {
         v is None or (isinstance(v, int | float) and 0 < v <= 50)
     ),
     "respect_robots_txt": lambda v: isinstance(v, bool),
+    **BLOCK_VALIDATORS,
     "user_agent": lambda v: isinstance(v, str) and 3 <= len(v) <= 200,
     "html_keep_sample_fraction": lambda v: isinstance(v, int | float) and 0 <= v <= 1,
 }

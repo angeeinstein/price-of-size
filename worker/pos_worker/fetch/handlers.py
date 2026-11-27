@@ -194,7 +194,7 @@ async def fetch_http(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
     verdict = blocks.classify(res.status, text[:50_000], res.error)
     if verdict.kind == "blocked" and res.status == 200 and snip.get("has_structured_data"):
         verdict = blocks.Verdict("ok")  # a product page that merely mentions robots
-    breaker.trip(domain, verdict.kind, res.retry_after_s)
+    breaker.trip(domain, verdict.kind, res.retry_after_s, breaker.block_pause(job.payload))
 
     evidence = {
         "url": url,
@@ -295,7 +295,7 @@ async def fetch_robots(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
         error=res.error,
     )
     verdict = blocks.classify(res.status, body[:20_000], res.error)
-    breaker.trip(domain, verdict.kind, res.retry_after_s)
+    breaker.trip(domain, verdict.kind, res.retry_after_s, breaker.block_pause(job.payload))
     return done(
         job,
         {
@@ -322,7 +322,7 @@ async def fetch_sitemap(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
         return _skipped(job, domain)
     fetched_at, res = got
     verdict = blocks.classify(res.status, res.body[:20_000].decode("utf-8", "replace"), res.error)
-    breaker.trip(domain, verdict.kind, res.retry_after_s)
+    breaker.trip(domain, verdict.kind, res.retry_after_s, breaker.block_pause(job.payload))
     parsed, parse_error = None, None
     if res.status == 200 and res.body and verdict.kind == "ok":
         try:

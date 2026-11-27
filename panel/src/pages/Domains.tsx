@@ -10,6 +10,37 @@ import { api, ApiError, type DomainEvent, type DomainRow } from "@/lib/api";
 import { useAuth, useIsAdmin } from "@/lib/auth";
 import { fmtAgo } from "@/lib/utils";
 
+const BLOCK_FIELDS: [string, string][] = [
+  ["block_challenge_run", "Challenges before block"],
+  ["block_retry_after_h", "Retry after (h, 0 = never)"],
+  ["block_forbidden_run", "403s before block"],
+];
+
+function BlockOverrides({ d, save }: { d: DomainRow; save: (body: Record<string, unknown>) => void }) {
+  const current = (k: string) => {
+    const o = d.overrides as Record<string, number | null | undefined>;
+    if (!(k in o)) return "";
+    return o[k] === null ? "0" : String(o[k]);
+  };
+  const [values, setValues] = useState<Record<string, string>>(
+    Object.fromEntries(BLOCK_FIELDS.map(([k]) => [k, current(k)])));
+  return (
+    <div className="space-y-1">
+      <div className="text-xs text-muted">Block policy for this domain (empty: global setting)</div>
+      {BLOCK_FIELDS.map(([k, label]) => (
+        <label key={k} className="flex items-center gap-2 text-xs">
+          <Input className="h-7 w-20" value={values[k]} aria-label={label}
+            onChange={(e) => setValues({ ...values, [k]: e.target.value })} />
+          {label}
+        </label>
+      ))}
+      <Button size="sm" variant="outline" onClick={() => save({
+        block: Object.fromEntries(BLOCK_FIELDS.map(([k]) => [k, values[k] === "" ? null : Number(values[k])])),
+      })}>Save block policy</Button>
+    </div>
+  );
+}
+
 function Detail({ d }: { d: DomainRow }) {
   const qc = useQueryClient();
   const admin = useIsAdmin();
@@ -52,6 +83,7 @@ function Detail({ d }: { d: DomainRow }) {
             {d.block_status === "blocked" && (
               <Button size="sm" variant="outline" onClick={() => update.mutate({ unblock: true })}>Unblock</Button>
             )}
+            <BlockOverrides d={d} save={(body) => update.mutate(body)} />
             {error && <div className="text-bad">{error}</div>}
           </div>
         )}

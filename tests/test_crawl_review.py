@@ -35,7 +35,10 @@ def test_floor_never_beats_crawl_delay():
 def test_one_challenge_page_is_a_suspicion_two_are_a_block():
     s = ratecontrol.RateState(rate_rps=1.0)
     first = ratecontrol.observe(s, "blocked", "captcha:recaptcha", 100, None, 2.0)
-    assert first.event == "block_suspected" and first.cooldown_s == ratecontrol.SUSPECT_PAUSE_S
+    assert (
+        first.event == "block_suspected"
+        and first.cooldown_s == ratecontrol.BlockPolicy().suspect_pause_s
+    )
     ratecontrol.observe(s, "ok", None, 100, None, 2.0)  # a clean answer in between
     assert ratecontrol.observe(s, "blocked", "x", 100, None, 2.0).event == "block_suspected"
     assert ratecontrol.observe(s, "blocked", "x", 100, None, 2.0).event == "blocked"
