@@ -14,6 +14,7 @@ MAX_BLOCK_PAUSE_S = 7 * 86400.0
 MIN_THROTTLE_PAUSE_S = 60.0
 
 _paused_until: dict[str, float] = {}
+_tripped_at: dict[str, float] = {}  # wall clock of the latest trip, per domain
 
 
 def block_pause(payload: dict) -> float:
@@ -38,6 +39,20 @@ def trip(
         return
     until = time.monotonic() + pause
     _paused_until[domain] = max(_paused_until.get(domain, 0.0), until)
+    _tripped_at[domain] = time.time()
+
+
+def release_if_unblocked(domain: str, payload: dict) -> None:
+    """The coordinator unblocked the domain (by hand or as an automatic retry) after
+    this worker paused it: the job says when (`unblocked_at`, epoch seconds), and a
+    pause from before that no longer holds."""
+    when = payload.get("unblocked_at")
+    if not isinstance(when, int | float) or isinstance(when, bool):
+        return
+    tripped = _tripped_at.get(domain)
+    if tripped is not None and when > tripped:
+        _paused_until.pop(domain, None)
+        _tripped_at.pop(domain, None)
 
 
 def paused(domain: str) -> bool:
@@ -52,3 +67,4 @@ def paused(domain: str) -> bool:
 
 def reset() -> None:
     _paused_until.clear()
+    _tripped_at.clear()

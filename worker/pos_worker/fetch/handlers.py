@@ -152,6 +152,7 @@ async def _gated_fetch(job: api.LeasedJob, url: str, max_bytes: int, **fetch_kw)
     if delay > 0:
         await asyncio.sleep(min(delay, MAX_DELAY_S))
     interval = max(float(job.payload.get("interval_s") or 0), MIN_INTERVAL_S)
+    breaker.release_if_unblocked(domain, job.payload)
     async with _GATE.lock(domain):
         if breaker.paused(domain):
             return None

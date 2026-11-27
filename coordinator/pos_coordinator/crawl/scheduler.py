@@ -504,6 +504,9 @@ async def _lease_domain(
             # challenge page: the coordinator's own first pause (block_suspect_pause_s)
             "refusal_pause_s": cfg.block_policy(ds.overrides).suspect_pause_s,
         }
+        if ds.unblocked_at is not None:
+            # a refusal pause the worker took before this unblock no longer holds
+            extra["unblocked_at"] = ds.unblocked_at.timestamp()
         if job.type == "fetch_http":
             extra["keep_html"] = _keep_html(ds, cfg)
         out.append(Handout(job=job, delay_s=delay, extra=extra))

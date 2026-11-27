@@ -122,6 +122,7 @@ async def update_domain(domain: str, body: DomainUpdate, admin: SensitiveAdmin, 
     changes = body.model_dump(exclude_defaults=True)
     if body.unblock and d.block_status == "blocked":
         d.block_status, d.block_reason, d.blocked_at = "ok", None, None
+        d.unblocked_at = func.now()
         session.add(DomainEvent(domain=domain, kind="unblocked", reason=f"admin:{admin.name}"))
         for g in (
             await session.execute(

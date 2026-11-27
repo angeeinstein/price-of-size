@@ -7,7 +7,7 @@ from sqlalchemy import func, select, update
 
 from pos_coordinator import runtime_settings
 from pos_coordinator.crawl import feedback, ratecontrol, scheduler
-from pos_coordinator.models import DomainEgressState, DomainEvent, DomainState
+from pos_coordinator.models import DomainEgressState, DomainEvent, DomainState, Job
 
 
 def _config(**settings) -> scheduler.CrawlConfig:
@@ -159,3 +159,51 @@ def test_handouts_carry_the_domains_pause():
     cfg = _config(block_suspect_pause_s=900)
     assert cfg.block_policy({"block_suspect_pause_s": 30}).suspect_pause_s == 30
     assert cfg.block_policy(None).suspect_pause_s == 900
+
+
+async def test_a_retried_domain_gets_a_probe_when_its_jobs_are_used_up(sessionmaker):
+    async with sessionmaker() as s:
+        await _blocked(s, "spent.example", hours_ago=30)
+        await _blocked(s, "busy.example", hours_ago=30)
+        await scheduler.enqueue_urls(
+            s, ["https://spent.example/p/1"], "shop", 3, extra_payload={"depth": 1}
+        )
+        await scheduler.enqueue_urls(s, ["https://busy.example/p/1"], "shop")
+        await s.execute(
+            update(Job)
+            .where(Job.domain == "spent.example", Job.type == "fetch_http")
+            .values(status="failed", attempts=5, last_error="throttled:http_403")
+        )
+        settings = {**runtime_settings.DEFAULTS, "block_retry_after_h": 24}
+        assert await feedback.retry_blocked(s, settings) == 2
+        jobs = (
+            await s.execute(
+                select(Job.domain, Job.status, Job.priority, Job.payload)
+                .where(Job.type == "fetch_http")
+                .order_by(Job.domain, Job.created_at)
+            )
+        ).all()
+        spent = [j for j in jobs if j.domain == "spent.example"]
+        assert [j.status for j in spent] == ["failed", "queued"]  # the old one stays
+        assert spent[1].priority == 3 and spent[1].payload["depth"] == 1
+        assert [j.status for j in jobs if j.domain == "busy.example"] == ["queued"]  # no extra
+        details = dict((await s.execute(select(DomainEvent.domain, DomainEvent.details))).all())
+        assert details["spent.example"]["probe_url"] == "https://spent.example/p/1"
+        assert details["busy.example"]["probe_url"] is None
+        ds = await s.get(DomainState, "spent.example")
+        assert ds.unblocked_at is not None
+
+
+def test_an_unblock_releases_the_workers_pause():
+    from pos_worker.fetch import breaker
+
+    breaker.reset()
+    breaker.trip("shop.example", "blocked", None, 7 * 86400)
+    before = breaker._tripped_at["shop.example"] - 10
+    breaker.release_if_unblocked("shop.example", {"unblocked_at": before})
+    assert breaker.paused("shop.example")  # unblocked before the pause: it holds
+    breaker.release_if_unblocked("shop.example", {"unblocked_at": "soon"})
+    assert breaker.paused("shop.example")
+    breaker.release_if_unblocked("shop.example", {"unblocked_at": before + 20})
+    assert not breaker.paused("shop.example")
+    breaker.reset()

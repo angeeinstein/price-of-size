@@ -286,19 +286,75 @@ async def retry_blocked(session: AsyncSession, settings: dict[str, Any]) -> int:
             continue
         reason = ds.block_reason
         ds.block_status, ds.block_reason, ds.blocked_at = "ok", None, None
+        ds.unblocked_at = now
         for g in (
             await session.execute(
                 select(DomainEgressState).where(DomainEgressState.domain == ds.domain)
             )
         ).scalars():
             g.cooldown_until = None
+        probe = await _ensure_probe(session, ds.domain)
         session.add(
             DomainEvent(
                 domain=ds.domain,
                 kind="unblocked",
                 reason="auto_retry",
-                details={"after_h": hours, "block_reason": reason},
+                details={"after_h": hours, "block_reason": reason, "probe_url": probe},
             )
         )
         retried += 1
     return retried
+
+
+# Keys the scheduler adds to a job's payload at lease time: not part of the job.
+_LEASE_KEYS = {
+    "delay_s",
+    "interval_s",
+    "user_agent",
+    "refusal_pause_s",
+    "keep_html",
+    "unblocked_at",
+}
+
+
+async def _ensure_probe(session: AsyncSession, domain: str) -> str | None:
+    """A retried domain needs a job to try: its refusals may have used up the attempts
+    of every job it had. If none is queued, the latest fetch of the domain is queued
+    again (a new job, the old one stays as it ended). Returns the probe's URL."""
+    page_types = [t for t in FETCH_TYPES if t != "fetch_robots"]
+    waiting = (
+        await session.execute(
+            select(Job.id)
+            .where(
+                Job.domain == domain,
+                Job.type.in_(page_types),
+                Job.status.in_(("queued", "leased")),
+            )
+            .limit(1)
+        )
+    ).first()
+    if waiting:
+        return None
+    last = (
+        await session.execute(
+            select(Job)
+            .where(Job.domain == domain, Job.type.in_(page_types))
+            .order_by(Job.created_at.desc(), Job.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    url = (last.payload or {}).get("url") if last is not None else None
+    if not isinstance(url, str):
+        return None
+    extra = {
+        k: v for k, v in (last.payload or {}).items() if k not in _LEASE_KEYS | {"url", "source"}
+    }
+    report = await scheduler.enqueue_urls(
+        session,
+        [url],
+        (last.payload or {}).get("source"),
+        last.priority,
+        job_type=last.type,
+        extra_payload=extra,
+    )
+    return url if report.queued else None
