@@ -86,3 +86,17 @@ def _delay_groups(text: str) -> dict[str, list[float]]:
                 # product-token match: "PriceOfSizeBot" also matches "priceofsizebot/0.1"
                 groups.setdefault(a.split("/")[0], []).append(min(delay, 3600.0))
     return groups
+
+
+def sitemaps(text: str | None, limit: int = 100) -> list[str]:
+    """`Sitemap:` lines (independent of user-agent groups)."""
+    out: list[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line.lower().startswith("sitemap:"):
+            url = line.split(":", 1)[1].strip()
+            if url.startswith(("http://", "https://")) and url not in out:
+                out.append(url)
+                if len(out) >= limit:
+                    break
+    return out

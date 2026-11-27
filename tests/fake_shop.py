@@ -42,8 +42,12 @@ class FakeShop:
             def do_GET(self):  # noqa: N802
                 host = (self.headers.get("Host") or "").split(":")[0]
                 shop.requests.append((time.monotonic(), host, self.path))
-                status, body, headers = shop.route(host, self.path)
-                data = body.encode()
+                gz = shop.gz_route(host, self.path)
+                if gz is not None:
+                    status, data, headers = 200, gz, {"Content-Type": "application/x-gzip"}
+                else:
+                    status, body, headers = shop.route(host, self.path)
+                    data = body.encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
@@ -79,7 +83,51 @@ class FakeShop:
                     {},
                 )
             return 200, product_page(2), {}
+        if host == "127.0.0.4":  # discovery through sitemaps
+            base = f"http://127.0.0.4:{self.port}"
+            if path == "/robots.txt":
+                return 200, f"User-agent: *\nAllow: /\nSitemap: {base}/sitemap_index.xml\n", {}
+            if path == "/sitemap_index.xml":
+                return (
+                    200,
+                    (
+                        '<?xml version="1.0" encoding="UTF-8"?>'
+                        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                        f"<sitemap><loc>{base}/sitemap-products.xml.gz</loc></sitemap>"
+                        f"<sitemap><loc>{base}/sitemap-pages.xml</loc></sitemap>"
+                        "<sitemap><loc>http://127.0.0.9/foreign.xml</loc></sitemap>"
+                        "</sitemapindex>"
+                    ),
+                    {"Content-Type": "application/xml"},
+                )
+            if path == "/sitemap-pages.xml":
+                return (
+                    200,
+                    (
+                        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                        f"<url><loc>{base}/about</loc></url></urlset>"
+                    ),
+                    {"Content-Type": "application/xml"},
+                )
+            if path.startswith("/p/"):
+                return 200, product_page(int(path.rsplit("/", 1)[-1])), {}
+            return 200, "<html><body>about us</body></html>", {}
         return 404, "unknown host", {}
+
+    def gz_route(self, host: str, path: str) -> bytes | None:
+        if host == "127.0.0.4" and path == "/sitemap-products.xml.gz":
+            import gzip
+
+            base = f"http://127.0.0.4:{self.port}"
+            urls = "".join(
+                f"<url><loc>{base}/p/{i}</loc><lastmod>2026-11-0{i}</lastmod></url>"
+                for i in range(1, 4)
+            )
+            urls += "<url><loc>http://127.0.0.9/p/77</loc></url>"  # another host: ignored
+            return gzip.compress(
+                f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{urls}</urlset>'.encode()
+            )
+        return None
 
     def url(self, host: str, path: str) -> str:
         return f"http://{host}:{self.port}{path}"

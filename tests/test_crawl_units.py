@@ -239,3 +239,51 @@ async def test_fetch_limiter_caps_concurrency_and_resizes():
     peak = 0
     await asyncio.gather(*(task() for _ in range(10)))
     assert peak == 5
+
+
+# --- sitemaps -----------------------------------------------------------------------
+
+
+def test_sitemap_urlset_index_text_and_gzip():
+    from pos_worker.fetch import sitemaps
+
+    urlset = (
+        b'<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        b"<url><loc> https://s.example/p/1 </loc><lastmod>2026-01-02</lastmod></url>"
+        b"<url><lastmod>x</lastmod></url></urlset>"
+    )
+    sm = sitemaps.parse(sitemaps.gzip_bytes(urlset))
+    assert sm.kind == "urlset"
+    assert sm.urls == [{"loc": "https://s.example/p/1", "lastmod": "2026-01-02"}]
+    index = (
+        b'<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        b"<sitemap><loc>https://s.example/a.xml</loc></sitemap></sitemapindex>"
+    )
+    assert sitemaps.parse(index).sitemaps == ["https://s.example/a.xml"]
+    text = sitemaps.parse(b"https://s.example/1\nnot a url\nhttps://s.example/2\n")
+    assert text.kind == "text" and [u["loc"] for u in text.urls] == [
+        "https://s.example/1",
+        "https://s.example/2",
+    ]
+
+
+def test_sitemap_limits_and_hostile_xml():
+    import pytest as _pytest
+
+    from pos_worker.fetch import sitemaps
+
+    bomb = sitemaps.gzip_bytes(b"<urlset>" + b" " * (sitemaps.MAX_BYTES + 10) + b"</urlset>")
+    with _pytest.raises(sitemaps.SitemapError):
+        sitemaps.parse(bomb)
+    xxe = (
+        b'<?xml version="1.0"?><!DOCTYPE u [<!ENTITY x SYSTEM "file:///etc/passwd">]>'
+        b"<urlset><url><loc>&x;</loc></url></urlset>"
+    )
+    assert all("root:" not in (u["loc"] or "") for u in sitemaps.parse(xxe).urls)
+    with _pytest.raises(sitemaps.SitemapError):
+        sitemaps.parse(b"<html><body>not a sitemap</body></html>")
+
+
+def test_robots_sitemap_lines():
+    txt = "User-agent: *\nDisallow:\nSitemap: https://s.example/sm.xml # main\nsitemap: ftp://x\n"
+    assert robots.sitemaps(txt) == ["https://s.example/sm.xml"]

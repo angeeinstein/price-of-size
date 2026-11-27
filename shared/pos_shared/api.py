@@ -200,6 +200,14 @@ class ExtendRequest(Strict):
     leases: list[LeaseRef] = Field(max_length=500)
 
 
+class ReleaseRequest(Strict):
+    leases: list[LeaseRef] = Field(max_length=2000)
+
+
+class ReleaseResponse(Strict):
+    released: list[UUID]
+
+
 class ExtendResponse(Strict):
     extended: list[UUID]
     lost: list[UUID] = Field(description="Jobs whose lease this node no longer holds")

@@ -98,6 +98,7 @@ class DomainState(Base):
     robots_http_status: Mapped[int | None] = mapped_column(SmallInteger)
     robots_crawl_delay_s: Mapped[float | None] = mapped_column(Float)
     robots_next_check_at: Mapped[datetime | None]
+    sitemaps: Mapped[list[str] | None] = mapped_column(JSONB)  # advertised in robots.txt
     # Slot schedule for the optional hard cap across all egress groups.
     next_global_slot_at: Mapped[datetime | None]
     pages_fetched: Mapped[int] = mapped_column(BigInteger, server_default="0")

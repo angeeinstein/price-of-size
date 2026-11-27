@@ -138,8 +138,11 @@ class Worker:
             # Lease renewal keeps running while jobs drain.
             if self.active:
                 await asyncio.wait([a.task for a in self.active.values()], timeout=drain_timeout_s)
-            for a in self.active.values():
+            unfinished = list(self.active.values())
+            for a in unfinished:
                 a.task.cancel()
+            await asyncio.gather(*(a.task for a in unfinished), return_exceptions=True)
+            await self._release_unfinished(unfinished)
             for t in loops:
                 t.cancel()
             await asyncio.gather(*loops, return_exceptions=True)
@@ -150,6 +153,19 @@ class Worker:
             await self.client.aclose()
             self.spool.close()
         return self.exit_code
+
+    async def _release_unfinished(self, unfinished: list[ActiveJob]) -> None:
+        """Give the leases of jobs that did not finish back to the coordinator, so they
+        are rescheduled now instead of when their lease expires (minutes later)."""
+        leases = [api.LeaseRef(job_id=a.job.id, attempt=a.job.attempt) for a in unfinished]
+        self.active.clear()
+        if not leases:
+            return
+        try:
+            resp = await self.client.release(leases)
+            log.info("released %d unfinished jobs", len(resp.released))
+        except Exception as e:  # shutting down: never let this block the exit
+            log.warning("could not release unfinished jobs (their leases will expire): %s", e)
 
     # --- resources ---------------------------------------------------------
 
@@ -166,7 +182,11 @@ class Worker:
     async def _resource_loop(self) -> None:
         while True:
             await asyncio.sleep(self.settings.resource_poll_s)
-            self.limits = cgroup.read_limits(self.settings.cgroup_root, self.settings.state_dir)
+            try:
+                self.limits = cgroup.read_limits(self.settings.cgroup_root, self.settings.state_dir)
+            except Exception:
+                log.exception("reading resource limits failed; keeping the previous ones")
+                continue
             new = self._compute_slots()
             if new != self.slots:
                 log.info("concurrency %s -> %s", self.slots, new)
@@ -313,6 +333,8 @@ class Worker:
                 log.error("coordinator refused our API version %s", API_VERSION)
             except (CoordinatorError, httpx.HTTPError) as e:
                 log.warning("heartbeat failed: %s", e)
+            except Exception:  # a loop must never die: log, then try again next round
+                log.exception("heartbeat failed unexpectedly")
             await asyncio.sleep(self.heartbeat_interval)
 
     async def _run_command(self, cmd: api.Command) -> None:
@@ -380,6 +402,8 @@ class Worker:
                 self.compatible = False
             except (CoordinatorError, httpx.HTTPError) as e:
                 log.warning("lease failed: %s", e)
+            except Exception:
+                log.exception("lease failed unexpectedly")
             if got == 0:
                 self._capacity_freed.clear()
                 with contextlib.suppress(TimeoutError):
@@ -446,6 +470,8 @@ class Worker:
                 await self.renew_leases_once()
             except (CoordinatorError, httpx.HTTPError) as e:
                 log.warning("lease renewal failed (will retry): %s", e)
+            except Exception:
+                log.exception("lease renewal failed unexpectedly")
             await asyncio.sleep(self.settings.lease_check_s)
 
     # --- results -------------------------------------------------------------
@@ -472,6 +498,8 @@ class Worker:
                 await self.flush_once()
             except (CoordinatorError, httpx.HTTPError) as e:
                 log.warning("flush failed (results stay spooled): %s", e)
+            except Exception:
+                log.exception("flush failed unexpectedly (results stay spooled)")
             self._result_ready.clear()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(

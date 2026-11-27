@@ -7,8 +7,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from pos_coordinator.api.deps import CurrentAdmin, Session
-from pos_coordinator.crawl import scheduler
-from pos_coordinator.models import AuditLog, DomainEgressState, DomainEvent, DomainState, Job
+from pos_coordinator.crawl import discovery, scheduler
+from pos_coordinator.models import (
+    AuditLog,
+    DomainEgressState,
+    DomainEvent,
+    DomainState,
+    Job,
+    Source,
+)
 
 router = APIRouter(prefix="/api/admin")
 
@@ -160,3 +167,62 @@ async def domain_events(domain: str, admin: CurrentAdmin, session: Session, limi
         }
         for e in rows
     ]
+
+
+# --- sources -----------------------------------------------------------------------
+
+
+class SourceIn(BaseModel):
+    type: str = Field("scraper", pattern="^(dataset|api|scraper|reference)$")
+    status: str = Field("active", pattern="^(active|paused|disabled)$")
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+def _source_view(s: Source) -> dict[str, Any]:
+    return {
+        "name": s.name,
+        "type": s.type,
+        "status": s.status,
+        "config": s.config,
+        "created_at": s.created_at,
+    }
+
+
+@router.put("/sources/{name}")
+async def put_source(name: str, body: SourceIn, admin: CurrentAdmin, session: Session):
+    if not name or len(name) > 100:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "bad source name")
+    try:
+        discovery.validate_config(body.config)
+    except discovery.SourceConfigError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
+    src = (await session.execute(select(Source).where(Source.name == name))).scalar_one_or_none()
+    if src is None:
+        src = Source(name=name, type=body.type, status=body.status, config=body.config)
+        session.add(src)
+    else:
+        src.type, src.status, src.config = body.type, body.status, body.config
+    session.add(
+        AuditLog(actor=admin.name, action="source.put", target=name, details=body.model_dump())
+    )
+    await session.commit()
+    return _source_view(src)
+
+
+@router.get("/sources")
+async def list_sources(admin: CurrentAdmin, session: Session):
+    rows = (await session.execute(select(Source).order_by(Source.name))).scalars()
+    return [_source_view(s) for s in rows]
+
+
+@router.post("/sources/{name}/discover")
+async def discover_source(name: str, admin: CurrentAdmin, session: Session):
+    src = (await session.execute(select(Source).where(Source.name == name))).scalar_one_or_none()
+    if src is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown source")
+    if src.status != "active":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"source is {src.status}")
+    queued = await discovery.discover(session, src)
+    session.add(AuditLog(actor=admin.name, action="source.discover", target=name, details=queued))
+    await session.commit()
+    return queued

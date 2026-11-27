@@ -60,6 +60,10 @@ def upgrade() -> None:
         "domain_state", sa.Column("robots_next_check_at", sa.DateTime(timezone=True), nullable=True)
     )
     op.add_column(
+        "domain_state",
+        sa.Column("sitemaps", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    )
+    op.add_column(
         "domain_state", sa.Column("next_global_slot_at", sa.DateTime(timezone=True), nullable=True)
     )
     op.add_column(
@@ -103,6 +107,7 @@ def downgrade() -> None:
     op.drop_column("domain_state", "last_fetch_at")
     op.drop_column("domain_state", "pages_fetched")
     op.drop_column("domain_state", "next_global_slot_at")
+    op.drop_column("domain_state", "sitemaps")
     op.drop_column("domain_state", "robots_next_check_at")
     op.drop_column("domain_state", "robots_crawl_delay_s")
     op.drop_column("domain_state", "robots_http_status")

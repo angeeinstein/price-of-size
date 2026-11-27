@@ -18,7 +18,7 @@ import zstandard
 
 from pos_shared import api
 from pos_shared.ids import uuid7
-from pos_worker.fetch import blocks, breaker, http, snippets
+from pos_worker.fetch import blocks, breaker, http, sitemaps, snippets
 from pos_worker.handlers import JobContext, done, handler
 
 DEFAULT_UA = "PriceOfSizeBot/0.1"
@@ -36,10 +36,12 @@ class _Limiter:
         self.limit = limit
         self.active = 0
         self._cond: asyncio.Condition | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def _condition(self) -> asyncio.Condition:
-        if self._cond is None:
-            self._cond = asyncio.Condition()
+        loop = asyncio.get_running_loop()
+        if self._cond is None or self._loop is not loop:  # conditions are loop-bound
+            self._cond, self._loop, self.active = asyncio.Condition(), loop, 0
         return self._cond
 
     async def __aenter__(self):
@@ -76,9 +78,11 @@ def set_concurrency(http_slots: int) -> None:
 
 
 def client_for(user_agent: str):
-    c = _CLIENTS.get(user_agent)
+    """One pooled HTTP client per user agent and event loop (clients are loop-bound)."""
+    key = (id(asyncio.get_running_loop()), user_agent)
+    c = _CLIENTS.get(key)
     if c is None or c.is_closed:
-        c = _CLIENTS[user_agent] = http.make_client(user_agent)
+        c = _CLIENTS[key] = http.make_client(user_agent)
     return c
 
 
@@ -252,6 +256,73 @@ async def fetch_robots(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
             "retry_after_s": res.retry_after_s,
             "verdict": verdict.kind,
             "reason": verdict.reason,
+        },
+        fetches=[fetch],
+    )
+
+
+@handler("fetch_sitemap")
+async def fetch_sitemap(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
+    """Fetch and parse a sitemap. The discovered URLs are evidence too: they go to the
+    raw store, and only counts travel in the result."""
+    url = str(job.payload["url"])
+    domain = urlsplit(url).hostname or ""
+    await _wait_for_slot(job)
+    if breaker.paused(domain):
+        return _skipped(job, domain)
+    client = client_for(str(job.payload.get("user_agent") or DEFAULT_UA))
+    async with _LIMIT:
+        fetched_at = datetime.now(UTC)
+        res = await http.fetch(client, url, max_bytes=sitemaps.MAX_BYTES)
+    verdict = blocks.classify(res.status, res.body[:20_000].decode("utf-8", "replace"), res.error)
+    breaker.trip(domain, verdict.kind, res.retry_after_s)
+    parsed, parse_error = None, None
+    if res.status == 200 and res.body and verdict.kind == "ok":
+        try:
+            parsed = sitemaps.parse(res.body)
+        except sitemaps.SitemapError as e:
+            parse_error = str(e)[:500]
+    evidence = {
+        "url": url,
+        "final_url": res.final_url,
+        "status": res.status,
+        "headers": res.headers,
+        "fetched_at": fetched_at.isoformat(),
+        "error": res.error,
+        "parse_error": parse_error,
+        "kind": parsed.kind if parsed else None,
+        "urls": parsed.urls if parsed else [],
+        "sitemaps": parsed.sitemaps if parsed else [],
+        "truncated": parsed.truncated if parsed else False,
+    }
+    sha = await _store(ctx, "snippets", json.dumps(evidence, sort_keys=True).encode())
+    fetch = api.FetchRecord(
+        id=uuid7(),
+        url=url,
+        final_url=res.final_url,
+        status=res.status,
+        fetched_at=fetched_at,
+        mode="http",
+        content_type=(res.content_type or "")[:200] or None,
+        response_bytes=len(res.body),
+        blob_sha256=sha,
+        source=job.payload.get("source"),
+        error=res.error or parse_error,
+    )
+    return done(
+        job,
+        {
+            "status": res.status,
+            "elapsed_ms": res.elapsed_ms,
+            "error": res.error,
+            "retry_after_s": res.retry_after_s,
+            "verdict": verdict.kind,
+            "reason": verdict.reason,
+            "sitemap_kind": parsed.kind if parsed else None,
+            "url_count": len(parsed.urls) if parsed else 0,
+            "sitemap_count": len(parsed.sitemaps) if parsed else 0,
+            "parse_error": parse_error,
+            "evidence_sha256": sha,
         },
         fetches=[fetch],
     )

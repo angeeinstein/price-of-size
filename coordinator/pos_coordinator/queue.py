@@ -240,6 +240,32 @@ async def reap_expired(session: AsyncSession) -> tuple[int, int]:
     return requeued.rowcount, failed.rowcount
 
 
+async def release(
+    session: AsyncSession, node_id: uuid.UUID, leases: list[tuple[uuid.UUID, int]]
+) -> list[uuid.UUID]:
+    """A node hands back leases of jobs it did not run (e.g. it is shutting down while
+    they waited for their rate slot). They are queued again at once, and the attempt
+    is not counted. Only the lease holder of that exact attempt can do this."""
+    if not leases:
+        return []
+    stmt = (
+        update(Job)
+        .where(
+            tuple_(Job.id, Job.attempts).in_(leases),
+            Job.node_id == node_id,
+            Job.status == "leased",
+        )
+        .values(
+            status="queued",
+            attempts=func.greatest(Job.attempts - 1, 0),
+            lease_expires_at=None,
+            updated_at=func.now(),
+        )
+        .returning(Job.id)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def release_node(session: AsyncSession, node_id: uuid.UUID) -> int:
     """Return all jobs leased by a node to the queue (node revoked or drained)."""
     res = await session.execute(

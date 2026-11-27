@@ -16,6 +16,7 @@ own, through the same schedule). With `respect_robots_txt` on, disallowed URLs
 fail without being fetched.
 """
 
+import logging
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -29,7 +30,10 @@ from pos_coordinator.crawl import ratecontrol, robots, urls
 from pos_coordinator.models import DomainEgressState, DomainState, Job, Node
 from pos_shared.ids import uuid7
 
-FETCH_TYPES = ("fetch_http", "fetch_robots")
+log = logging.getLogger(__name__)
+
+FETCH_TYPES = ("fetch_http", "fetch_robots", "fetch_sitemap")
+PAGE_TYPES = ("fetch_http", "fetch_sitemap")  # subject to robots.txt rules
 LOOKAHEAD_S = 60.0
 JITTER = 0.2  # slots are spaced interval * U(1 - JITTER, 1 + JITTER)
 ROBOTS_PRIORITY = 100
@@ -94,7 +98,11 @@ class EnqueueReport:
 
 
 async def enqueue_urls(
-    session: AsyncSession, raw_urls: list[str], source: str | None, priority: int = 0
+    session: AsyncSession,
+    raw_urls: list[str],
+    source: str | None,
+    priority: int = 0,
+    job_type: str = "fetch_http",
 ) -> EnqueueReport:
     report = EnqueueReport(invalid=[])
     rows, domains, seen = [], {}, set()
@@ -105,6 +113,8 @@ async def enqueue_urls(
             report.invalid.append(raw)
             continue
         key = urls.dedup_key(url)
+        if job_type != "fetch_http":  # e.g. a sitemap and a page at the same URL
+            key = f"{job_type}:{key}"
         if key in seen:
             report.duplicates += 1
             continue
@@ -114,7 +124,7 @@ async def enqueue_urls(
         rows.append(
             {
                 "id": uuid7(),
-                "type": "fetch_http",
+                "type": job_type,
                 "payload": {"url": url, "source": source},
                 "priority": priority,
                 "domain": domain,
@@ -148,8 +158,20 @@ async def ensure_domains(session: AsyncSession, domains: dict[str, str]) -> None
         .values([{"domain": d} for d in domains])
         .on_conflict_do_nothing(index_elements=["domain"])
     )
+    # Only domains whose rules are unknown need robots.txt now; known ones are refreshed
+    # by the scheduler when robots_next_check_at comes due.
+    unknown = set(
+        (
+            await session.execute(
+                select(DomainState.domain).where(
+                    DomainState.domain.in_(list(domains)), DomainState.robots_status.is_(None)
+                )
+            )
+        ).scalars()
+    )
     for domain, sample_url in domains.items():
-        await ensure_robots_job(session, domain, urls.robots_url(sample_url))
+        if domain in unknown:
+            await ensure_robots_job(session, domain, urls.robots_url(sample_url))
 
 
 async def ensure_robots_job(session: AsyncSession, domain: str, robots_url: str) -> None:
@@ -256,20 +278,29 @@ async def _lease_domain(
     horizon: datetime,
     cfg: CrawlConfig,
 ) -> list[Handout]:
-    eg = await _lock_group_state(session, domain, group, cfg)
-    if eg is None:  # another node of this group is scheduling the domain right now
-        return []
-    if eg.cooldown_until is not None and eg.cooldown_until > now:
-        return []
+    # Lock order, everywhere: domain_state, then domain_egress_state (see feedback.apply).
+    # The domain row is taken with SKIP LOCKED: if a result or another lease is busy with
+    # this domain right now, it is simply served in the next round.
     ds = (
         await session.execute(
             select(DomainState)
             .where(DomainState.domain == domain)
-            .with_for_update()
+            .with_for_update(skip_locked=True)
             .execution_options(populate_existing=True)
         )
-    ).scalar_one()
+    ).scalar_one_or_none()
+    if ds is None:
+        log.debug("%s: domain row busy", domain)
+        return []
+    eg = await _lock_group_state(session, domain, group, cfg)
+    if eg is None:  # cannot happen while we hold the domain row; be safe
+        log.debug("%s: group state locked by another lease", domain)
+        return []
+    if eg.cooldown_until is not None and eg.cooldown_until > now:
+        log.debug("%s: cooling down until %s", domain, eg.cooldown_until)
+        return []
     if ds.block_status == "blocked":
+        log.debug("%s: blocked", domain)
         return []
 
     # Pages only with usable rules: "unreachable" (5xx/network) means disallow-all
@@ -280,7 +311,7 @@ async def _lease_domain(
         sample = (
             await session.execute(
                 select(Job.payload["url"].astext)
-                .where(Job.domain == domain, Job.type == "fetch_http", Job.status == "queued")
+                .where(Job.domain == domain, Job.type.in_(PAGE_TYPES), Job.status == "queued")
                 .limit(1)
             )
         ).scalar_one_or_none()
@@ -288,6 +319,7 @@ async def _lease_domain(
             await ensure_robots_job(session, domain, urls.robots_url(sample))
     allowed_types = types if rules_usable else [t for t in types if t == "fetch_robots"]
     if not allowed_types:
+        log.debug("%s: waiting for robots.txt (%s)", domain, ds.robots_status)
         return []
 
     override = (ds.overrides or {}).get("rate_rps")
@@ -310,6 +342,7 @@ async def _lease_domain(
         ).scalar_one()
         want = 0 if in_flight else min(want, 1)
     if want == 0:
+        log.debug("%s: no slot (slow start in flight or schedule full)", domain)
         return []
     jobs = (
         (
@@ -338,7 +371,7 @@ async def _lease_domain(
             break
         url = job.payload.get("url", "")
         if (
-            job.type == "fetch_http"
+            job.type in PAGE_TYPES
             and cfg.respect_robots_txt
             and not robots.allowed(ds.robots_status, ds.robots_txt, url)
         ):

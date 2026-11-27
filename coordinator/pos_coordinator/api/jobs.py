@@ -5,9 +5,9 @@ import time
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
 
-from pos_coordinator import partitions, queue, runtime_settings
+from pos_coordinator import partitions, queue, runtime_settings, txn
 from pos_coordinator.api.deps import CurrentNode, Session, check_api_version
-from pos_coordinator.crawl import feedback, scheduler
+from pos_coordinator.crawl import discovery, feedback, scheduler
 from pos_coordinator.models import Job, RawObject
 from pos_shared import api
 
@@ -24,39 +24,41 @@ async def lease(body: api.LeaseRequest, request: Request, node: CurrentNode, ses
         types = [t for t in types if t in node.desired_job_types]
     if not types:
         return api.LeaseResponse(jobs=[])
-    cfg = await crawl_config(request, session)
-    out: list[api.LeasedJob] = []
 
-    # Fetch jobs only ever go through the crawl scheduler (rate slots, robots.txt).
-    fetch_types = [t for t in types if t in scheduler.FETCH_TYPES]
-    if fetch_types:
-        for h in await scheduler.lease_fetch(session, node, fetch_types, body.max_jobs, cfg):
-            out.append(
-                api.LeasedJob(
-                    id=h.job.id,
-                    type=h.job.type,
-                    payload={**h.job.payload, **h.extra},
-                    attempt=h.job.attempts,
-                    lease_expires_at=h.job.lease_expires_at,
-                    lease_seconds=cfg.lease_s,
+    async def work() -> list[api.LeasedJob]:
+        cfg = await crawl_config(request, session)
+        out: list[api.LeasedJob] = []
+        # Fetch jobs only ever go through the crawl scheduler (rate slots, robots.txt).
+        fetch_types = [t for t in types if t in scheduler.FETCH_TYPES]
+        if fetch_types:
+            for h in await scheduler.lease_fetch(session, node, fetch_types, body.max_jobs, cfg):
+                out.append(
+                    api.LeasedJob(
+                        id=h.job.id,
+                        type=h.job.type,
+                        payload={**h.job.payload, **h.extra},
+                        attempt=h.job.attempts,
+                        lease_expires_at=h.job.lease_expires_at,
+                        lease_seconds=cfg.lease_s,
+                    )
                 )
-            )
-    other = [t for t in types if t not in scheduler.FETCH_TYPES]
-    room = body.max_jobs - len(out)
-    if other and room > 0:
-        for j in await queue.lease(session, node.id, other, room, cfg.lease_s):
-            out.append(
-                api.LeasedJob(
-                    id=j.id,
-                    type=j.type,
-                    payload=j.payload,
-                    attempt=j.attempts,
-                    lease_expires_at=j.lease_expires_at,
-                    lease_seconds=cfg.lease_s,
+        other = [t for t in types if t not in scheduler.FETCH_TYPES]
+        room = body.max_jobs - len(out)
+        if other and room > 0:
+            for j in await queue.lease(session, node.id, other, room, cfg.lease_s):
+                out.append(
+                    api.LeasedJob(
+                        id=j.id,
+                        type=j.type,
+                        payload=j.payload,
+                        attempt=j.attempts,
+                        lease_expires_at=j.lease_expires_at,
+                        lease_seconds=cfg.lease_s,
+                    )
                 )
-            )
-    await session.commit()
-    return api.LeaseResponse(jobs=out)
+        return out
+
+    return api.LeaseResponse(jobs=await txn.run(session, work, refresh=[node]))
 
 
 async def crawl_config(request: Request, session) -> scheduler.CrawlConfig:
@@ -95,24 +97,37 @@ async def extend(body: api.ExtendRequest, node: CurrentNode, session: Session):
     )
 
 
+@router.post("/release", response_model=api.ReleaseResponse)
+async def release(body: api.ReleaseRequest, node: CurrentNode, session: Session):
+    released = await queue.release(
+        session, node.id, [(ref.job_id, ref.attempt) for ref in body.leases]
+    )
+    await session.commit()
+    return api.ReleaseResponse(released=released)
+
+
 @router.post("/results", response_model=api.ResultAck)
 async def results(body: api.ResultBatch, request: Request, node: CurrentNode, session: Session):
     months = {partitions.month_of(f.fetched_at) for r in body.results for f in r.fetches}
-    if months:
+    if months:  # DDL in its own transaction, before the batch
         await request.app.state.partitions.ensure_months(session, months)
-    types = dict(
-        (
-            await session.execute(
-                select(Job.id, Job.type).where(Job.id.in_([r.job_id for r in body.results]))
-            )
-        ).all()
-    )
-    results = [feedback.reinterpret(types.get(r.job_id, ""), r) for r in body.results]
-    applied: dict = {}
-    accepted, rejected = await queue.complete(session, node.id, results, applied)
-    if any(j.type in scheduler.FETCH_TYPES for j in applied.values()):
-        cfg = await crawl_config(request, session)
-        stored = [r for r in results if r.job_id in applied]
-        await feedback.apply(session, node, applied, stored, cfg)
-    await session.commit()
-    return api.ResultAck(accepted=accepted, rejected=rejected)
+
+    async def work() -> api.ResultAck:
+        types = dict(
+            (
+                await session.execute(
+                    select(Job.id, Job.type).where(Job.id.in_([r.job_id for r in body.results]))
+                )
+            ).all()
+        )
+        results = [feedback.reinterpret(types.get(r.job_id, ""), r) for r in body.results]
+        applied: dict = {}
+        accepted, rejected = await queue.complete(session, node.id, results, applied)
+        if any(j.type in scheduler.FETCH_TYPES for j in applied.values()):
+            cfg = await crawl_config(request, session)
+            stored = [r for r in results if r.job_id in applied]
+            await feedback.apply(session, node, applied, stored, cfg)
+            await discovery.process_results(session, applied, stored, request.app.state.rawstore)
+        return api.ResultAck(accepted=accepted, rejected=rejected)
+
+    return await txn.run(session, work, refresh=[node])

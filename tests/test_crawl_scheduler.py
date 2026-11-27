@@ -213,3 +213,18 @@ async def test_disallowed_urls_do_not_use_up_a_slow_start_batch(sessionmaker):
         )
         h = await scheduler.lease_fetch(s, n, ["fetch_http"], 5, await _cfg(s))
         assert [x.job.payload["url"] for x in h] == [f"https://{DOMAIN}/p/1"]
+
+
+async def test_known_domains_get_no_new_robots_job(sessionmaker):
+    async with sessionmaker() as s:
+        await _setup(s, 1)  # robots known ("none"), old robots job done
+        await scheduler.enqueue_urls(s, [f"https://{DOMAIN}/p/new"], "t")
+        await scheduler.enqueue_urls(
+            s, [f"https://{DOMAIN}/sitemap.xml"], "t", job_type="fetch_sitemap"
+        )
+        active_robots = (
+            await s.execute(
+                select(func.count()).where(Job.type == "fetch_robots", Job.status == "queued")
+            )
+        ).scalar_one()
+        assert active_robots == 0

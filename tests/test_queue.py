@@ -205,3 +205,16 @@ async def test_late_result_after_requeue_but_before_release(sessionmaker):
         assert accepted == [j1]
         assert "superseded" in rejected[str(j2)]
         assert (await s.get(Job, j2)).status == "leased"
+
+
+async def test_release_returns_unrun_jobs_without_counting_the_attempt(sessionmaker):
+    async with sessionmaker() as s:
+        a, b = await _node(s, "a"), await _node(s, "b")
+        (jid,) = await queue.enqueue(s, [queue.NewJob("noop", {})])
+        await queue.lease(s, a, ["noop"], 1, 60)
+        assert await queue.release(s, b, [(jid, 1)]) == []  # not the holder
+        assert await queue.release(s, a, [(jid, 2)]) == []  # not that attempt
+        assert await queue.release(s, a, [(jid, 1)]) == [jid]
+        job = await s.get(Job, jid)
+        await s.refresh(job)
+        assert job.status == "queued" and job.attempts == 0 and job.lease_expires_at is None

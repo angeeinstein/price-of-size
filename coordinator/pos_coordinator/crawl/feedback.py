@@ -53,7 +53,13 @@ async def apply(
     """Update crawl state for accepted fetch results (call after queue.complete)."""
     now: datetime = (await session.execute(select(func.now()))).scalar_one()
     group = egress_group(node, cfg)
-    for r in results:
+    # Lock order: domain_state, then domain_egress_state (as in the scheduler), and
+    # domains in sorted order, so concurrent batches and leases cannot deadlock.
+    ordered = sorted(
+        (r for r in results if (j := jobs.get(r.job_id)) is not None and j.domain),
+        key=lambda r: jobs[r.job_id].domain,
+    )
+    for r in ordered:
         job = jobs.get(r.job_id)
         if job is None or job.type not in FETCH_TYPES or not job.domain or not r.output:
             continue
@@ -87,6 +93,7 @@ def _apply_robots(session: AsyncSession, ds: DomainState, out: dict, now: dateti
     ds.robots_http_status = out.get("status")
     ds.robots_fetched_at = now
     ds.robots_crawl_delay_s = robots.crawl_delay(kind, body)
+    ds.sitemaps = robots.sitemaps(body) or None
     wait = robots.ROBOTS_MAX_AGE_S if kind != "unreachable" else robots.ROBOTS_RETRY_S
     ds.robots_next_check_at = now + timedelta(seconds=wait)
     if old != (kind, body):

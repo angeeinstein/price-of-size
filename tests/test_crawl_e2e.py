@@ -31,6 +31,14 @@ async def _fast_rates(admin):
         assert (await admin.put(f"/api/admin/settings/{k}", json={"value": v})).status_code == 200
 
 
+_SM = {}
+
+
+@pytest.fixture(autouse=True)
+def _remember_sessionmaker(sessionmaker):
+    _SM["sm"] = sessionmaker
+
+
 async def _run_until(worker, predicate, timeout=30.0):
     task = asyncio.create_task(worker.run(drain_timeout_s=5))
     try:
@@ -38,11 +46,69 @@ async def _run_until(worker, predicate, timeout=30.0):
         while asyncio.get_running_loop().time() < deadline:
             if await predicate():
                 return
+            if task.done():
+                task.result()  # surface a crashed worker instead of timing out
             await asyncio.sleep(0.1)
-        raise TimeoutError("condition not reached")
+        raise TimeoutError(f"condition not reached; jobs: {await _job_table(worker)}")
     finally:
         worker.stop()
         await task
+
+
+async def _job_table(worker):
+    rows = await worker.client._http.get("/api/v1/version")  # coordinator still answering?
+    out = (
+        f"coordinator={rows.status_code} active={len(worker.active)} "
+        f"spooled={worker.spool.result_count()}"
+    )
+    import io
+
+    for t in asyncio.all_tasks():
+        if t.get_name() == "flush":
+            buf = io.StringIO()
+            t.print_stack(file=buf)
+            out += f"\nFLUSH TASK done={t.done()} stack:\n{buf.getvalue()}"
+    spooled = worker.spool.peek_results(10)
+    try:
+        ack = await worker.client.push_results(spooled) if spooled else None
+        out += f" spool={[(r['job_id'], r['attempt'], r['outcome']) for r in spooled]} ack={ack}"
+    except Exception as e:  # noqa: BLE001
+        out += f" flush raised {e!r}"
+    async with _SM["sm"]() as s:
+        jobs = (
+            await s.execute(
+                select(
+                    Job.type,
+                    Job.status,
+                    Job.domain,
+                    Job.attempts,
+                    Job.last_error,
+                    Job.not_before,
+                    Job.payload["url"].astext,
+                )
+            )
+        ).all()
+        groups = (
+            await s.execute(
+                select(
+                    DomainEgressState.domain,
+                    DomainEgressState.rate_rps,
+                    DomainEgressState.next_slot_at,
+                    DomainEgressState.cooldown_until,
+                )
+            )
+        ).all()
+        doms = (
+            await s.execute(
+                select(
+                    DomainState.domain,
+                    DomainState.robots_status,
+                    DomainState.pages_fetched,
+                    DomainState.block_status,
+                )
+            )
+        ).all()
+    return f"{out}\njobs={jobs}\ngroups={groups}\ndomains={doms}"
 
 
 def _statuses(sm, domain):
@@ -179,3 +245,64 @@ async def test_captcha_blocks_the_domain(app, admin, sessionmaker, shop, tmp_pat
 
     r = await admin.patch("/api/admin/domains/127.0.0.3", json={"unblock": True})
     assert r.json()["block_status"] == "ok"
+
+
+async def test_discovery_through_sitemaps(app, admin, sessionmaker, shop, tmp_path):
+    """robots.txt advertises a sitemap index -> gzipped product sitemap -> pages that
+    match the source's pattern are fetched; other hosts and other pages are not."""
+    await _fast_rates(admin)
+    r = await admin.put(
+        "/api/admin/sources/fake-shop",
+        json={
+            "config": {
+                "domains": ["127.0.0.4"],
+                "product_url_pattern": r"/p/\d+$",
+                "seeds": [shop.url("127.0.0.4", "/")],
+            }
+        },
+    )
+    assert r.status_code == 200, r.text
+    # The first discovery finds no sitemaps yet (robots.txt unknown): it fetches the seed,
+    # which also fetches robots.txt; discovering again then uses robots' Sitemap line.
+    assert (await admin.post("/api/admin/sources/fake-shop/discover")).json() == {
+        "sitemaps": 0,
+        "seeds": 1,
+    }
+    worker = await make_agent(app, admin, tmp_path / "w", "w")
+
+    async def robots_known():
+        async with sessionmaker() as s:
+            return bool((await s.get(DomainState, "127.0.0.4")).sitemaps)
+
+    await _run_until(worker, robots_known)
+    assert (await admin.post("/api/admin/sources/fake-shop/discover")).json()["sitemaps"] == 1
+
+    async def products_fetched():
+        async with sessionmaker() as s:
+            n = (
+                await s.execute(
+                    select(func.count()).where(
+                        Job.type == "fetch_http",
+                        Job.status == "done",
+                        Job.payload["url"].astext.like("%/p/%"),
+                    )
+                )
+            ).scalar_one()
+            return n == 3
+
+    worker = await make_agent(app, admin, tmp_path / "w2", "w2")
+    await _run_until(worker, products_fetched)
+    paths = shop.paths("127.0.0.4")
+    assert "/sitemap_index.xml" in paths and "/sitemap-products.xml.gz" in paths
+    assert {"/p/1", "/p/2", "/p/3"} <= set(paths)
+    assert "/about" not in paths  # in a sitemap, but not matching the product pattern
+    assert shop.paths("127.0.0.9") == []  # other hosts are never followed
+    async with sessionmaker() as s:
+        sources = set(
+            (
+                await s.execute(
+                    select(Job.payload["source"].astext).where(Job.type == "fetch_http")
+                )
+            ).scalars()
+        )
+    assert sources == {"fake-shop"}
