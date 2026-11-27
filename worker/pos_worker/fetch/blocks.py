@@ -28,7 +28,9 @@ BLOCK_MARKERS: list[tuple[str, re.Pattern[str]]] = [
         "botwall:generic",
         re.compile(
             r"(are you a (human|robot)|verify you are (a )?human|unusual traffic from your computer"
-            r"|bitte bestätigen sie, dass sie kein roboter sind)",
+            r"|bitte bestätigen sie, dass sie kein roboter sind"
+            r"|sichere verbindung wird überprüft|verifying (your connection|you are human)"
+            r"|checking (if the site connection is secure|your browser))",
             re.I,
         ),
     ),

@@ -8,12 +8,13 @@ caps, and the extraction stages parse them later, as often as needed.
 Bump SNIPPETS_VERSION whenever what is captured changes.
 """
 
+import json
 import re
 from typing import Any
 
 from lxml import etree, html
 
-SNIPPETS_VERSION = "1"
+SNIPPETS_VERSION = "2"
 
 MAX_ITEMS = 60  # per kind
 MAX_ITEM_CHARS = 200_000  # per captured element
@@ -94,6 +95,7 @@ def capture(page: bytes | str, url: str | None = None) -> dict[str, Any]:
         doc.xpath('//script[contains(translate(@type,"JSONLD","jsonld"),"ld+json")]'),
         render=lambda el: el.text or "",
     )
+    out["app_state"] = _app_state(doc, budget)
     collect("microdata", _outermost(doc.xpath("//*[@itemscope][@itemtype]")))
     collect("rdfa", _outermost(doc.xpath("//*[@typeof]")))
     # Human-readable evidence
@@ -147,6 +149,86 @@ def capture(page: bytes | str, url: str | None = None) -> dict[str, Any]:
     out["has_structured_data"] = _has_product(out)
     out["chars"] = MAX_TOTAL_CHARS - budget.left
     return out
+
+
+# --- embedded application state ------------------------------------------------------
+# Shops that render in the browser ship their data as JSON (Next.js __NEXT_DATA__, Nuxt,
+# <script type="application/json"> or "text/hydrate"): the package weight and size are
+# often only there. Pages can carry megabytes of it, so only the small objects that
+# describe a size are kept, each with its path ("product.packageMeasurements[0]").
+STATE_SCRIPT = (
+    '//script[@id="__NEXT_DATA__" or contains(translate(@type,"JSONHYDRATE","jsonhydrate"),'
+    '"application/json") or contains(translate(@type,"HYDRATE","hydrate"),"hydrate")]'
+)
+SIZE_KEYS = {
+    "weight", "netweight", "grossweight", "height", "width", "depth", "length",
+    "diameter", "volume", "dimensions", "measurements", "packagemeasurements",
+}  # fmt: skip
+# Pixel sizes of images and videos are not product sizes: such subtrees are skipped.
+MEDIA_HINT = re.compile(
+    r"image|img|media|picture|photo|icon|thumb|logo|video|banner|aspect|avatar|sprite", re.I
+)
+MAX_STATE_SCRIPT_CHARS = 8_000_000
+MAX_STATE_NODES = 40
+MAX_STATE_NODE_CHARS = 3_000
+
+
+def _norm_key(k: str) -> str:
+    return re.sub(r"[^a-z]", "", k.lower())
+
+
+def _compact(node: dict) -> dict:
+    """Scalars and small {text, value, unit} objects only: what describes a size."""
+    out = {}
+    for k, v in node.items():
+        if (
+            isinstance(v, str | int | float | bool)
+            or v is None
+            or isinstance(v, dict)
+            and all(isinstance(x, str | int | float | bool) or x is None for x in v.values())
+        ):
+            out[k] = v
+    return out
+
+
+def _state_nodes(obj, path: str, found: list, depth: int = 0) -> None:
+    if depth > 40 or len(found) >= MAX_STATE_NODES:
+        return
+    if isinstance(obj, dict):
+        keys = {_norm_key(k) for k in obj}
+        if keys & {"url", "src", "imagefilename", "alt", "aspectratio", "mimetype"}:
+            return  # an image or file descriptor
+        if len(keys & SIZE_KEYS) >= 2 or ({"weight", "netweight", "grossweight"} & keys):
+            node = _compact(obj)
+            if node and len(json.dumps(node, default=str)) <= MAX_STATE_NODE_CHARS:
+                found.append({"path": path, "node": node})
+        for k, v in obj.items():
+            if isinstance(v, dict | list) and not MEDIA_HINT.search(str(k)):
+                _state_nodes(v, f"{path}.{k}" if path else str(k), found, depth + 1)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj[:500]):
+            _state_nodes(v, f"{path}[{i}]", found, depth + 1)
+
+
+def _app_state(doc, budget) -> list[dict]:
+    found: list[dict] = []
+    for el in doc.xpath(STATE_SCRIPT):
+        text = el.text or ""
+        if not text.strip() or len(text) > MAX_STATE_SCRIPT_CHARS:
+            continue
+        try:
+            data = json.loads(text)
+        except (ValueError, RecursionError):
+            continue
+        _state_nodes(data, "", found)
+        if len(found) >= MAX_STATE_NODES:
+            break
+    kept = []
+    for item in found:
+        if budget.take(json.dumps(item, default=str)) is None:
+            break
+        kept.append(item)
+    return kept
 
 
 def _outermost(elements):

@@ -197,11 +197,19 @@ A source describes where URLs come from. Sitemaps advertised in robots.txt,
 explicit sitemaps and seed pages are fetched through the same polite schedule;
 sitemap indexes are followed, and URLs matching `product_url_pattern` are queued
 as pages (other hosts than the sitemap's only with `allow_domains`).
+`sitemap_url_pattern` limits which child sitemaps of an index are followed: IKEA's
+index lists about 1,500 sitemaps for every country and catalogue, each up to 50 MB;
+`prod-de-AT_\d+\.xml$` keeps the six with Austrian products (about 30,000 pages).
+
+Pages are read in tiers: JSON-LD, then data shops ship to the browser as JSON
+(Next.js and similar "app state", e.g. IKEA's package dimensions and weight), then
+spec tables and text.
 
 ```bash
 curl -X PUT https://pos.example.org/api/admin/sources/ikea -H "Authorization: Bearer $POS_ADMIN_TOKEN" \
   -H 'content-type: application/json' -d '{"type": "scraper", "config": {
-    "domains": ["www.ikea.com"], "product_url_pattern": "/at/de/p/[^/]+-\\d+/?$", "priority": 0}}'
+    "domains": ["www.ikea.com"], "sitemap_url_pattern": "prod-de-AT_\\d+\\.xml$",
+    "product_url_pattern": "/at/de/p/[^/]+-\\d+/?$", "priority": 0}}'
 curl -X POST https://pos.example.org/api/admin/sources/ikea/discover -H "Authorization: Bearer $POS_ADMIN_TOKEN"
 ```
 

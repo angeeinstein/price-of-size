@@ -7,12 +7,15 @@ A source's config (table `source`, type `scraper`) steers discovery:
       "domains": ["shop.example"],                        # + sitemaps from robots.txt
       "seeds": ["https://shop.example/c/shelves"],         # pages fetched directly
       "product_url_pattern": "/p/[^/]+-\\d+/?$",           # which sitemap URLs to fetch
+      "sitemap_url_pattern": "prod-de-AT_\\d+\\.xml$",       # which child sitemaps to follow
       "allow_domains": ["cdn.shop.example"],               # beyond the sitemap's own host
       "priority": 0
     }
 
-Sitemap indexes enqueue their child sitemaps; urlsets enqueue the URLs that
-match the pattern (all URLs if there is none). Per the sitemaps protocol, URLs
+Sitemap indexes enqueue their child sitemaps (only those matching
+`sitemap_url_pattern`, if set: a shop's index may list every country and catalogue,
+hundreds of files of up to 50 MB each); urlsets enqueue the URLs that match the
+product pattern (all URLs if there is none). Per the sitemaps protocol, URLs
 on other hosts than the sitemap's are ignored unless allowed explicitly; so are
 `Sitemap:` lines in a robots.txt that point to another host.
 
@@ -50,12 +53,16 @@ class SourceConfigError(ValueError):
 
 
 def validate_config(config: dict[str, Any]) -> dict[str, Any]:
-    pattern = config.get("product_url_pattern")
-    if pattern is not None:
+    for key in ("product_url_pattern", "sitemap_url_pattern"):
+        pattern = config.get(key)
+        if pattern is None:
+            continue
+        if not isinstance(pattern, str):
+            raise SourceConfigError(f"{key} must be a string")
         try:
             re.compile(pattern)
         except re.error as e:
-            raise SourceConfigError(f"product_url_pattern: {e}") from e
+            raise SourceConfigError(f"{key}: {e}") from e
     for key in ("sitemaps", "domains", "seeds", "allow_domains"):
         value = config.get(key, [])
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
@@ -194,7 +201,12 @@ async def _follow(session: AsyncSession, job: Job, evidence: dict, source: Sourc
 
     depth = int(job.payload.get("depth") or 0) + 1
     me = _normalized(job.payload["url"])
-    children = [u for u in evidence.get("sitemaps", []) if same_site(u) and _normalized(u) != me]
+    wanted = re.compile(cfg["sitemap_url_pattern"]) if cfg.get("sitemap_url_pattern") else None
+    children = [
+        u
+        for u in evidence.get("sitemaps", [])
+        if same_site(u) and _normalized(u) != me and (wanted is None or wanted.search(u))
+    ]
     if children and depth <= MAX_SITEMAP_DEPTH:
         await scheduler.enqueue_urls(
             session,
