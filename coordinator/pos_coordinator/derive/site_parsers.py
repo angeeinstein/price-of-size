@@ -125,7 +125,7 @@ async def merge(
 ) -> None:
     """In the derive stage, before the LLM tier: fill the gaps of a page's extraction
     with the active parser of its domain, from the archived HTML."""
-    if ex.title and not llm_page.missing(ex):
+    if ex.title and not llm_page.gaps(ex):
         return
     if not f.html_sha256:
         return

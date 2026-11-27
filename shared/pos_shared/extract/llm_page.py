@@ -80,8 +80,12 @@ def page_text(evidence: dict[str, Any]) -> str:
 
 def missing(ex: Extraction) -> list[str]:
     """What the other tiers did not find on a page that looks like a product's."""
-    if not ex.title:
-        return []
+    return gaps(ex) if ex.title else []
+
+
+def gaps(ex: Extraction) -> list[str]:
+    """What an extraction lacks: a price (with its currency) and sizes, whatever its
+    title."""
     out = []
     if not any(o.price is not None and o.currency for o in ex.offers):
         out.append("price")

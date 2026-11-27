@@ -320,6 +320,29 @@ def test_a_page_passes_only_without_values_the_llm_did_not_find():
     assert site_parsers.page_passes(price_only, page, no_sizes, "de")
 
 
+def test_a_page_without_a_title_keeps_the_offer_it_has():
+    from pos_shared.extract.model import OfferCandidate
+
+    spec = site_parser.parse(SPEC)
+    result = site_parser.run(spec, _html(1))
+    # a nameless structured product with an unavailable offer: the parser names it,
+    # adds the sizes it lacks, and no second (unflagged) offer
+    ex = Extraction(extract_version="t")
+    ex.offers.append(
+        OfferCandidate(
+            price=1299.0, currency="EUR", price_raw="1.299 €", availability="out_of_stock"
+        )
+    )
+    assert site_parser.apply(ex, result, spec, "de", "holz.example@1")
+    assert ex.title == "Eichenregal Nr. 1"
+    assert len(ex.offers) == 1 and ex.offers[0].availability == "out_of_stock"
+    assert ex.measurements
+    # with nothing at all, it fills both
+    empty = Extraction(extract_version="t")
+    assert site_parser.apply(empty, result, spec, "de", "holz.example@1")
+    assert len(empty.offers) == 1 and empty.measurements
+
+
 def test_condensed_html_for_the_llm():
     t = site_parser.condensed_html(_html(1))
     assert t.startswith("<body>") and "tracking" not in t and "color:red" not in t

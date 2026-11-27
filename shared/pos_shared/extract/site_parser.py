@@ -396,10 +396,12 @@ def apply(
     """Fill the gaps of `ex` (as the LLM tier does) from a site parser's result."""
     from pos_shared.extract import llm_page
 
-    need = llm_page.missing(ex) if ex.title else ["price", "size"]
     added = False
     if not ex.title and result.title:
         ex.title = result.title[:300]
+    # the gaps of what the other tiers found, title or not: a structured offer stays
+    # the page's only offer
+    need = llm_page.gaps(ex)
     if "price" in need and result.price_text:
         price = units.parse_number(result.price_text, locale)
         if price is not None:
