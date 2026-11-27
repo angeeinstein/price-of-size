@@ -66,6 +66,11 @@ and watch `GET /api/admin/jobs/stats`. Interactive API docs: `/docs`.
 | Node agent: A/B slots, health checks, rollback, self-update | `agent/pos_agent/` |
 | Blue-green coordinator, backup before migrations | `agent/pos_agent/services.py`, `coordinator/.../backup.py` |
 | Bootstrap script for all roles | `install.sh`, `deploy/docker/` |
+| Domain rate limits per egress group, adaptive back-off, cooldowns | `coordinator/.../crawl/scheduler.py`, `crawl/ratecontrol.py`, `crawl/feedback.py` |
+| robots.txt fetched first, enforced per setting, Crawl-delay | `crawl/robots.py`, `crawl/scheduler.py` |
+| Blocks (CAPTCHA, bot walls, repeated 403) logged, no evasion | `worker/.../fetch/blocks.py`, `crawl/feedback.py`, `domain_event` |
+| Raw evidence capture (JSON-LD, tables, breadcrumbs, price blocks, ...) | `worker/.../fetch/snippets.py` |
+| HTML retention policy | `crawl/scheduler.py` (`_keep_html`), `fetch/handlers.py` |
 
 ### Deviations from the spec
 
@@ -103,5 +108,8 @@ Done in this step:
 Next steps:
 
 - [ ] Control panel skeleton (React + Vite + Tailwind + shadcn/ui), user accounts, live updates
-- [ ] Domain leases and adaptive per-domain rates (needed before real fetching in Phase 2)
+- [x] Polite fetching: per-(domain, egress group) rate slots, AIMD back-off, robots.txt,
+      blocks, raw evidence capture, HTML retention (Phase 2 groundwork)
+- [ ] Discovery: sitemaps from robots.txt, category pages, per-source URL patterns
+- [ ] Browser fetching (Playwright) for pages without data over plain HTTP
 - [ ] Node dashboard (local web UI) and quiet hours; Raspberry Pi SD-card friendly spool

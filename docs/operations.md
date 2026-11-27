@@ -135,6 +135,30 @@ inactive slot stopped, and updates when the signed desired release differs:
 `install.sh --update` updates the installer-managed parts (agent bootstrap,
 simple-mode worker). In agent mode the coordinator steers versions.
 
+## Crawling
+
+Queue URLs (the control panel will do this; for now the admin API):
+
+```bash
+curl -X POST https://pos.example.org/api/admin/crawl/urls -H "Authorization: Bearer $POS_ADMIN_TOKEN" \
+  -H 'content-type: application/json' -d '{"source": "ikea", "urls": ["https://www.ikea.com/at/de/p/..."]}'
+```
+
+URLs are normalised (tracking parameters dropped) and queued once. Per domain:
+
+* robots.txt is fetched first and stored; with `respect_robots_txt` on (default)
+  disallowed URLs fail without a request. Crawl-delay / Request-rate cap the rate.
+* Rate slots are scheduled per (domain, egress group), starting at
+  `base_rate_rps` (1 request per 5 s). After 20 clean responses the rate rises
+  by 10 % up to `max_rate_rps`; 429/503/timeouts/rising latency halve it and
+  pause the domain (Retry-After honoured, cooldown doubling up to 6 h).
+* New domains get one request at a time until 10 pages answered (slow start).
+* CAPTCHAs, bot walls and five 403s in a row block the domain. Nothing tries to
+  get around a block. `GET /api/admin/domains?blocked=true`, history in
+  `GET /api/admin/domains/<domain>/events`, unblock or cap a domain with
+  `PATCH /api/admin/domains/<domain>` (`{"unblock": true}`, `{"rate_rps": 0.1}`).
+* The crawler identifies itself with `user_agent` (default `PriceOfSizeBot/0.1`).
+
 ## Backups
 
 * **Database role:** `pos-db-backup.timer` dumps the database nightly
