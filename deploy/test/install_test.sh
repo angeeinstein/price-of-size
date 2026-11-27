@@ -37,6 +37,15 @@ curl -fsS "http://127.0.0.1:$PORT/healthz" | jq -e .ok
 bind=$(docker inspect -f '{{(index (index .HostConfig.PortBindings "80/tcp") 0).HostIp}}' pos-caddy)
 [[ "$bind" == 127.0.0.1 ]] || fail "Caddy must publish on loopback only (got $bind)"
 
+step "an API key added as documented survives a re-install"
+! grep -q '^POS_ANTHROPIC_API_KEY=' /etc/pos/coordinator.env || fail "empty API key placeholder written"
+echo 'POS_ANTHROPIC_API_KEY=sk-ant-install-test' >> /etc/pos/coordinator.env
+$I --role coordinator --non-interactive --release-file "$RELEASE_FILE" --db-url "$DB" \
+  --raw-store "$DATA/raw" --backup-dir "$DATA/backups" --http-port "$PORT"
+grep -qx 'POS_ANTHROPIC_API_KEY=sk-ant-install-test' /etc/pos/coordinator.env || fail "API key lost"
+[[ "$(grep -c '^POS_ANTHROPIC_API_KEY=' /etc/pos/coordinator.env)" == 1 ]] || fail "API key duplicated"
+wait_for 90 "coordinator healthy after the re-install" curl -fsS "http://127.0.0.1:$PORT/healthz"
+
 step "node role (agent mode)"
 CODE=$(admin -X POST -H 'content-type: application/json' -d '{"label":"t"}' \
   "http://127.0.0.1:$PORT/api/admin/enrollment-codes" | jq -r .code)

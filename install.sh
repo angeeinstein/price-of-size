@@ -370,7 +370,9 @@ write_env() {  # write_env FILE KEY=VALUE...   (an unchanged file is left untouc
   fi
 }
 
-env_get() { [[ -f "$1" ]] && sed -n "s/^$2=//p" "$1" | head -1 || true; }
+# The last assignment wins, as for docker --env-file and systemd (a line appended by
+# hand overrides an earlier one).
+env_get() { [[ -f "$1" ]] && sed -n "s/^$2=//p" "$1" | tail -n 1 || true; }
 
 # --- node -------------------------------------------------------------------------------
 
@@ -473,6 +475,7 @@ install_coordinator() {
   # on the terminal.
   local anthropic_key
   anthropic_key=$(env_get "$env_file" POS_ANTHROPIC_API_KEY)
+  # (write_env drops empty values: no placeholder line is written without a key)
   write_env "$env_file" "POS_DATABASE_URL=$DB_URL" "POS_ADMIN_TOKEN=$admin_token" \
     "POS_ANTHROPIC_API_KEY=$anthropic_key"
   # Separate subdirectories: pre-migration dumps belong to the coordinator's service

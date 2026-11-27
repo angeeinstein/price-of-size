@@ -192,11 +192,18 @@ def _params(model: str, task: Task) -> dict[str, Any]:
 
 def estimate_cost(model: str, task: Task, batch: bool) -> Decimal:
     """An upper estimate before the call: everything sent (instructions, input, the
-    answer schema, the API's own instructions for structured output) and the full
-    `max_tokens` answered."""
-    chars = len(task.system) + len(task.prompt) + len(json.dumps(strict_schema(task.schema)))
-    tokens_in = int(chars / CHARS_PER_TOKEN) + REQUEST_OVERHEAD_TOKENS
-    return pricing.cost_usd(model, tokens_in, task.max_tokens, batch=batch)
+    answer schema, the API's own instructions for structured output), the cached
+    part at the price of a cache write, and the full `max_tokens` answered."""
+    fixed = len(task.system) + len(json.dumps(strict_schema(task.schema)))
+    # the cached part may be written to the cache on this call (1.25 x input price)
+    cached = int(fixed / CHARS_PER_TOKEN) + REQUEST_OVERHEAD_TOKENS
+    return pricing.cost_usd(
+        model,
+        int(len(task.prompt) / CHARS_PER_TOKEN) + 1,
+        task.max_tokens,
+        cache_write_tokens=cached,
+        batch=batch,
+    )
 
 
 def default_client(settings: Any = None) -> Any:

@@ -518,3 +518,10 @@ async def test_collecting_a_batch_waits_for_the_budget_lock(sessionmaker):
         assert not poll.done()
         await holder.commit()
     assert await poll == 1
+
+
+def test_the_estimate_covers_a_cache_write():
+    task = Task(stage="test", system="S" * 300_000, prompt="p", schema=Pick, max_tokens=100,
+                model_role="category_mapping")  # fmt: skip
+    worst = pricing.cost_usd("claude-sonnet-5-5", 1, 100, cache_write_tokens=100_000)
+    assert service.estimate_cost("claude-sonnet-5-5", task, batch=False) >= worst
