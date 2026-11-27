@@ -32,8 +32,15 @@ try {
   await page.waitForSelector("text=Nodes online");
   await shot("overview");
 
-  for (const p of ["nodes", "jobs", "domains", "sources", "explorer", "releases", "settings", "users", "account"]) {
+  const pages = {
+    nodes: "Nodes", jobs: "Jobs and queue", domains: "Domains", sources: "Sources",
+    explorer: "Explorer", releases: "Releases", settings: "Settings", users: "Users",
+    account: "Account",
+  };
+  for (const [p, title] of Object.entries(pages)) {
     await page.click(`a[href="/${p}"]`);
+    // the page itself rendered (a crash would leave the previous one on screen)
+    await page.getByRole("heading", { level: 1, name: title, exact: true }).waitFor();
     await page.waitForLoadState("networkidle");
     await shot(p);
   }
