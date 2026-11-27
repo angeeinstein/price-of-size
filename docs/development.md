@@ -167,6 +167,10 @@ pos-coordinator fx-refresh        # ECB reference rates (also fetched daily)
 - [x] Cross-source check (factor 3 from the median; two disagreeing pages: neither) and
       price jumps between visits (factor 10), recomputed as offers arrive
 - [x] Rebuild drill reproduces the derived layer from raw
+- [x] Category outliers (`validity/outliers.py`): robust z of log price per kg and per m³
+      within the category (parent's distribution for small ones), hourly
+- [x] LLM review of flagged offers (`validity/review.py`, table `price_review`): a
+      rejection takes the offer out of the canonical price; panel: Price checks
 - [ ] Tier 2 (microdata/RDFa), tier 4 (LLM extraction within budget)
 - [x] Target taxonomy: Google Product Taxonomy (en, de) + extension (`classify/taxonomy.py`)
 - [x] Classification tier 1: shop category mappings (`classify/shopmap.py`, panel: Categories)

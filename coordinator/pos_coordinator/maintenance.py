@@ -151,6 +151,16 @@ async def run_once(
             await session.commit()
     except Exception:
         log.exception("k-NN classification failed")
+    try:
+        async with sm() as session:
+            from pos_coordinator.validity import outliers
+
+            res = await outliers.maybe_run(session)
+            if res:
+                out["category_outliers"] = res["flagged"] + res["cleared"]
+            await session.commit()
+    except Exception:
+        log.exception("category outlier check failed")
     if any(out.values()):
         log.info("maintenance: %s", out)
     return out

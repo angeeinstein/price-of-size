@@ -11,9 +11,10 @@ from sqlalchemy import text
 
 from pos_coordinator import maintenance, rawstore, signing_key
 from pos_coordinator.api import admin, crawl, jobs, nodes, raw, releases
+from pos_coordinator.api import prices as prices_api
 from pos_coordinator.api import taxonomy as taxonomy_api
 from pos_coordinator.api.deps import Session
-from pos_coordinator.classify import by_llm, proposals  # registers their batch handlers
+from pos_coordinator.classify import by_llm, proposals  # (registers batch handlers)
 from pos_coordinator.config import Settings, get_settings
 from pos_coordinator.db import make_engine, make_sessionmaker
 from pos_coordinator.derive import fx
@@ -23,6 +24,7 @@ from pos_coordinator.panel import api as panel_api
 from pos_coordinator.panel import static as panel_static
 from pos_coordinator.partitions import PartitionCache
 from pos_coordinator.rawstore import RawStore
+from pos_coordinator.validity import review  # (registers its batch handler)
 from pos_shared.version import API_VERSION, __version__
 
 
@@ -44,7 +46,7 @@ async def fx_daily(sm) -> None:
             await asyncio.sleep(3600)
 
 
-async def llm_loop(service, interval_s: float) -> None:
+async def llm_loop(service, interval_s: float, store: RawStore) -> None:
     """Collect finished Message Batches (the stages' handlers store the answers) and
     queue new LLM work: mapping proposals first (one mapping classifies many
     products), then classification of single products."""
@@ -55,6 +57,7 @@ async def llm_loop(service, interval_s: float) -> None:
                 ("polling LLM batches", service.poll_batches),
                 ("queueing mapping proposals", lambda: proposals.schedule(service.sm, service)),
                 ("queueing LLM classification", lambda: by_llm.schedule(service.sm, service)),
+                ("queueing price reviews", lambda: review.schedule(service.sm, service, store)),
             ):
                 try:
                     n = await step()
@@ -104,7 +107,11 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
                 )
             )
             tasks.append(asyncio.create_task(fx_daily(app.state.sessionmaker)))
-            tasks.append(asyncio.create_task(llm_loop(app.state.llm, settings.llm_poll_interval_s)))
+            tasks.append(
+                asyncio.create_task(
+                    llm_loop(app.state.llm, settings.llm_poll_interval_s, app.state.rawstore)
+                )
+            )
         try:
             yield
         finally:
@@ -137,7 +144,7 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
     async def version():
         return {"version": __version__, "api_version": API_VERSION}
 
-    for module in (nodes, jobs, raw, releases, admin, crawl, taxonomy_api, panel_api):
+    for module in (nodes, jobs, raw, releases, admin, crawl, taxonomy_api, prices_api, panel_api):
         app.include_router(module.router)
     app.add_middleware(panel_static.SecurityHeaders)
     dist = panel_static.find_dist(settings.panel_dist)

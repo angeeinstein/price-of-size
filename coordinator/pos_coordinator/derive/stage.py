@@ -35,6 +35,7 @@ from pos_coordinator.models import (
     GoldLabel,
     Measurement,
     Offer,
+    PriceReview,
     Product,
     RawFetch,
 )
@@ -77,6 +78,7 @@ NOT_A_VALID_PRICE = {
     "fetch_gone",
     "older_cost",
     "undated_cost",
+    "review_rejected",  # the LLM review found it is not a valid price (validity/review.py)
 }
 OFFER_LEVEL = {
     "placeholder_price",
@@ -573,7 +575,10 @@ async def loop(sm: async_sessionmaker[AsyncSession], store: RawStore, interval_s
         await asyncio.sleep(interval_s)
 
 
-DERIVED_TABLES = (Measurement, Classification, Embedding, Offer, Product)
+DERIVED_TABLES = (Measurement, Classification, Embedding, PriceReview, Offer, Product)
+# Offer flags set by stages that come after the rebuild (they need categories or
+# LLM answers): left out of the comparison of canonical prices.
+ASYNC_FLAGS = {"category_outlier", "review_rejected"}
 
 
 async def snapshot(session: AsyncSession) -> dict[str, Any]:
@@ -599,22 +604,41 @@ async def snapshot(session: AsyncSession) -> dict[str, Any]:
     out["mapped_products"] = (
         await session.execute(select(func.count()).select_from(mapped_sq))
     ).scalar_one()
-    digest = hashlib.sha256()
-    for row in (
+    # canonical prices as the price checks alone make them (the later stages' flags
+    # left out): what the rebuild itself reproduces
+    offers: dict[Any, list] = {}
+    for pid, *o in (
         await session.execute(
-            select(Product.match_key, Product.canonical_price_eur, mapped_sq.c.taxonomy_node_id)
+            select(
+                Offer.product_id,
+                Offer.id,
+                Offer.url,
+                Offer.observed_on,
+                Offer.price_eur,
+                Offer.flags,
+            )  # fmt: skip
+        )
+    ).all():
+        o[4] = sorted(set(o[4] or []) - ASYNC_FLAGS)
+        offers.setdefault(pid, []).append(tuple(o))
+    digest = hashlib.sha256()
+    for pid, key, node in (
+        await session.execute(
+            select(Product.id, Product.match_key, mapped_sq.c.taxonomy_node_id)
             .outerjoin(mapped_sq, mapped_sq.c.product_id == Product.id)
             .order_by(Product.match_key)
         )
     ).all():
-        digest.update(repr(tuple(row)).encode())
+        _, canonical = price_checks(offers.get(pid, []))
+        digest.update(repr((key, canonical, node)).encode())
     out["products_digest"] = digest.hexdigest()[:16]
     return out
 
 
-# Reported, not compared: computed later by workers (embeddings) or by the k-NN and
-# LLM tiers, which may hold products the rebuild first gives their shop mapping.
-ASYNC_DERIVED = {"embedding", "classification"}
+# Reported, not compared: computed later by workers (embeddings), by the k-NN and
+# LLM tiers (which may hold products the rebuild first gives their shop mapping) and
+# by the price review.
+ASYNC_DERIVED = {"embedding", "classification", "price_review"}
 
 
 def _comparable(snap: dict[str, Any]) -> dict[str, Any]:
@@ -666,6 +690,7 @@ async def rebuild(
         "fetches": report.fetches,
         "classified": classified,
         "version": VERSION,
-        # embeddings and the k-NN and LLM tiers come back later: reported, not compared
+        # embeddings, the k-NN and LLM tiers and the price reviews come back later:
+        # reported, not compared
         "identical": _comparable(before) == _comparable(after),
     }

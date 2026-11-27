@@ -115,3 +115,12 @@ export type KnnEval = { examples: number; evaluated: number;
 
 export type TaxonomyHit = { id: string; external_id: string; path: string;
   local_path: string | null; is_custom: boolean };
+
+export type PriceChecks = {
+  flagged: Record<string, number>;
+  reviews: { version: string; verdict: string; offers: number }[];
+  latest: { offer_id: string; product_id: string | null; title: string | null; source: string;
+    url: string | null; price: string | null; currency: string | null; raw_price: string | null;
+    flags: string[]; verdict: string; confidence: number | null; reason: string | null;
+    version: string; at: string }[];
+};
