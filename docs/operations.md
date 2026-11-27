@@ -159,6 +159,23 @@ URLs are normalised (tracking parameters dropped) and queued once. Per domain:
   `PATCH /api/admin/domains/<domain>` (`{"unblock": true}`, `{"rate_rps": 0.1}`).
 * The crawler identifies itself with `user_agent` (default `PriceOfSizeBot/0.1`).
 
+### Sources and discovery
+
+A source describes where URLs come from. Sitemaps advertised in robots.txt,
+explicit sitemaps and seed pages are fetched through the same polite schedule;
+sitemap indexes are followed, and URLs matching `product_url_pattern` are queued
+as pages (other hosts than the sitemap's only with `allow_domains`).
+
+```bash
+curl -X PUT https://pos.example.org/api/admin/sources/ikea -H "Authorization: Bearer $POS_ADMIN_TOKEN" \
+  -H 'content-type: application/json' -d '{"type": "scraper", "config": {
+    "domains": ["www.ikea.com"], "product_url_pattern": "/at/de/p/[^/]+-\\d+/?$", "priority": 0}}'
+curl -X POST https://pos.example.org/api/admin/sources/ikea/discover -H "Authorization: Bearer $POS_ADMIN_TOKEN"
+```
+
+The first `discover` of a new domain queues its robots.txt (and seeds); once
+robots.txt is known, `discover` again queues the advertised sitemaps.
+
 ## Backups
 
 * **Database role:** `pos-db-backup.timer` dumps the database nightly

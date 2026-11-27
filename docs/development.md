@@ -110,6 +110,7 @@ Next steps:
 - [ ] Control panel skeleton (React + Vite + Tailwind + shadcn/ui), user accounts, live updates
 - [x] Polite fetching: per-(domain, egress group) rate slots, AIMD back-off, robots.txt,
       blocks, raw evidence capture, HTML retention (Phase 2 groundwork)
-- [ ] Discovery: sitemaps from robots.txt, category pages, per-source URL patterns
+- [x] Discovery: sitemaps (from robots.txt or explicit), indexes, gzip, per-source URL patterns
+- [ ] Discovery from category pages (links), scheduled re-discovery and re-fetch
 - [ ] Browser fetching (Playwright) for pages without data over plain HTTP
 - [ ] Node dashboard (local web UI) and quiet hours; Raspberry Pi SD-card friendly spool
