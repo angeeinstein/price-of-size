@@ -268,9 +268,10 @@ async def derive_evidence(session, f: RawFetch, evidence: Any, fx: RateCache, re
         return set()  # robots.txt or sitemap evidence: nothing to derive
     ex = await asyncio.to_thread(extract_evidence, evidence)
     if f.mode in ("http", "browser"):
-        from pos_coordinator.derive import llm_tier
+        from pos_coordinator.derive import llm_tier, site_parsers
 
         lang = ((evidence.get("snippets") or {}).get("lang") or "")[:2].lower() or None
+        await site_parsers.merge(session, store, f, ex, lang)  # tier 2: the site's parser
         await llm_tier.merge(session, f, ex, lang)  # tier 4: an answer, or a request for one
     pid = await _write(session, f, ex, fx, report)
     return {pid} if pid is not None else set()

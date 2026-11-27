@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import {
-  Activity, Boxes, ChartScatter, Euro, FolderTree, Globe, KeyRound, LayoutDashboard, ListChecks, LogOut, Moon,
-  Package, Settings, Sun, Users,
+  Activity, Boxes, ChartScatter, Code, Euro, FolderTree, Globe, KeyRound, LayoutDashboard, ListChecks, LogOut,
+  Moon, Package, Settings, Sun, Users,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { NavLink } from "react-router";
@@ -18,6 +18,7 @@ const NAV = [
   { to: "/sources", label: "Sources", icon: Activity },
   { to: "/categories", label: "Categories", icon: FolderTree },
   { to: "/prices", label: "Price checks", icon: Euro },
+  { to: "/parsers", label: "Parsers", icon: Code },
   { to: "/explorer", label: "Explorer", icon: ChartScatter },
   { to: "/releases", label: "Releases", icon: Package },
   { to: "/settings", label: "Settings", icon: Settings },

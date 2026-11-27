@@ -11,13 +11,14 @@ from sqlalchemy import text
 
 from pos_coordinator import maintenance, rawstore, signing_key
 from pos_coordinator.api import admin, crawl, jobs, nodes, raw, releases
+from pos_coordinator.api import parsers as parsers_api
 from pos_coordinator.api import prices as prices_api
 from pos_coordinator.api import taxonomy as taxonomy_api
 from pos_coordinator.api.deps import Session
 from pos_coordinator.classify import by_llm, proposals  # (registers batch handlers)
 from pos_coordinator.config import Settings, get_settings
 from pos_coordinator.db import make_engine, make_sessionmaker
-from pos_coordinator.derive import fx, llm_tier  # (llm_tier registers a batch handler)
+from pos_coordinator.derive import fx, llm_tier, site_parsers  # (with batch handlers)
 from pos_coordinator.derive import stage as derive_stage
 from pos_coordinator.llm.service import LlmService, default_client
 from pos_coordinator.panel import api as panel_api
@@ -60,6 +61,10 @@ async def llm_loop(service, interval_s: float, store: RawStore) -> None:
                 ("queueing price reviews", lambda: review.schedule(service.sm, service, store)),
                 ("applying LLM extractions", lambda: llm_tier.apply_pending(service.sm)),
                 ("queueing LLM extraction", lambda: llm_tier.schedule(service.sm, service, store)),
+                (
+                    "queueing parser generation",
+                    lambda: site_parsers.schedule(service.sm, service, store),
+                ),  # fmt: skip
             ):
                 try:
                     n = await step()
@@ -147,7 +152,8 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
     async def version():
         return {"version": __version__, "api_version": API_VERSION}
 
-    for module in (nodes, jobs, raw, releases, admin, crawl, taxonomy_api, prices_api, panel_api):
+    routers = (nodes, jobs, raw, releases, admin, crawl, taxonomy_api, prices_api, parsers_api)
+    for module in (*routers, panel_api):
         app.include_router(module.router)
     app.add_middleware(panel_static.SecurityHeaders)
     dist = panel_static.find_dist(settings.panel_dist)

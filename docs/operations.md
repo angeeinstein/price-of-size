@@ -354,6 +354,27 @@ again every 10 minutes (`applied_at` stays empty, `tried_at` shows the last
 try). A page whose evidence is missing when its request is due waits the same way,
 behind the others.
 
+### Per-site parsers (tier 2)
+
+Once the LLM tier has read `parser_min_pages` (12) product pages of a shop with the
+full HTML archived, the `parser_generation` model (Sonnet) writes a parser for the
+shop. The parser is declarative: CSS selectors, optionally with an attribute and a
+short regular expression, for title, price, breadcrumbs and size lines. The model
+sees 5 of the pages as compact HTML, with what the LLM tier found on each. The
+parser is then run on up to 15 further pages. A page passes when the parser finds
+every price and size the LLM found there. With a score of at least
+`parser_min_score` (0.8) it becomes the shop's active parser, unless
+`parser_auto_activate` is off. From then on the derive stage reads that shop's
+pages with it, without the LLM.
+
+Pages the parser cannot fill still go to the LLM tier. When enough of them have
+gathered, a new version is generated. A version that fails its check is kept,
+inactive, and the shop is not tried again for a week. Specs are untrusted input:
+size limits, compiled selectors, no nested repetition in regular expressions, no
+code. Panel: Parsers lists every version with its check. *Test* runs a version on
+the shop's latest archived pages, beside the LLM's answers. Activating or
+deactivating needs a recent sign-in. Switch: `site_parsers`.
+
 ### Price checks
 
 Beyond the checks on each product's own offers (other shops, earlier visits), the

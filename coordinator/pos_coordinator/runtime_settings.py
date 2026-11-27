@@ -65,6 +65,12 @@ DEFAULTS: dict[str, Any] = {
     # the LLM, at most `llm_extraction_per_round` per batch.
     "llm_extraction": True,
     "llm_extraction_per_round": 500,
+    # Per-site parsers, written by the LLM from pages the LLM tier read, checked on
+    # held-out pages; activated automatically at `parser_min_score` unless switched off.
+    "site_parsers": True,
+    "parser_min_pages": 12,
+    "parser_min_score": 0.8,
+    "parser_auto_activate": True,
     "llm_models": {
         "default": "claude-haiku-5-5",
         "parser_generation": "claude-sonnet-5-5",
@@ -122,6 +128,10 @@ VALIDATORS: dict[str, Any] = {
     "price_review_per_round": _int_in(1, 5_000),
     "llm_extraction": lambda v: isinstance(v, bool),
     "llm_extraction_per_round": _int_in(1, 5_000),
+    "site_parsers": lambda v: isinstance(v, bool),
+    "parser_min_pages": _int_in(7, 1_000),
+    "parser_min_score": lambda v: _fraction(v),
+    "parser_auto_activate": lambda v: isinstance(v, bool),
 }
 
 
