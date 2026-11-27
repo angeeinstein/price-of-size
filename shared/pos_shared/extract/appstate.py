@@ -173,33 +173,48 @@ def _related(path: str) -> bool:
 
 def main_product(state: list[dict], main: dict[str, str | None] | None = None) -> list[dict]:
     """The nodes of the page's own product (see the module docstring)."""
-    items = [it for it in state if isinstance(it, dict) and isinstance(it.get("node"), dict)]
     groups: dict[str, list[dict]] = {}
-    for it in items:
-        groups.setdefault(_owner(it), []).append(it)
+    for it in state:
+        if not isinstance(it, dict) or not isinstance(it.get("node"), dict):
+            continue
+        owner = _owner(it)
+        # A related block below the owner holds other products (also ones without
+        # identifiers, which would otherwise count as the page's own).
+        if _related(it.get("path", "")[len(owner) :]):
+            continue
+        groups.setdefault(owner, []).append(it)
     matched = [o for o, its in groups.items() if main and any(_matches(it, main) for it in its)]
     if len(matched) == 1:
-        chosen = matched[0]
-    else:
-        candidates = [o for o in (matched or groups) if not _related(o)]
-        if not candidates:
-            return []
-        depth = min(len(_TOKEN.findall(o)) for o in candidates)
-        top = [o for o in candidates if len(_TOKEN.findall(o)) == depth]
-        if len(top) != 1:
-            return []  # several products side by side: none is the page's for sure
-        chosen = top[0]
-    # Within the product, related blocks below it are still other products.
-    return [it for it in groups[chosen] if not _related(it.get("path", "")[len(chosen) :])]
+        return groups[matched[0]]
+    candidates = [o for o in (matched or groups) if not _related(o)]
+    if not candidates:
+        return []
+    depth = min(len(_TOKEN.findall(o)) for o in candidates)
+    top = [o for o in candidates if len(_TOKEN.findall(o)) == depth]
+    if len(top) != 1:
+        return []  # several products side by side: none is the page's for sure
+    return groups[top[0]]
 
 
-def _merged(items: list[dict]) -> dict:
-    """One object from a package and its nested parts (weight on the box, axes in its
-    "dimensions"): the shallower object's values win."""
-    out: dict = {}
+def _measures(node: dict) -> dict[str, str]:
+    """label -> value text of one node, each value read with its own node's units."""
+    out: dict[str, str] = {}
+    for k, v in node.items():
+        label = LABELS.get(_key(k))
+        if label is not None and label not in out:
+            text = _value_text(v, node)
+            if text:
+                out[label] = text
+    return out
+
+
+def _merged(items: list[dict]) -> dict[str, str]:
+    """One box from a package and its nested parts (weight on the box, axes in its
+    "dimensions", each with its own sibling unit): the shallower object's values win."""
+    out: dict[str, str] = {}
     for item in sorted(items, key=lambda it: len(it.get("path", ""))):
-        for k, v in (item.get("node") or {}).items():
-            out.setdefault(k, v)
+        for label, text in _measures(item.get("node") or {}).items():
+            out.setdefault(label, text)
     return out
 
 
@@ -216,14 +231,11 @@ def _context(path: str) -> str:
     return " ".join(words)
 
 
-def _emit(node: dict, prefix: str, out: list[tuple[str, str]], package: bool) -> None:
-    for k, v in node.items():
-        label = LABELS.get(_key(k))
-        if label is None or (package and label == "volume"):
+def _emit(measures: dict[str, str], prefix: str, out: list, package: bool) -> None:
+    for label, text in measures.items():
+        if package and label == "volume":
             continue  # a box's volume is its a*b*c, not the product's true volume
-        text = _value_text(v, node)
-        if text:
-            out.append((f"{prefix}{label}", text))
+        out.append((f"{prefix}{label}", text))
 
 
 def pairs(
@@ -239,9 +251,10 @@ def pairs(
         context = _context(path)
         if context:
             # e.g. "maximum load weight": the spec-text tier reads it as a capacity
-            _emit(item["node"], f"{context} {'package ' if root else ''}", out, package=bool(root))
+            prefix = f"{context} {'package ' if root else ''}"
+            _emit(_measures(item["node"]), prefix, out, package=bool(root))
         elif root is None:
-            _emit(item["node"], "", out, package=False)
+            _emit(_measures(item["node"]), "", out, package=False)
         else:
             boxes.setdefault(root, []).append(item)
     if len(boxes) == 1:
@@ -250,11 +263,8 @@ def pairs(
         # Several boxes: only their total mass is meaningful, not any one box's size.
         masses = []
         for items in boxes.values():
-            node = _merged(items)
-            weight = next(
-                (v for k, v in node.items() if _key(k) in ("weight", "grossweight")), None
-            )
-            text = _value_text(weight, node) if weight is not None else None
+            box = _merged(items)
+            text = box.get("gross weight") or box.get("weight")
             q = units.parse_quantity(text, "mass", locale) if text else None
             if q is None:
                 return out  # one box without a weight: no total

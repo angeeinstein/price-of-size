@@ -230,3 +230,24 @@ def test_numbered_boxes_belong_to_their_product():
     ex = extract_evidence({"status": 200, "verdict": {"kind": "ok"}, "snippets": snip})
     pkg = next(m for m in ex.measurements if m.basis == "package")
     assert pkg.mass_kg == pytest.approx(12)
+
+
+def test_nested_parts_keep_their_own_units():
+    box = {
+        "weight": 10,
+        "unit": "kg",
+        "dimensions": {"height": 100, "width": 50, "depth": 20, "unit": "cm"},
+    }
+    _, ex = _extract({"product": {"package": box}})
+    pkg = next(m for m in ex.measurements if m.basis == "package")
+    assert (pkg.a_m, pkg.b_m, pkg.c_m, pkg.mass_kg) == pytest.approx((1.0, 0.5, 0.2, 10.0))
+
+
+def test_a_recommendation_without_identifiers_does_not_displace_the_product():
+    state = {
+        "product": {"sku": "A", "package": _pkg(10)},
+        "recommendations": [{"package": _pkg(2)}],
+    }
+    _, ex = _extract(state)  # the JSON-LD has no sku: no match, fallback ranking
+    pkg = next(m for m in ex.measurements if m.basis == "package")
+    assert pkg.mass_kg == pytest.approx(10)
