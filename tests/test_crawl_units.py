@@ -217,3 +217,25 @@ def test_breaker_pauses_a_domain_after_a_refusal():
     assert breaker.paused("a.example") and breaker.paused("b.example")
     assert not breaker.paused("c.example")
     breaker.reset()
+
+
+async def test_fetch_limiter_caps_concurrency_and_resizes():
+    import asyncio
+
+    from pos_worker.fetch.handlers import _Limiter
+
+    lim = _Limiter(2)
+    peak = 0
+
+    async def task():
+        nonlocal peak
+        async with lim:
+            peak = max(peak, lim.active)
+            await asyncio.sleep(0.01)
+
+    await asyncio.gather(*(task() for _ in range(10)))
+    assert peak == 2
+    lim.resize(5)
+    peak = 0
+    await asyncio.gather(*(task() for _ in range(10)))
+    assert peak == 5

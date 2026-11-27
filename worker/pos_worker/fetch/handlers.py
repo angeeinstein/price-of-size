@@ -7,6 +7,7 @@ Output metrics drive the coordinator's per-domain rate control.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 from datetime import UTC, datetime
@@ -26,6 +27,52 @@ _zstd = zstandard.ZstdCompressor(level=12)
 
 
 _CLIENTS: dict[str, Any] = {}
+
+
+class _Limiter:
+    """Concurrent requests of this worker, resizable when its slots change."""
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.active = 0
+        self._cond: asyncio.Condition | None = None
+
+    def _condition(self) -> asyncio.Condition:
+        if self._cond is None:
+            self._cond = asyncio.Condition()
+        return self._cond
+
+    async def __aenter__(self):
+        cond = self._condition()
+        async with cond:
+            await cond.wait_for(lambda: self.active < self.limit)
+            self.active += 1
+
+    async def __aexit__(self, *exc):
+        cond = self._condition()
+        async with cond:
+            self.active -= 1
+            cond.notify_all()
+
+    def resize(self, limit: int) -> None:
+        self.limit = max(1, limit)
+        cond = self._cond
+        if cond is None:
+            return
+
+        async def wake():  # waiters re-check against the new limit
+            async with cond:
+                cond.notify_all()
+
+        with contextlib.suppress(RuntimeError):  # no running loop: nobody is waiting
+            self._wake = asyncio.get_running_loop().create_task(wake())
+
+
+_LIMIT = _Limiter(8)
+
+
+def set_concurrency(http_slots: int) -> None:
+    _LIMIT.resize(http_slots)
 
 
 def client_for(user_agent: str):
@@ -81,8 +128,9 @@ async def fetch_http(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
     if breaker.paused(domain):
         return _skipped(job, domain)
     client = client_for(str(job.payload.get("user_agent") or DEFAULT_UA))
-    fetched_at = datetime.now(UTC)
-    res = await http.fetch(client, url)
+    async with _LIMIT:
+        fetched_at = datetime.now(UTC)
+        res = await http.fetch(client, url)
 
     text = (
         _decode(res.body, res.content_type)
@@ -156,8 +204,9 @@ async def fetch_robots(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
     if breaker.paused(domain):
         return _skipped(job, domain)
     client = client_for(str(job.payload.get("user_agent") or DEFAULT_UA))
-    fetched_at = datetime.now(UTC)
-    res = await http.fetch(client, url, max_bytes=512 * 1024)
+    async with _LIMIT:
+        fetched_at = datetime.now(UTC)
+        res = await http.fetch(client, url, max_bytes=512 * 1024)
     body = res.body.decode("utf-8", errors="replace") if res.body else ""
     sha = (
         await _store(

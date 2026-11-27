@@ -17,18 +17,19 @@ from dataclasses import dataclass
 
 import httpx
 
-import pos_worker.fetch.handlers  # noqa: F401  (registers the fetch handlers)
 from pos_shared import api, exchange, signing
 from pos_shared.version import API_VERSION, __version__, is_compatible
 from pos_worker import cgroup, identity
 from pos_worker.client import CoordinatorClient, CoordinatorError, IncompatibleCoordinator
 from pos_worker.config import WorkerSettings
+from pos_worker.fetch import handlers as fetch_handlers  # registers the fetch handlers
 from pos_worker.handlers import HANDLERS, Handler, JobContext
 from pos_worker.spool import Spool
 
 log = logging.getLogger(__name__)
 
 EXIT_RESTART = 75  # tells the supervisor (Docker restart policy, systemd) to start us again
+JOB_OVERCOMMIT = 4  # jobs held per HTTP slot (most of them waiting for a rate slot)
 
 
 @dataclass
@@ -81,6 +82,7 @@ class Worker:
         self.heartbeat_interval = 15.0
         self.limits = cgroup.read_limits(settings.cgroup_root, settings.state_dir)
         self.slots = self._compute_slots()
+        fetch_handlers.set_concurrency(self.slots.http)
         self.active: dict[uuid.UUID, ActiveJob] = {}
         self.exit_code = 0
         self._stop = asyncio.Event()
@@ -169,6 +171,7 @@ class Worker:
             if new != self.slots:
                 log.info("concurrency %s -> %s", self.slots, new)
                 self.slots = new
+                fetch_handlers.set_concurrency(new.http)
                 self._capacity_freed.set()
 
     # --- heartbeat / control ----------------------------------------------
@@ -214,6 +217,7 @@ class Worker:
             log.info("desired state: %s", resp.desired.model_dump(mode="json"))
             self.desired = resp.desired
             self.slots = self._compute_slots()
+            fetch_handlers.set_concurrency(self.slots.http)
             self._capacity_freed.set()
         for cmd in resp.commands:
             await self._run_command(cmd)
@@ -343,7 +347,9 @@ class Worker:
     # --- jobs ----------------------------------------------------------------
 
     def _free_slots(self) -> int:
-        return max(self.slots.http - len(self.active), 0)
+        # Fetch jobs mostly wait for their rate slot, so hold more jobs than slots;
+        # the fetch semaphore keeps real concurrent requests at slots.http.
+        return max(self.slots.http * JOB_OVERCOMMIT - len(self.active), 0)
 
     def _job_types(self) -> list[str]:
         types = [t for t in self.handlers if t != "fetch_browser" or self.slots.browser > 0]
