@@ -540,12 +540,13 @@ class LlmExtraction(Base):
         ),
         Index(
             "ix_llm_extraction_wanted",
+            "tried_at",
             "created_at",
             postgresql_where=text("status = 'wanted'"),
         ),
         Index(
             "ix_llm_extraction_unapplied",
-            "apply_tried_at",
+            "tried_at",
             "answered_at",
             postgresql_where=text("status = 'ok' AND applied_at IS NULL"),
         ),
@@ -562,9 +563,9 @@ class LlmExtraction(Base):
     answered_at: Mapped[datetime | None]
     # when the answer reached the derived layer (the fetch derived again with it)
     applied_at: Mapped[datetime | None]
-    # the last time applying it had to wait (raw store away, evidence missing): such
-    # answers are tried again later, after the others
-    apply_tried_at: Mapped[datetime | None]
+    # the last time it had to wait (the fetch's evidence missing when the request was
+    # to be sent or the answer applied): tried again later, after the others
+    tried_at: Mapped[datetime | None]
 
 
 class DeriveCursor(Base):

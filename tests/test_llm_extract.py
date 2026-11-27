@@ -16,6 +16,7 @@ from pos_coordinator.models import (
     Measurement,
     Offer,
     Product,
+    RawFetch,
     TaxonomyNode,
 )
 from pos_shared.extract import llm_page
@@ -185,6 +186,32 @@ async def test_the_switch_and_a_fetch_not_derived_yet(app):
         assert not await llm_tier.rederive(s, later)
 
 
+async def test_a_page_without_evidence_never_holds_up_the_others(app, monkeypatch):
+    sm, store = app.state.sessionmaker, app.state.rawstore
+    first = await _fetch(sm, store, _page(), "https://holz.example/a", "holz")
+    await _fetch(sm, store, _page("Buchenregal"), "https://holz.example/b", "holz")
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    async with sm() as s:
+        await runtime_settings.put(s, "llm_extraction_per_round", 1, "test")
+        sha = (await s.execute(select(RawFetch.blob_sha256).where(RawFetch.id == first))).scalar()
+        await s.commit()
+    real = store.exists
+    monkeypatch.setattr(store, "exists", lambda kind, h: h != sha and real(kind, h))
+    fake = FakeClient()
+    llm = LlmService(sm, lambda: fake)
+    # the oldest page's blob is missing: it steps back, and the next page is asked
+    assert await llm_tier.schedule(sm, llm, store) == {"llm_extractions_queued": 0}
+    assert await llm_tier.schedule(sm, llm, store) == {"llm_extractions_queued": 1}
+    (bid,) = fake.batches
+    (req,) = fake.batches[bid]["requests"]
+    assert "Buchenregal" in json.dumps(req)
+    async with sm() as s:
+        row = (
+            await s.execute(select(LlmExtraction).where(LlmExtraction.fetch_id == first))
+        ).scalar_one()
+        assert row.status == "wanted" and row.tried_at is not None
+
+
 async def _answered(app, monkeypatch, store_up=True):
     sm, store = app.state.sessionmaker, app.state.rawstore
     fid = await _fetch(sm, store, _page(), "https://holz.example/regal", "holz")
@@ -247,12 +274,12 @@ async def test_a_missing_blob_never_replaces_derived_rows_with_nothing(app, monk
         assert float(o.price) == 1299
         assert (await s.execute(select(Measurement))).scalars().all() == []
         row = (await s.execute(select(LlmExtraction))).scalar_one()
-        assert row.status == "ok" and row.applied_at is None and row.apply_tried_at
+        assert row.status == "ok" and row.applied_at is None and row.tried_at
     monkeypatch.undo()
     assert await llm_tier.apply_pending(sm) == 0  # tried again only after a while
     async with sm() as s:
         row = (await s.execute(select(LlmExtraction))).scalar_one()
-        row.apply_tried_at -= llm_tier.RETRY_AFTER + timedelta(seconds=1)
+        row.tried_at -= llm_tier.RETRY_AFTER + timedelta(seconds=1)
         await s.commit()
     assert await llm_tier.apply_pending(sm) == 1
     async with sm() as s:

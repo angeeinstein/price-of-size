@@ -39,8 +39,8 @@ log = logging.getLogger(__name__)
 STAGE = "llm_extract"
 PROMPT = llm_page.PROMPT_VERSION
 MAX_RUNNING_BATCHES = 2
-# an answer whose fetch could not be derived again (evidence missing) is tried again
-# after this; one that waited only for the raw store, as soon as the store is back
+# a request or answer whose fetch's evidence was missing is tried again after this,
+# behind the others; one that waited only for the raw store, as soon as it is back
 RETRY_AFTER = timedelta(minutes=10)
 
 SYSTEM = """\
@@ -133,11 +133,16 @@ async def schedule(
         return await _schedule(sm, llm, store)
 
 
+def _due() -> Any:
+    """Rows not waiting out RETRY_AFTER."""
+    return or_(LlmExtraction.tried_at.is_(None), LlmExtraction.tried_at < func.now() - RETRY_AFTER)
+
+
 def _waited(row: LlmExtraction) -> None:
     """An answer that could not be applied: tried again after RETRY_AFTER, behind the
     others (not when only the raw store was away: then as soon as it is back)."""
     if _store is not None and _store.available():
-        row.apply_tried_at = datetime.now(UTC)
+        row.tried_at = datetime.now(UTC)
 
 
 async def apply_pending(sm: async_sessionmaker[AsyncSession], limit: int = 200) -> int:
@@ -156,13 +161,10 @@ async def apply_pending(sm: async_sessionmaker[AsyncSession], limit: int = 200) 
                         LlmExtraction.status == "ok",
                         LlmExtraction.applied_at.is_(None),
                         LlmExtraction.prompt_version == PROMPT,
-                        or_(
-                            LlmExtraction.apply_tried_at.is_(None),
-                            LlmExtraction.apply_tried_at < func.now() - RETRY_AFTER,
-                        ),
+                        _due(),
                     )
                     .order_by(
-                        LlmExtraction.apply_tried_at.asc().nulls_first(),
+                        LlmExtraction.tried_at.asc().nulls_first(),
                         LlmExtraction.answered_at,
                     )
                     .limit(limit)
@@ -213,16 +215,26 @@ async def _schedule(
                     LlmExtraction.status == "wanted",
                     LlmExtraction.prompt_version == PROMPT,
                     LlmExtraction.fetch_id.not_in(busy) if busy else true(),
+                    _due(),
                 )
-                .order_by(LlmExtraction.created_at, LlmExtraction.fetch_id)
+                .order_by(
+                    LlmExtraction.tried_at.asc().nulls_first(),
+                    LlmExtraction.created_at,
+                    LlmExtraction.fetch_id,
+                )
                 .limit(int(cfg["llm_extraction_per_round"]))
             )
         ).all()
-    tasks = []
+    tasks, gone = [], []
     for fetch_id, sha, source in rows:
-        evidence = await asyncio.to_thread(_load, store, sha) if sha else None
+        try:
+            evidence = await asyncio.to_thread(_load, store, sha) if sha else None
+        except Exception:
+            log.exception("evidence of %s unreadable", fetch_id)
+            evidence = None
         if not isinstance(evidence, dict):
-            continue  # the blob is gone: nothing to read (the row stays wanted)
+            gone.append(fetch_id)  # nothing to read now: stays wanted, asked later
+            continue
         text = llm_page.page_text(evidence)
         tasks.append(
             service.Task(
@@ -236,6 +248,18 @@ async def _schedule(
                 meta={"fetch_id": str(fetch_id)},
             )
         )
+    if gone and store.available():
+        async with sm() as s:
+            await s.execute(
+                update(LlmExtraction)
+                .where(
+                    LlmExtraction.fetch_id.in_(gone),
+                    LlmExtraction.prompt_version == PROMPT,
+                    LlmExtraction.status == "wanted",
+                )
+                .values(tried_at=func.now())
+            )
+            await s.commit()
     if tasks:
         _, left = await llm.submit_batch(tasks)
         out["llm_extractions_queued"] = len(tasks) - len(left)
@@ -269,6 +293,7 @@ async def handle(session: AsyncSession, outcome: service.Outcome) -> None:
     )
     row.model = outcome.model
     row.answered_at = datetime.now(UTC)
+    row.tried_at = None  # a wait for the request is over; one for applying starts anew
     await session.flush()
     if not (isinstance(data, PageAnswer) and data.is_product_page):
         row.applied_at = row.answered_at  # nothing to add to the derived layer

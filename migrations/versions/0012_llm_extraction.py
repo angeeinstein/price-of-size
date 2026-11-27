@@ -36,7 +36,7 @@ def upgrade() -> None:
         ),
         sa.Column("answered_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("applied_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("apply_tried_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("tried_at", sa.DateTime(timezone=True), nullable=True),
         sa.CheckConstraint(
             "status IN ('wanted','ok','invalid','refused')", name="llm_extraction_status"
         ),
@@ -46,13 +46,13 @@ def upgrade() -> None:
     op.create_index(
         "ix_llm_extraction_wanted",
         "llm_extraction",
-        ["created_at"],
+        ["tried_at", "created_at"],
         postgresql_where=sa.text("status = 'wanted'"),
     )
     op.create_index(
         "ix_llm_extraction_unapplied",
         "llm_extraction",
-        ["apply_tried_at", "answered_at"],
+        ["tried_at", "answered_at"],
         postgresql_where=sa.text("status = 'ok' AND applied_at IS NULL"),
     )
 

@@ -350,8 +350,9 @@ what was missing, with method `llm`. Answers are stored per raw fetch
 answer arrives. If the raw store is away at that point, the answer waits and is
 applied as soon as the store is back. If the page's evidence is missing from the
 store (a partial restore), the page keeps what it has and the answer is tried
-again every 10 minutes (`applied_at` stays empty, `apply_tried_at` shows the last
-try).
+again every 10 minutes (`applied_at` stays empty, `tried_at` shows the last
+try). A page whose evidence is missing when its request is due waits the same way,
+behind the others.
 
 ### Price checks
 
