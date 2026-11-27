@@ -260,3 +260,34 @@ async def test_mass_and_volume_may_come_from_different_measurements(app):
     assert r["category_outliers"] == 1
     o = await _offer(sm, odd.id)
     assert o.fields["category_check"]["z_kg"] > 3.5 and o.fields["category_check"]["z_m3"] > 3.5
+
+
+async def test_a_review_waits_for_the_derive_runner(app):
+    import asyncio
+
+    from pos_coordinator.derive.stage import _cursor
+    from pos_coordinator.llm.service import Outcome
+
+    sm, _, odd = await _shelves(app)
+    o = await _offer(sm, odd.id)
+    outcome = Outcome(
+        "ok",
+        review.Review(verdict="placeholder", confidence="high", reason="Filler."),
+        "claude-haiku-5-5",
+        review.STAGE,
+        meta={"offer_id": str(o.id), "version": "v"},
+    )
+    async with sm() as runner:  # a derive batch in progress
+        await _cursor(runner)
+
+        async def deliver():
+            async with sm() as s:
+                await review.handle(s, outcome)
+                await s.commit()
+
+        task = asyncio.create_task(deliver())
+        await asyncio.sleep(0.3)
+        assert not task.done()
+        await runner.commit()
+    await task
+    assert review.FLAG in (await _offer(sm, odd.id)).flags

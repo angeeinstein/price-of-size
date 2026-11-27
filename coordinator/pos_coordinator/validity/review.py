@@ -184,7 +184,7 @@ async def _schedule(
 
 @service.register(STAGE, Review)
 async def handle(session: AsyncSession, outcome: service.Outcome) -> None:
-    from pos_coordinator.derive.stage import _canonical_prices
+    from pos_coordinator.derive.stage import _canonical_prices, _cursor
 
     meta = outcome.meta or {}
     try:
@@ -195,6 +195,9 @@ async def handle(session: AsyncSession, outcome: service.Outcome) -> None:
         return
     if outcome.status == "error":
         return  # asked again later
+    # the derive runner's lock first (as backfill_fx takes it): a product's price is
+    # never recomputed while the runner is adding an offer to it
+    await _cursor(session)
     offer = await session.get(Offer, oid, with_for_update=True)
     if offer is None:
         return  # rebuilt meanwhile: asked again, answered from the ledger
