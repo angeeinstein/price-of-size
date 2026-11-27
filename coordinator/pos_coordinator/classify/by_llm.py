@@ -229,9 +229,14 @@ async def handle(session: AsyncSession, outcome: service.Outcome) -> None:
         await common.attempt(session, pid, None, TIER, None, v)  # invalid or refused
         return
     conf = common.CONFIDENCE[pick.confidence]
+    if pick.choice == 0:
+        # none of the candidates fits: an earlier LLM label no longer stands (a manual
+        # classification, or another tier's, stays)
+        await common.withdraw(session, pid, TIER)
+        await common.attempt(session, pid, None, TIER, conf, v)
+        return
     if not 1 <= pick.choice <= len(candidates):
-        # 0: none of the candidates fits (or a number off the list)
-        await common.attempt(session, pid, None, TIER, conf if pick.choice == 0 else None, v)
+        await common.attempt(session, pid, None, TIER, None, v)  # a number off the list
         return
     node = candidates[pick.choice - 1]
     if await session.get(TaxonomyNode, node) is None:

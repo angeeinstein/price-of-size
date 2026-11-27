@@ -618,3 +618,28 @@ async def test_llm_work_waits_for_every_category_vector(sessionmaker):
     await _embed_all(sessionmaker)
     common._nodes = None
     assert await by_llm.schedule(sessionmaker, llm) == {"llm_classify_queued": 3}
+
+
+async def test_none_fits_withdraws_an_earlier_llm_label(sessionmaker):
+    await _taxonomy(sessionmaker)
+    shelf = await _node(sessionmaker, "Furniture > Shelving")
+    a, b = await _products(sessionmaker, ["Regal", "Jet"])
+    async with sessionmaker() as s:
+        await common.assign(s, a, shelf, "llm", 0.9, "old-version")
+        await common.assign(s, b, shelf, "manual", 1.0, "person")
+        await s.commit()
+
+    def none_fits(pid):
+        return SimpleNamespace(
+            status="ok",
+            data=by_llm.Pick(choice=0, confidence="high"),
+            meta={"product_id": str(pid), "candidates": [str(shelf)], "version": "new-version"},
+        )
+
+    async with sessionmaker() as s:
+        await by_llm.handle(s, none_fits(a))
+        await by_llm.handle(s, none_fits(b))
+        await s.commit()
+        assert (await s.get(Product, a)).category_id is None
+    assert await _current(sessionmaker, a) is None
+    assert (await _current(sessionmaker, b)).tier == "manual"  # a person's stays
