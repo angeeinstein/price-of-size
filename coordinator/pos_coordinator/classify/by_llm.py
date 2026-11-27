@@ -41,6 +41,7 @@ TIER = "llm"
 PROMPT = "llm-classify-1"
 CANDIDATES = 20
 MAX_RUNNING_BATCHES = 2
+MAX_MAPPING_PASSES = 20  # of shopmap.classify before a round (5,000 products each)
 
 SYSTEM = """\
 You assign products from online shops to one category of a product taxonomy (the \
@@ -142,6 +143,14 @@ async def schedule(sm: async_sessionmaker[AsyncSession], llm: Any) -> dict[str, 
 
 async def _schedule(sm: async_sessionmaker[AsyncSession], llm: Any) -> dict[str, int]:
     out = {"llm_classify_queued": 0}
+    # mappings that arrived since the last maintenance round classify their products
+    # first: none of them should be asked about one by one
+    for _ in range(MAX_MAPPING_PASSES):
+        async with sm() as s:
+            r = await shopmap.classify(s)
+            await s.commit()
+        if not r["classified"] + r["withdrawn"]:
+            break
     async with sm() as s:
         cfg = await runtime_settings.get_all(s)
         if not cfg["classify_llm"] or await running_batches(s, STAGE) >= MAX_RUNNING_BATCHES:

@@ -687,3 +687,24 @@ async def test_run_again_uses_the_labels_as_they_are_now(sessionmaker, monkeypat
         await knn.classify(s)
         await s.commit()
     assert (await _current(sessionmaker, q)).taxonomy_node_id == item
+
+
+async def test_a_fresh_mapping_classifies_before_single_picks_are_asked(sessionmaker):
+    await _taxonomy(sessionmaker)
+    shelf = await _node(sessionmaker, "Furniture > Shelving")
+    await _products(sessionmaker, ["Regal Eiche", "Regal Buche", "Wandregal"],
+                    path=["Möbel", "Regale"])  # fmt: skip
+    await _embed_all(sessionmaker)
+    async with sessionmaker() as s:  # a proposal was just stored; maintenance has not run
+        await shopmap.set_mapping(s, "shop", "Möbel > Regale", shelf, "llm", confidence=0.9)
+        await s.commit()
+    await _set(sessionmaker, "classify_llm_sample_fraction", 0)
+    llm = LlmService(sessionmaker, lambda: FakeClient())
+    assert await by_llm.schedule(sessionmaker, llm) == {"llm_classify_queued": 0}
+    async with sessionmaker() as s:
+        tiers = (
+            (await s.execute(select(Classification.tier).where(Classification.is_current)))
+            .scalars()
+            .all()
+        )
+    assert tiers == ["shop_mapping"] * 3
