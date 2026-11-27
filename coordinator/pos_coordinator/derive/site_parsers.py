@@ -17,6 +17,7 @@ of them pile up, a new version is generated. Every version is kept.
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -59,8 +60,8 @@ The rules (JSON):
 - Each "pick" is {"css", "attr", "regex", "index"}: the index-th element matching \
 the CSS selector (0 = first), its text or, if "attr" is set, that attribute; \
 "regex" (optional) narrows the text to its first group. Prefer stable selectors \
-(ids, itemprop, meaningful class names) over positions. Keep regexes simple, \
-without nested repetition.
+(ids, itemprop, meaningful class names) over positions. Keep regexes simple: \
+no repetition or alternation inside a repeated group, no back-references.
 - price: the current price of the product (not a crossed-out price, not a unit \
 price); the text as on the page, e.g. "1.299,00 €".
 - currency: where the page names the currency, or null; currency_default: its ISO \
@@ -155,12 +156,18 @@ def _close(a: float | None, b: float | None, tol: float) -> bool:
 def page_passes(
     spec: site_parser.SiteSpec, page: bytes, answer: dict[str, Any], locale: str | None
 ) -> bool:
-    """The spec finds every price and size the LLM tier found on the page."""
+    """The spec finds every price and size the LLM tier found on the page (and the
+    price in the currency the LLM read)."""
     want_price, want_sizes = _expected(answer, locale)
     got = site_parser.run(spec, page)
     if want_price is not None:
         got_price = units.parse_number(got.price_text or "", locale)
         if not _close(want_price, got_price, PRICE_TOLERANCE):
+            return False
+        want_currency = str(answer.get("currency") or "").strip().upper()
+        if re.fullmatch(r"[A-Z]{3}", want_currency) and (
+            site_parser.currency_of(got, spec) != want_currency
+        ):
             return False
     if want_sizes:
         have = spectext.measurements(got.pairs, locale)
@@ -206,13 +213,18 @@ _CANDIDATES_SQL = f"""
     LIMIT 5
 """
 
+# the pages a new version learns from and is checked on: those the candidate count
+# saw (with an active parser, only the pages it left to the LLM since: the ones a
+# changed template broke)
 _PAGES_SQL = f"""
     SELECT e.fetch_id, f.url, f.html_sha256, f.blob_sha256, e.output
     FROM llm_extraction e
     JOIN raw_fetch f ON f.id = e.fetch_id AND f.fetched_at = e.fetched_at
+    LEFT JOIN parser cur ON cur.domain = :domain AND cur.active
     WHERE e.status = 'ok' AND e.prompt_version = :prompt
       AND (e.output->>'is_product_page')::boolean
       AND f.html_sha256 IS NOT NULL AND {_DOMAIN_SQL} = :domain
+      AND (cur.id IS NULL OR e.created_at > cur.created_at)
     ORDER BY md5(e.fetch_id::text)
     LIMIT :n
 """

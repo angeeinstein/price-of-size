@@ -369,9 +369,14 @@ pages with it, without the LLM.
 
 Pages the parser cannot fill still go to the LLM tier. When enough of them have
 gathered, a new version is generated. A version that fails its check is kept,
-inactive, and the shop is not tried again for a week. Specs are untrusted input:
-size limits, compiled selectors, no nested repetition in regular expressions, no
-code. Panel: Parsers lists every version with its check. *Test* runs a version on
+inactive, and the shop is not tried again for a week. The new version learns from,
+and is checked on, only the pages the current one left to the LLM: the ones a
+changed template broke. Specs are untrusted input: size limits, compiled
+selectors, no code. Regular expressions are checked by their structure (no
+repetition or alternation inside repetition, no back-references) and run with a
+50 ms limit per match. A price's currency must match the LLM's on the held-out
+pages; a bare "$" or "kr" is the shop's default currency when that uses the
+symbol. Panel: Parsers lists every version with its check. *Test* runs a version on
 the shop's latest archived pages, beside the LLM's answers. Activating or
 deactivating needs a recent sign-in. Switch: `site_parsers`.
 

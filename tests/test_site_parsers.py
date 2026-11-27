@@ -102,6 +102,12 @@ def test_the_engine_reads_a_page():
         {"price": {"css": "a[", "attr": None, "regex": None, "index": 0}},
         {"price": {"css": "x" * 400, "attr": None, "regex": None, "index": 0}},
         {"price": {"css": "span", "attr": None, "regex": "(a+)+$", "index": 0}},
+        {"price": {"css": "span", "attr": None, "regex": "((a)+)+$", "index": 0}},
+        {"price": {"css": "span", "attr": None, "regex": "(?:(?:a){2,})*$", "index": 0}},
+        {"price": {"css": "span", "attr": None, "regex": "(a|aa)+$", "index": 0}},
+        {"price": {"css": "span", "attr": None, "regex": "(?=(a+)+)", "index": 0}},
+        {"price": {"css": "span", "attr": None, "regex": r"(\w+)\s\1", "index": 0}},
+        {"price": {"css": "span", "attr": None, "regex": r"\d*" * 13, "index": 0}},
         {"price": {"css": "span", "attr": None, "regex": "([", "index": 0}},
         {"price": {"css": "span", "attr": "on click", "regex": None, "index": 0}},
         {"price": {"css": "span", "attr": None, "regex": None, "index": 99}},
@@ -114,6 +120,55 @@ def test_the_engine_reads_a_page():
 def test_unsafe_or_useless_specs_are_refused(change):
     with pytest.raises(site_parser.SpecError):
         site_parser.parse({**SPEC, **change})
+
+
+def test_regular_expressions_are_checked_by_structure_and_run_with_a_time_limit():
+    import time
+
+    # the usual kind passes the check
+    for rx in (r"([\d.,]+)\s*(?:kg|g)\b", r"(\d+)\s*x\s*(\d+)\s*x\s*(\d+)", r"Preis:\s*(.+)"):
+        site_parser.parse({**SPEC, "price": {"css": "p", "attr": None, "regex": rx, "index": 0}})
+    # one the structure allows but that is slow on a long input finds nothing, quickly
+    slow = r"\d*\d*\d*\d*\d*\d*\d*x"
+    spec = site_parser.parse({**SPEC, "price": {"css": "p", "attr": None, "regex": slow,
+                                                "index": 0}})  # fmt: skip
+    page = f"<html><body><p>{'1' * 400}</p></body></html>"
+    start = time.monotonic()
+    assert site_parser.run(spec, page).price_text is None
+    assert time.monotonic() - start < 2
+
+
+@pytest.mark.parametrize(
+    ("price_text", "currency", "default", "expected"),
+    [
+        ("$1,299.00", None, "AUD", "AUD"),  # the shop's dollar
+        ("$1,299.00", None, None, "USD"),
+        ("$1,299.00", None, "EUR", "USD"),  # a default that is no dollar
+        ("A$ 1,299", None, "USD", "AUD"),  # a prefix names it
+        ("CA$1,299", None, None, "CAD"),
+        ("1.299,00 €", None, "USD", "EUR"),
+        ("1 299 kr", None, "NOK", "NOK"),
+        ("1 299 kr", None, None, "SEK"),
+        ("1299", "CHF", None, "CHF"),
+        ("CHF1299", None, None, "CHF"),
+        ("1299", None, "PLN", "PLN"),
+        ("1 299 zł", None, None, "PLN"),
+    ],
+)
+def test_the_currency_of_a_price(price_text, currency, default, expected):
+    spec = site_parser.parse({**SPEC, "currency_default": default})
+    result = site_parser.SiteResult(price_text=price_text, currency=currency)
+    assert site_parser.currency_of(result, spec) == expected
+
+
+def test_a_page_passes_only_in_the_currency_the_llm_read():
+    page = "<html><body><h1 class='product-name'>Regal</h1><div class='buy'>" \
+        "<span class='price-now'>$1,299.00</span></div></body></html>"  # fmt: skip
+    answer = {"price_text": "$1,299.00", "currency": "AUD", "sizes": []}
+    usd = site_parser.parse({**SPEC, "currency_default": None, "size_rows": []})
+    aud = site_parser.parse({**SPEC, "currency_default": "AUD", "size_rows": []})
+    assert not site_parsers.page_passes(usd, page.encode(), answer, "en")
+    assert site_parsers.page_passes(aud, page.encode(), answer, "en")
 
 
 def test_condensed_html_for_the_llm():
@@ -254,7 +309,36 @@ async def test_an_unsafe_answer_is_recorded_not_run(app):
     await _generate(sm, store, bad)
     async with sm() as s:
         (p,) = (await s.execute(select(Parser))).scalars().all()
-    assert not p.active and "nested repetition" in p.artifact["error"]
+    assert not p.active and "repetition inside repetition" in p.artifact["error"]
+
+
+async def test_a_new_version_learns_from_the_pages_the_current_one_left(app):
+    sm, store = await _world(app)
+    _, llm = await _generate(sm, store, SPEC)
+    async with sm() as s:
+        (old,) = (await s.execute(select(Parser))).scalars().all()
+        assert old.active
+    # the shop changes its template: the active parser finds no price on new pages,
+    # so they go to the LLM tier
+    site_parsers.forget()
+    changed = {}
+    for i in range(100, 114):
+        html_text = _html(i).replace('class="price-now"', 'class="preis-neu"')
+        changed[await _page(sm, store, i, html_text)] = i
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    await _read_by_llm(sm)
+    assert await site_parsers.schedule(sm, llm, store) == {"parsers_requested": 1}
+    async with sm() as s:
+        batch = (
+            (await s.execute(select(LlmBatch).where(LlmBatch.stage == site_parsers.STAGE)))
+            .scalars()
+            .all()[-1]
+        )
+    meta = batch.requests["0"]["meta"]
+    sampled = meta["train"] + meta["held_out"]
+    # only the pages of the new template: the old ones would let a version pass
+    # that still misses the new price
+    assert len(sampled) == 14 and {str(f) for f in changed} == set(sampled)
 
 
 async def test_too_few_pages_and_the_switch(app):

@@ -6,17 +6,23 @@ price, the breadcrumbs and the size lines. This module is the trusted engine tha
 runs such a spec over an archived page. Specs are written by the LLM (and checked
 on held-out pages before they are activated), so they are treated as untrusted:
 strict schema, bounded sizes, selectors compiled before use, regular expressions
-short and without nested repetition, and inputs to them cut short.
+short, checked by their structure (no repetition inside repetition, no alternation
+inside repetition, no back-references) and run with a time limit on inputs cut
+short.
 
 Like the LLM tier, a spec does not compute values: it points at text, and the
 usual parsers (numbers, units, size labels) read it.
 """
 
 import functools
+import logging
 import re
+import re._constants as sre_c
+import re._parser as sre_parse
 from dataclasses import dataclass, field
 from typing import Any
 
+import regex
 from cssselect import SelectorError
 from lxml import etree, html
 from lxml.cssselect import CSSSelector
@@ -26,9 +32,13 @@ from pos_shared import units
 from pos_shared.extract import spectext
 from pos_shared.extract.model import Extraction, OfferCandidate
 
+log = logging.getLogger(__name__)
+
 ENGINE_VERSION = "1"
 MAX_SELECTOR = 300
 MAX_REGEX = 200
+MAX_REPEATS = 12  # repeating parts (+, *, {m,n}) in one regular expression
+REGEX_TIMEOUT_S = 0.05  # per match: a slow expression finds nothing
 MAX_TEXT = 500  # what a regular expression sees of an element's text
 MAX_ROW_RULES = 5
 MAX_ROWS = 80
@@ -87,18 +97,63 @@ class SpecError(ValueError):
     pass
 
 
-_NESTED_REPEAT = re.compile(r"\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)\s*[+*{?]")
+_REPEATS = {sre_c.MAX_REPEAT, sre_c.MIN_REPEAT, getattr(sre_c, "POSSESSIVE_REPEAT", None)}
+
+
+def _structure(items: Any, inside_repeat: bool, count: list[int]) -> None:
+    """Refuse what makes a backtracking matcher slow on a short input: repetition
+    or alternation inside repetition (exponential: "((a)+)+", "(a|aa)+") and
+    back-references; and more than MAX_REPEATS repeating parts (polynomial)."""
+    for op, av in items:
+        if op in _REPEATS:
+            _min, high, body = av
+            repeating = high is sre_c.MAXREPEAT or high > 1
+            if repeating:
+                if inside_repeat:
+                    raise SpecError("repetition inside repetition in a regular expression")
+                count[0] += 1
+                if count[0] > MAX_REPEATS:
+                    raise SpecError("too many repetitions in a regular expression")
+            _structure(body, inside_repeat or repeating, count)
+        elif op is sre_c.BRANCH:
+            if inside_repeat:
+                raise SpecError("alternation inside repetition in a regular expression")
+            for alt in av[1]:
+                _structure(alt, inside_repeat, count)
+        elif op in (sre_c.GROUPREF, sre_c.GROUPREF_EXISTS):
+            raise SpecError("back-reference in a regular expression")
+        elif op is sre_c.SUBPATTERN:
+            _structure(av[-1], inside_repeat, count)
+        elif op in (sre_c.ASSERT, sre_c.ASSERT_NOT):
+            _structure(av[1], inside_repeat, count)
+        elif op is getattr(sre_c, "ATOMIC_GROUP", None):
+            _structure(av, inside_repeat, count)
 
 
 def _check_regex(rx: str) -> None:
     if len(rx) > MAX_REGEX:
         raise SpecError("regular expression too long")
-    if _NESTED_REPEAT.search(rx):
-        raise SpecError("nested repetition in a regular expression")
     try:
-        re.compile(rx)
-    except re.error as e:
+        tree = sre_parse.parse(rx)
+        _compiled(rx)
+    except (re.error, regex.error, OverflowError, RecursionError) as e:
         raise SpecError(f"bad regular expression: {e}") from e
+    _structure(tree, False, [0])
+
+
+@functools.lru_cache(maxsize=1024)
+def _compiled(rx: str) -> Any:
+    return regex.compile(rx, flags=regex.VERSION0)
+
+
+def _search(rx: str, text: str) -> Any:
+    """re.search with a time limit (the regex module's), releasing the GIL while it
+    matches; a match that takes too long counts as none."""
+    try:
+        return _compiled(rx).search(text, timeout=REGEX_TIMEOUT_S, concurrent=True)
+    except TimeoutError:
+        log.warning("a site parser's regular expression timed out: %r", rx[:80])
+        return None
 
 
 def _check_css(sel: str) -> None:
@@ -175,7 +230,7 @@ def _value(el: Any, pick: Pick) -> str | None:
         return None
     raw = " ".join(str(raw).split())
     if pick.regex:
-        m = re.search(pick.regex, raw[:MAX_TEXT])
+        m = _search(pick.regex, raw[:MAX_TEXT])
         if not m:
             return None
         raw = m.group(1) if m.groups() and m.group(1) is not None else m.group(0)
@@ -274,6 +329,21 @@ def run(spec: SiteSpec, page: bytes | str) -> SiteResult:
     return out
 
 
+# symbols that name one currency, and prefixed dollars (the longer prefixes first:
+# "A$" is part of "CA$")
+_SYMBOLS = (("€", "EUR"), ("£", "GBP"), ("US$", "USD"), ("AU$", "AUD"), ("CA$", "CAD"),
+            ("NZ$", "NZD"), ("HK$", "HKD"), ("A$", "AUD"), ("C$", "CAD"), ("S$", "SGD"),
+            ("zł", "PLN"), ("Kč", "CZK"))  # fmt: skip
+# symbols several currencies use: the shop's default when it is one of them, else the
+# first (the most common one)
+_SHARED = (
+    ("$", ("USD", "CAD", "AUD", "NZD", "HKD", "SGD", "MXN")),
+    ("kr", ("SEK", "DKK", "NOK", "ISK")),
+    ("¥", ("JPY", "CNY")),
+    ("Ft", ("HUF",)),
+)
+
+
 def currency_of(result: SiteResult, spec: SiteSpec) -> str | None:
     """The ISO code of the price: named on the page, as a symbol, or the default."""
     named = re.fullmatch(r"\s*([A-Z]{3})\s*", result.currency or "")
@@ -283,9 +353,16 @@ def currency_of(result: SiteResult, spec: SiteSpec) -> str | None:
     m = re.search(r"\b([A-Z]{3})\b", text)
     if m and m.group(1) in COMMON_CURRENCIES:
         return m.group(1)
-    for symbol, code in (("€", "EUR"), ("£", "GBP"), ("CHF", "CHF"), ("$", "USD")):
+    for symbol, code in _SYMBOLS:
         if symbol in text:
             return code
+    if re.search(r"(?<![A-Za-z])CHF(?![A-Za-z])", text):
+        return "CHF"
+    for symbol, codes in _SHARED:
+        letters = symbol.isalpha()
+        if (re.search(rf"(?<![A-Za-z]){re.escape(symbol)}(?![A-Za-z])", text) if letters
+                else symbol in text):  # fmt: skip
+            return spec.currency_default if spec.currency_default in codes else codes[0]
     return spec.currency_default
 
 
