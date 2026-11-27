@@ -81,7 +81,7 @@ and watch `GET /api/admin/jobs/stats`. Interactive API docs: `/docs`.
 | Bootstrap script for all roles | `install.sh`, `deploy/docker/` |
 | Domain rate limits per egress group, adaptive back-off, cooldowns | `coordinator/.../crawl/scheduler.py`, `crawl/ratecontrol.py`, `crawl/feedback.py` |
 | robots.txt fetched first, enforced per setting, Crawl-delay | `crawl/robots.py`, `crawl/scheduler.py` |
-| Blocks (CAPTCHA, bot walls, repeated 403) logged, no evasion | `worker/.../fetch/blocks.py`, `crawl/feedback.py`, `domain_event` |
+| Blocks (CAPTCHA, bot walls, repeated 403) detected and logged | `worker/.../fetch/blocks.py`, `crawl/feedback.py`, `domain_event` |
 | Raw evidence capture (JSON-LD, tables, breadcrumbs, price blocks, ...) | `worker/.../fetch/snippets.py` |
 | Bounded fetches: size after decompression, total deadline, public addresses only, same-host redirects | `worker/.../fetch/http.py` |
 | Per-domain spacing on the worker (overdue slots never burst) | `worker/.../fetch/handlers.py` (`_DomainGate`) |

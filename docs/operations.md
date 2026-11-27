@@ -176,8 +176,10 @@ URLs are normalised (tracking parameters dropped) and queued once. Per domain:
 * New domains get one request at a time until 10 pages answered (slow start).
 * A challenge page (CAPTCHA, bot wall) pauses a domain for an hour
   (`block_suspected`); a second one in a row, or five 403s in a row, blocks it.
-  CAPTCHA widgets on ordinary pages (a newsletter form) do not count. Nothing
-  tries to get around a block.
+  CAPTCHA widgets on ordinary pages (a newsletter form) do not count. The HTTP
+  fetch runs no JavaScript, so it does not get past a challenge page (such as a
+  Cloudflare "Enable JavaScript and cookies to continue" check) by waiting or
+  retrying; such domains stay blocked until unblocked in the panel or API.
 * robots.txt is the site's wish, not a per-IP budget: its `Crawl-delay` (and a
   per-domain `rate_rps` override) hold across all nodes and egress groups.
 * Workers fetch public addresses only: a sitemap or redirect pointing into the

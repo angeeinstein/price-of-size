@@ -204,23 +204,45 @@ def _is_media(obj: dict, keys: set[str]) -> bool:
     return isinstance(url, str) and bool(MEDIA_FILE.search(url))
 
 
-def _state_nodes(obj, path: str, found: list, depth: int = 0) -> None:
+# Keys that identify a product: the nearest object with one owns the sizes below it,
+# so extraction can tell the page's product from recommended or related ones.
+ID_KEYS = {
+    "sku", "gtin", "gtin8", "gtin12", "gtin13", "gtin14", "ean", "mpn", "productid",
+    "productnumber", "itemno", "itemnumber", "articlenumber", "articleno", "artnr",
+}  # fmt: skip
+
+
+def _owner_ids(obj: dict) -> dict[str, str]:
+    ids = {}
+    for k, v in obj.items():
+        nk = _norm_key(k)
+        if nk in ID_KEYS | {"id", "name", "title"} and isinstance(v, str | int) and v != "":
+            ids[nk] = str(v)[:120]
+    if ids.keys() & ID_KEYS or ("id" in ids and ids.keys() & {"name", "title"}):
+        return ids
+    return {}
+
+
+def _state_nodes(obj, path: str, found: list, depth: int = 0, owner=None) -> None:
     if depth > 40 or len(found) >= MAX_STATE_NODES:
         return
     if isinstance(obj, dict):
         keys = {_norm_key(k) for k in obj}
         if _is_media(obj, keys):
             return  # an image or file descriptor: its width and height are pixels
+        ids = _owner_ids(obj)
+        if ids:
+            owner = {"path": path, "ids": ids}
         if len(keys & SIZE_KEYS) >= 2 or ({"weight", "netweight", "grossweight"} & keys):
             node = _compact(obj)
             if node and len(json.dumps(node, default=str)) <= MAX_STATE_NODE_CHARS:
-                found.append({"path": path, "node": node})
+                found.append({"path": path, "node": node, **({"owner": owner} if owner else {})})
         for k, v in obj.items():
             if isinstance(v, dict | list) and not MEDIA_HINT.search(str(k)):
-                _state_nodes(v, f"{path}.{k}" if path else str(k), found, depth + 1)
+                _state_nodes(v, f"{path}.{k}" if path else str(k), found, depth + 1, owner)
     elif isinstance(obj, list):
         for i, v in enumerate(obj[:500]):
-            _state_nodes(v, f"{path}[{i}]", found, depth + 1)
+            _state_nodes(v, f"{path}[{i}]", found, depth + 1, owner)
 
 
 def _app_state(doc, budget) -> list[dict]:

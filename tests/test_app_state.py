@@ -155,3 +155,52 @@ def test_boxes_with_nested_parts_and_text_weights_in_the_page_locale():
     _, ex = _extract(state)  # lang="de-AT": decimal commas
     pkg = next(m for m in ex.measurements if m.basis == "package")
     assert pkg.mass_kg == pytest.approx(3.5) and pkg.a_m is None
+
+
+def test_unit_codes_are_translated():
+    box = {
+        "weight": {"value": 10, "unitCode": "KGM"},
+        "height": {"value": 100, "unitCode": "CMT", "text": "100 cm"},
+        "width": {"value": 500, "unitCode": "MMT"},
+        "depth": {"value": 2, "unitCode": "DMT"},
+    }
+    _, ex = _extract({"product": {"package": box}})
+    pkg = next(m for m in ex.measurements if m.basis == "package")
+    assert (pkg.a_m, pkg.b_m, pkg.c_m, pkg.mass_kg) == pytest.approx((1.0, 0.5, 0.2, 10.0))
+
+
+def _pkg(kg):
+    return {"weight": f"{kg} kg", "height": "100 cm", "width": "50 cm", "depth": "20 cm"}
+
+
+def test_recommended_products_do_not_join_the_page_product():
+    state = {
+        "product": {"package": _pkg(10)},
+        "recommendations": [{"package": _pkg(2)}, {"package": _pkg(3)}],
+        "relatedProducts": {"items": [{"package": _pkg(4)}]},
+    }
+    _, ex = _extract(state)
+    pkg = next(m for m in ex.measurements if m.basis == "package")
+    assert pkg.mass_kg == pytest.approx(10) and pkg.a_m == pytest.approx(1.0)
+
+
+def test_the_product_matching_the_json_ld_is_chosen():
+    # JSON-LD of _page has no identifiers: add a gtin and put two products side by side.
+    state = {
+        "products": [
+            {"sku": "A-1", "gtin13": "4006381333931", "package": _pkg(10)},
+            {"sku": "B-2", "gtin13": "4006381333948", "package": _pkg(2)},
+        ]
+    }
+    html = _page(state).replace('"name": "Regal', '"gtin13": "4006381333948", "name": "Regal', 1)
+    snip = snippets.capture(html, "https://shop.example/p/8")
+    assert {n["owner"]["path"] for n in snip["app_state"]} == {"products[0]", "products[1]"}
+    ex = extract_evidence({"status": 200, "verdict": {"kind": "ok"}, "snippets": snip})
+    pkg = next(m for m in ex.measurements if m.basis == "package")
+    assert pkg.mass_kg == pytest.approx(2)
+
+
+def test_several_products_without_a_match_give_nothing():
+    state = {"hits": [{"package": _pkg(10)}, {"package": _pkg(2)}]}
+    _, ex = _extract(state)
+    assert not [m for m in ex.measurements if m.basis == "package"]
