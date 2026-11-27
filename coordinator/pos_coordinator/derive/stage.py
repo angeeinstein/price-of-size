@@ -523,7 +523,10 @@ async def backfill_fx(sm: async_sessionmaker[AsyncSession], batch: int = 1000) -
             for o in offers:
                 if o.price is None or not o.currency:
                     continue
-                rate = await fx.rate(o.currency, o.observed_on.astimezone(UTC).date())
+                # the date the price refers to, as at derivation (a historical cost)
+                as_of = ((o.fields or {}).get("price") or {}).get("as_of")
+                day = _as_of(as_of) or o.observed_on.astimezone(UTC).date()
+                rate = await fx.rate(o.currency, day)
                 if rate is None:
                     continue
                 o.fx_rate = rate
