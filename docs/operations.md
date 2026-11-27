@@ -318,6 +318,11 @@ sudo chmod 600 /etc/pos/coordinator.env
   paced over the month (daily allowance = remaining budget / remaining days); low
   priority work waits when today is ahead of pace, everything waits at the cap. Set a
   spending limit on the API account as well: it is the second safety net.
+  Each call reserves its estimate (prompt length plus the full `max_tokens`) in the
+  ledger before it is made, and a batch reserves its estimate before it is submitted,
+  so concurrent work never spends the same money twice; the actual cost replaces the
+  estimate. A call whose outcome is unknown (timeout, lost connection) keeps its
+  estimate, as does a batch submission that was interrupted.
 * **Models** per role in the `llm_models` setting: Haiku 5.5 for bulk work
   (classification, reviews), Sonnet 5.5 where errors multiply (category mappings,
   parsers). Bulk work goes through the Message Batches API at half price; the

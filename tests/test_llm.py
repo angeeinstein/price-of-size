@@ -1,5 +1,6 @@
 """The LLM service with a fake Claude API client: budget, cache, validation, batches."""
 
+import asyncio
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -198,8 +199,8 @@ async def test_batches_are_submitted_within_budget_and_collected(sessionmaker):
                     priority=Priority.high)  # fmt: skip
 
     await llm.run(task(0, "known"))  # answered before: no batch request needed
-    batch_id, taken = await llm.submit_batch([task(0, "known"), task(1, "a"), task(2, "b")])
-    assert taken == 3 and got == [("ok", 0, True, "cached")]
+    batch_id, left = await llm.submit_batch([task(0, "known"), task(1, "a"), task(2, "b")])
+    assert left == [] and got == [("ok", 0, True, "cached")]
     (bid,) = fake.batches
     reqs = fake.batches[bid]["requests"]
     assert [r["custom_id"] for r in reqs] == ["0", "1"]
@@ -246,10 +247,11 @@ async def test_running_batches_count_against_the_budget(sessionmaker):
         )  # fmt: skip
         for i in range(100)
     ]
-    _, first = await llm.submit_batch(tasks)
-    assert 0 < first < 100  # only what the budget covers
-    _, second = await llm.submit_batch(tasks[first:])
-    assert second == 0  # the running batch's estimate already uses the rest
+    _, left = await llm.submit_batch(tasks)
+    assert 0 < len(left) < 100  # only what the budget covers went in
+    assert left == tasks[100 - len(left) :]
+    batch_id, again = await llm.submit_batch(left)
+    assert batch_id is None and again == left  # the running batch's estimate uses the rest
 
 
 class Titled(BaseModel):
@@ -297,3 +299,159 @@ async def test_an_answer_from_a_fallback_model_is_reused(sessionmaker):
     await llm.run(_task(model_role="category_mapping"))
     again = await llm.run(_task(model_role="category_mapping"))
     assert again.cached and again.data.category == "x" and len(fake.calls) == 1
+
+
+class Gate:
+    """A fake API call that waits until released: calls in flight at the same time."""
+
+    def __init__(self, fake):
+        self.fake = fake
+        self.release = asyncio.Event()
+        self.entered = 0
+        inner = fake.messages.create
+        inner_batch = fake.messages.batches.create
+
+        async def create(**params):
+            self.entered += 1
+            await self.release.wait()
+            return await inner(**params)
+
+        async def create_batch(requests):
+            self.entered += 1
+            await self.release.wait()
+            return await inner_batch(requests)
+
+        fake.messages.create = create
+        fake.messages.batches.create = create_batch
+
+
+async def test_concurrent_calls_cannot_spend_the_same_money(sessionmaker):
+    task = _task(priority=Priority.high, max_tokens=1000)
+    est = service.estimate_cost("claude-haiku-5-5", task, batch=False)
+    async with sessionmaker() as s:  # room for one call, not two
+        await runtime_settings.put(s, "llm_budget_hard_cap_usd", float(est * 3 / 2), "test")
+        await s.commit()
+    fake = FakeClient([_msg('{"category": "a", "confidence": 1}')] * 2)
+    gate = Gate(fake)
+    llm = LlmService(sessionmaker, lambda: fake)
+    first = asyncio.create_task(llm.run(task))
+    while gate.entered == 0:  # the first call is in flight, its estimate reserved
+        await asyncio.sleep(0.01)
+    with pytest.raises(BudgetDeferred):
+        await llm.run(_task("another", priority=Priority.high, max_tokens=1000))
+    gate.release.set()
+    assert (await first).status == "ok"
+    (row,) = await _ledger(sessionmaker)  # the reservation became the actual cost
+    assert row.output["status"] == "ok" and row.cost_usd == Decimal("0.000125")
+
+
+async def test_a_batch_being_submitted_is_already_reserved(sessionmaker):
+    @service.register("test_reserve", Pick)
+    async def handler(session, outcome):
+        pass
+
+    async with sessionmaker() as s:
+        await runtime_settings.put(s, "llm_budget_hard_cap_usd", 0.01, "test")
+        await s.commit()
+    fake = FakeClient()
+    gate = Gate(fake)
+    llm = LlmService(sessionmaker, lambda: fake)
+    tasks = [Task(stage="test_reserve", system="S" * 3000, prompt=f"p{i}", schema=Pick,
+                  priority=Priority.high, max_tokens=4096) for i in range(100)]  # fmt: skip
+    first = asyncio.create_task(llm.submit_batch(tasks))
+    while gate.entered == 0:  # the request is on its way, the row not yet submitted
+        await asyncio.sleep(0.01)
+    with pytest.raises(BudgetDeferred):  # nor may a synchronous call use that money
+        await llm.run(Task(stage="test_reserve", system="S" * 3000, prompt="sync",
+                           schema=Pick, priority=Priority.high, max_tokens=4096))  # fmt: skip
+    bid, left = await llm.submit_batch(tasks[50:])
+    assert bid is None and left == tasks[50:]
+    gate.release.set()
+    batch_id, _ = await first
+    async with sessionmaker() as s:
+        row = await s.get(LlmBatch, batch_id)
+    assert row.status == "submitted" and row.remote_id == "msgbatch_1"
+
+
+async def test_cached_answers_reach_the_handler_without_budget(sessionmaker):
+    got = []
+
+    @service.register("test_cached", Pick)
+    async def handler(session, outcome):
+        got.append((outcome.meta["i"], outcome.cached))
+
+    fake = FakeClient([_msg('{"category": "x", "confidence": 1}')])
+    llm = LlmService(sessionmaker, lambda: fake)
+
+    def task(i, prompt):
+        return Task(stage="test_cached", system="S", prompt=prompt, schema=Pick, meta={"i": i})
+
+    await llm.run(task(0, "known"))
+    async with sessionmaker() as s:
+        await runtime_settings.put(s, "llm_budget_hard_cap_usd", 0, "test")
+        await s.commit()
+    new = task(2, "new")
+    bid, left = await llm.submit_batch([task(1, "known"), new])
+    assert bid is None and left == [new] and got == [(1, True)]  # no budget: no batch
+    assert fake.batches == {}
+
+
+class ApiError(Exception):
+    status_code = 529
+
+
+async def test_failed_calls_release_or_keep_their_reservation(sessionmaker):
+    fake = FakeClient()
+    llm = LlmService(sessionmaker, lambda: fake)
+
+    async def refuse(**params):
+        raise ApiError("overloaded")
+
+    fake.messages.create = refuse
+    with pytest.raises(ApiError):
+        await llm.run(_task("a", priority=Priority.high))
+
+    async def lost(**params):
+        raise TimeoutError
+
+    fake.messages.create = lost
+    with pytest.raises(TimeoutError):
+        await llm.run(_task("b", priority=Priority.high))
+    answered, unknown = await _ledger(sessionmaker)
+    assert answered.cost_usd == 0 and answered.output["status"] == "error"
+    assert unknown.cost_usd > 0 and "unknown" in unknown.output["detail"]  # may be billed
+
+
+async def test_an_interrupted_batch_submission_keeps_its_estimate(sessionmaker):
+    @service.register("test_interrupted", Pick)
+    async def handler(session, outcome):
+        pass
+
+    fake = FakeClient()
+    llm = LlmService(sessionmaker, lambda: fake)
+
+    async def rejected(requests):
+        raise ApiError("invalid")
+
+    fake.messages.batches.create = rejected
+    t = Task(stage="test_interrupted", system="S", prompt="p", schema=Pick,
+             priority=Priority.high)  # fmt: skip
+    with pytest.raises(ApiError):
+        await llm.submit_batch([t])
+
+    async def lost(requests):
+        raise TimeoutError
+
+    fake.messages.batches.create = lost
+    with pytest.raises(TimeoutError):
+        await llm.submit_batch([t])
+    async with sessionmaker() as s:
+        rows = (await s.execute(select(LlmBatch).order_by(LlmBatch.created_at))).scalars().all()
+        assert [r.status for r in rows] == ["failed", "submitting"]
+        rows[1].created_at -= service.STALE_SUBMISSION * 2
+        await s.commit()
+    assert await llm.poll_batches() == 0
+    async with sessionmaker() as s:
+        assert (await s.get(LlmBatch, rows[1].id)).status == "failed"
+    (row,) = await _ledger(sessionmaker)
+    assert row.batch and row.cost_usd == rows[1].estimated_cost_usd

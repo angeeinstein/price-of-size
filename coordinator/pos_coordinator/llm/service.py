@@ -6,7 +6,9 @@ satisfy. The service
 
 * answers from the ledger when the same input was answered before (no cost),
 * checks the monthly budget for the task's priority and raises `BudgetDeferred`
-  when the work has to wait (the caller leaves it queued),
+  when the work has to wait (the caller leaves it queued); admission and the
+  reservation of the call's estimate happen in one step, serialised across
+  coordinators, so concurrent calls never spend the same remaining money twice,
 * asks for JSON in the schema (structured outputs), validates it, retries an
   invalid answer once and then returns it flagged (`invalid`), never guessed,
 * records every call in the cost ledger in its own transaction: money spent stays
@@ -18,6 +20,7 @@ A refusal is a result too (`refused`); with models that support it, the API's
 server-side fallback answers on another model first.
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -25,12 +28,12 @@ import os
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from pos_coordinator import budget, runtime_settings
@@ -45,6 +48,13 @@ FALLBACK_MODELS = {"claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-2"}
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_BATCH_REQUESTS = 5_000
 CHARS_PER_TOKEN = 3.0  # conservative, for estimates before a call
+# Advisory lock that serialises budget admission (any coordinator): b"pos_llm".
+BUDGET_LOCK = 0x706F735F6C6C6D
+# Batch rows that still hold a reservation: being submitted, or running remotely.
+RESERVING = ("submitting", "submitted")
+# A submission that never got its remote id by then was interrupted (the SDK gives
+# up on a request long before).
+STALE_SUBMISSION = timedelta(hours=2)
 
 
 class LlmUnavailable(RuntimeError):
@@ -226,6 +236,7 @@ class LlmService:
 
     async def _record(
         self,
+        session: AsyncSession,
         *,
         model: str,
         task: Task,
@@ -234,25 +245,20 @@ class LlmService:
         h: str,
         output: dict[str, Any],
         batch: bool = False,
-        session: AsyncSession | None = None,
     ) -> None:
-        row = LlmCall(
-            model=model,
-            stage=task.stage,
-            source=task.source,
-            job_id=task.job_id,
-            batch=batch,
-            cost_usd=cost,
-            input_hash=h,
-            output=output,
-            **usage,
+        session.add(
+            LlmCall(
+                model=model,
+                stage=task.stage,
+                source=task.source,
+                job_id=task.job_id,
+                batch=batch,
+                cost_usd=cost,
+                input_hash=h,
+                output=output,
+                **usage,
+            )
         )
-        if session is not None:
-            session.add(row)
-            return
-        async with self.sm() as s:
-            s.add(row)
-            await s.commit()
 
     async def _cached(self, h: str) -> dict[str, Any] | None:
         """The last valid answer to the same input. The hash includes the requested
@@ -268,26 +274,62 @@ class LlmService:
             ).scalar_one_or_none()
         return out
 
-    async def _budget(self) -> tuple[budget.BudgetStatus, Decimal]:
-        """The budget status and what batches still running have reserved (they are
-        not in the ledger until their results come back)."""
-        async with self.sm() as s:
-            status = await budget.status(s)
-            pending = (
-                await s.execute(
-                    select(func.coalesce(func.sum(LlmBatch.estimated_cost_usd), 0)).where(
-                        LlmBatch.status == "submitted"
-                    )
+    @staticmethod
+    async def _locked_budget(s: AsyncSession) -> tuple[budget.BudgetStatus, Decimal]:
+        """Take the budget lock (until `s` commits) and return the budget status and
+        what batches hold reserved (they are not in the ledger until their results
+        come back). Synchronous calls in flight are in the ledger already, at their
+        estimate."""
+        await s.execute(select(func.pg_advisory_xact_lock(BUDGET_LOCK)))
+        status = await budget.status(s)
+        reserved = (
+            await s.execute(
+                select(func.coalesce(func.sum(LlmBatch.estimated_cost_usd), 0)).where(
+                    LlmBatch.status.in_(RESERVING)
                 )
-            ).scalar_one()
-        return status, Decimal(pending)
+            )
+        ).scalar_one()
+        return status, Decimal(reserved)
 
-    async def _admit(self, task: Task, model: str) -> None:
-        status, reserved = await self._budget()
-        if not status.allows(task.priority):
-            raise BudgetDeferred(f"budget {status.state}: {task.priority} work deferred")
-        if status.remaining_usd - reserved < estimate_cost(model, task, batch=False):
-            raise BudgetDeferred("the remaining budget does not cover this call")
+    async def _reserve(self, task: Task, model: str, h: str) -> uuid.UUID:
+        """Admit one paid attempt and reserve its estimate in the same transaction: a
+        pending ledger row that every later admission counts. `_settle` replaces the
+        estimate with the actual cost."""
+        async with self.sm() as s:
+            status, reserved = await self._locked_budget(s)
+            if not status.allows(task.priority):
+                raise BudgetDeferred(f"budget {status.state}: {task.priority} work deferred")
+            est = estimate_cost(model, task, batch=False)
+            if status.remaining_usd - reserved < est:
+                raise BudgetDeferred("the remaining budget does not cover this call")
+            row = LlmCall(
+                model=model,
+                stage=task.stage,
+                source=task.source,
+                job_id=task.job_id,
+                cost_usd=est,
+                input_hash=h,
+                output={"status": "pending"},
+            )
+            s.add(row)
+            await s.commit()
+            return row.id
+
+    async def _settle(self, row_id: uuid.UUID, **values: Any) -> None:
+        async with self.sm() as s:
+            await s.execute(update(LlmCall).where(LlmCall.id == row_id).values(**values))
+            await s.commit()
+
+    async def _settle_failure(self, row_id: uuid.UUID, e: BaseException) -> None:
+        """The API answered with an error: nothing was generated, nothing to pay.
+        Anything else (timeout, lost connection, cancellation) may have been
+        processed: the estimate stays in the ledger."""
+        if getattr(e, "status_code", None) is not None:
+            await self._settle(row_id, cost_usd=Decimal(0),
+                               output={"status": "error", "detail": str(e)[:500]})  # fmt: skip
+        else:
+            detail = f"outcome unknown ({type(e).__name__}): cost estimated"
+            await self._settle(row_id, output={"status": "error", "detail": detail})
 
     # --- one call --------------------------------------------------------------------
 
@@ -306,28 +348,34 @@ class LlmService:
         total = Decimal(0)
         detail = None
         for attempt in (1, 2):
-            # checked before every paid attempt: the first one may have used the rest
-            await self._admit(task, model)
+            # admitted before every paid attempt: the first one may have used the rest
+            rid = await self._reserve(task, model, h)
             params = _params(model, task)
-            if model in FALLBACK_MODELS:
-                msg = await client.beta.messages.create(
-                    **params, betas=[FALLBACK_BETA], fallbacks="default"
-                )
-            else:
-                msg = await client.messages.create(**params)
+            try:
+                if model in FALLBACK_MODELS:
+                    msg = await client.beta.messages.create(
+                        **params, betas=[FALLBACK_BETA], fallbacks="default"
+                    )
+                else:
+                    msg = await client.messages.create(**params)
+            except BaseException as e:
+                await asyncio.shield(self._settle_failure(rid, e))
+                raise
             served = getattr(msg, "model", None) or model
             usage = _usage(msg)
             cost = _cost(model, served, usage, batch=False)
             total += cost
             text = _text(msg)
             stop = getattr(msg, "stop_reason", None)
+
+            async def settle(output: dict[str, Any], rid=rid, served=served, usage=usage,
+                             cost=cost) -> None:  # fmt: skip
+                await self._settle(rid, model=served, cost_usd=cost, output=output, **usage)
+
             if stop == "refusal":
                 details = getattr(msg, "stop_details", None)
                 detail = f"refusal: {getattr(details, 'category', None)}"
-                await self._record(
-                    model=served, task=task, usage=usage, cost=cost, h=h,
-                    output={"status": "refused", "detail": detail},
-                )  # fmt: skip
+                await settle({"status": "refused", "detail": detail})
                 return Outcome("refused", None, served, task.stage, cost_usd=total, detail=detail)
             try:
                 if stop == "max_tokens" or text is None:
@@ -335,44 +383,28 @@ class LlmService:
                 data = task.schema.model_validate_json(text)
             except (ValidationError, ValueError) as e:
                 detail = f"attempt {attempt}: {str(e)[:500]}"
-                await self._record(
-                    model=served, task=task, usage=usage, cost=cost, h=h,
-                    output={"status": "invalid", "detail": detail, "text": (text or "")[:2000]},
-                )  # fmt: skip
+                await settle({"status": "invalid", "detail": detail, "text": (text or "")[:2000]})
                 continue
-            await self._record(
-                model=served, task=task, usage=usage, cost=cost, h=h,
-                output={"status": "ok", "data": data.model_dump(mode="json")},
-            )  # fmt: skip
+            await settle({"status": "ok", "data": data.model_dump(mode="json")})
             return Outcome("ok", data, served, task.stage, cost_usd=total)
         return Outcome("invalid", None, model, task.stage, cost_usd=total, detail=detail)
 
     # --- batches ---------------------------------------------------------------------
 
-    async def submit_batch(self, tasks: list[Task]) -> tuple[uuid.UUID | None, int]:
+    async def submit_batch(self, tasks: list[Task]) -> tuple[uuid.UUID | None, list[Task]]:
         """Submit tasks of one stage as a Message Batch (half price; results within
-        24 h). Tasks answered before are handed to the handler at once. Returns the
-        batch id and how many tasks went in: as many as the budget allows now (the
-        rest stays with the caller for later)."""
+        24 h). Tasks answered before are handed to the handler at once, whatever the
+        budget. Returns the batch id (None if nothing was submitted) and the tasks left
+        over: those the budget does not allow now, or beyond one batch's size. The
+        caller keeps them for later."""
         if not tasks:
-            return None, 0
+            return None, []
         stage = tasks[0].stage
         if any(t.stage != stage for t in tasks) or stage not in HANDLERS:
             raise ValueError(f"one registered stage per batch (got {stage!r})")
         model = await self.model_for(tasks[0].model_role)
-        status, pending = await self._budget()
-        if not status.allows(tasks[0].priority):
-            raise BudgetDeferred(f"budget {status.state}: batch deferred")
-        # spend at most today's allowance (the remaining budget for high priority)
-        room = (
-            status.remaining_usd
-            if tasks[0].priority == Priority.high
-            else min(status.remaining_usd, status.daily_allowance_usd - status.spent_today_usd)
-        ) - pending
-        chosen: list[tuple[str, Task]] = []
-        spent = Decimal(0)
-        handled = 0
-        for task in tasks[:MAX_BATCH_REQUESTS]:
+        misses: list[tuple[str, Task]] = []
+        for task in tasks:
             h = input_hash(model, task)
             hit = await self._cached(h)
             if hit is not None:
@@ -384,36 +416,101 @@ class LlmService:
                     await self._deliver(
                         Outcome("ok", data, model, stage, cached=True, meta=task.meta)
                     )
-                    handled += 1
                     continue
-            est = estimate_cost(model, task, batch=True)
-            if spent + est > room:
-                break
-            spent += est
-            chosen.append((h, task))
-        if not chosen:
-            return None, handled
+            misses.append((h, task))
+        if not misses:
+            return None, []
+        client = self.client
+        priority = tasks[0].priority
+        chosen: list[tuple[str, Task]] = []
+        async with self.sm() as s:
+            status, reserved = await self._locked_budget(s)
+            if not status.allows(priority):
+                return None, [t for _, t in misses]
+            # spend at most today's allowance (the remaining budget for high priority)
+            room = (
+                status.remaining_usd
+                if priority == Priority.high
+                else min(status.remaining_usd, status.daily_allowance_usd - status.spent_today_usd)
+            ) - reserved
+            spent = Decimal(0)
+            for h, task in misses[:MAX_BATCH_REQUESTS]:
+                est = estimate_cost(model, task, batch=True)
+                if spent + est > room:
+                    break
+                spent += est
+                chosen.append((h, task))
+            if not chosen:
+                return None, [t for _, t in misses]
+            # the reservation is committed (with the lock released) before the request
+            row = LlmBatch(
+                stage=stage,
+                model=model,
+                status="submitting",
+                request_count=len(chosen),
+                estimated_cost_usd=spent,
+                requests={
+                    str(i): {"hash": h, "meta": task.meta, "source": task.source}
+                    for i, (h, task) in enumerate(chosen)
+                },
+            )
+            s.add(row)
+            await s.commit()
+            batch_id = row.id
+        left = [t for _, t in misses[len(chosen) :]]
         requests = [
             {"custom_id": str(i), "params": _params(model, task)}
             for i, (_, task) in enumerate(chosen)
         ]
-        remote = await self.client.messages.batches.create(requests=requests)
-        row = LlmBatch(
-            remote_id=remote.id,
-            stage=stage,
-            model=model,
-            status="submitted",
-            request_count=len(chosen),
-            estimated_cost_usd=spent,
-            requests={
-                str(i): {"hash": h, "meta": task.meta, "source": task.source}
-                for i, (h, task) in enumerate(chosen)
-            },
-        )
+        try:
+            remote = await client.messages.batches.create(requests=requests)
+        except BaseException as e:
+            if getattr(e, "status_code", None) is not None:
+                # rejected by the API: no batch exists, the reservation is released
+                await asyncio.shield(self._set_batch(batch_id, status="failed",
+                                                     ended_at=datetime.now(UTC)))  # fmt: skip
+            # otherwise it may exist: it stays reserved until it counts as interrupted
+            raise
+        await self._set_batch(batch_id, remote_id=remote.id, status="submitted")
+        return batch_id, left
+
+    async def _set_batch(self, batch_id: uuid.UUID, **values: Any) -> None:
         async with self.sm() as s:
-            s.add(row)
+            await s.execute(update(LlmBatch).where(LlmBatch.id == batch_id).values(**values))
             await s.commit()
-        return row.id, handled + len(chosen)
+
+    async def _expire_submissions(self) -> None:
+        """A submission interrupted between reserving and learning its remote id may
+        or may not have created a batch whose results can never be collected. Its
+        estimate moves into the ledger (money possibly spent stays counted)."""
+        cutoff = datetime.now(UTC) - STALE_SUBMISSION
+        async with self.sm() as s:
+            stale = (
+                (
+                    await s.execute(
+                        select(LlmBatch)
+                        .where(LlmBatch.status == "submitting", LlmBatch.created_at < cutoff)
+                        .with_for_update(skip_locked=True)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for b in stale:
+                log.warning("LLM batch %s: submission interrupted; its estimate is kept", b.id)
+                b.status = "failed"
+                b.ended_at = datetime.now(UTC)
+                s.add(
+                    LlmCall(
+                        model=b.model,
+                        stage=b.stage,
+                        batch=True,
+                        cost_usd=b.estimated_cost_usd,
+                        output={"status": "error", "detail": "batch submission interrupted: "
+                                "cost estimated"},
+                    )
+                )  # fmt: skip
+            await s.commit()
 
     async def _deliver(self, outcome: Outcome) -> None:
         _, handler = HANDLERS[outcome.stage]
@@ -424,6 +521,7 @@ class LlmService:
     async def poll_batches(self) -> int:
         """Collect ended batches: ledger rows (batch price) and the stage handler per
         result, one transaction per batch. Returns the number of results handled."""
+        await self._expire_submissions()
         async with self.sm() as s:
             pending = (
                 (await s.execute(select(LlmBatch).where(LlmBatch.status == "submitted")))
@@ -472,23 +570,23 @@ class LlmService:
         cost = _cost(row.model, served, usage, batch=True)
         text = _text(msg)
         if getattr(msg, "stop_reason", None) == "refusal":
-            await self._record(model=served, task=task, usage=usage, cost=cost, h=req["hash"],
-                               output={"status": "refused"}, batch=True, session=s)  # fmt: skip
+            await self._record(s, model=served, task=task, usage=usage, cost=cost, h=req["hash"],
+                               output={"status": "refused"}, batch=True)  # fmt: skip
             return Outcome("refused", None, served, stage, cost_usd=cost, meta=meta)
         try:
             if schema is None or text is None:
                 raise ValueError("no answer")
             data = schema.model_validate_json(text)
         except (ValidationError, ValueError) as e:
-            await self._record(model=served, task=task, usage=usage, cost=cost, h=req["hash"],
+            await self._record(s, model=served, task=task, usage=usage, cost=cost, h=req["hash"],
                                output={"status": "invalid", "detail": str(e)[:500]},
-                               batch=True, session=s)  # fmt: skip
+                               batch=True)  # fmt: skip
             return Outcome(
                 "invalid", None, served, stage, cost_usd=cost, detail=str(e)[:500], meta=meta
             )
-        await self._record(model=served, task=task, usage=usage, cost=cost, h=req["hash"],
+        await self._record(s, model=served, task=task, usage=usage, cost=cost, h=req["hash"],
                            output={"status": "ok", "data": data.model_dump(mode="json")},
-                           batch=True, session=s)  # fmt: skip
+                           batch=True)  # fmt: skip
         return Outcome("ok", data, served, stage, cost_usd=cost, meta=meta)
 
 

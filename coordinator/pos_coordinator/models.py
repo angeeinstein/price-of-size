@@ -356,15 +356,19 @@ class LlmCall(Base):
 
 class LlmBatch(Base):
     """A Message Batch submitted to the Claude API, until its results are collected.
-    `requests` maps each custom_id to its input hash and the stage's metadata."""
+    `requests` maps each custom_id to its input hash and the stage's metadata. The row
+    is written (status submitting, no remote id yet) before the request, so its
+    estimate is reserved in the budget from the start."""
 
     __tablename__ = "llm_batch"
     __table_args__ = (
-        CheckConstraint("status IN ('submitted','ended','failed')", name="llm_batch_status"),
+        CheckConstraint(
+            "status IN ('submitting','submitted','ended','failed')", name="llm_batch_status"
+        ),
         Index("ix_llm_batch_status", "status"),
     )
     id: Mapped[uuid.UUID] = pk()
-    remote_id: Mapped[str] = mapped_column(Text, unique=True)
+    remote_id: Mapped[str | None] = mapped_column(Text, unique=True)
     stage: Mapped[str] = mapped_column(Text)
     model: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, server_default="submitted")

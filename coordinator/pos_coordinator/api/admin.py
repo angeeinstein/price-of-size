@@ -340,7 +340,7 @@ async def llm_status(admin: CurrentViewer, session: Session, request: Request):
                 LlmCall.model,
                 func.count(),
                 func.sum(LlmCall.cost_usd),
-                func.count().filter(LlmCall.output["status"].astext != "ok"),
+                func.count().filter(LlmCall.output["status"].astext.not_in(("ok", "pending"))),
             )
             .where(LlmCall.created_at >= month)
             .group_by(LlmCall.stage, LlmCall.model)
@@ -349,7 +349,9 @@ async def llm_status(admin: CurrentViewer, session: Session, request: Request):
     ).all()
     batches = (
         await session.execute(
-            select(LlmBatch).where(LlmBatch.status == "submitted").order_by(LlmBatch.created_at)
+            select(LlmBatch)
+            .where(LlmBatch.status.in_(("submitting", "submitted")))
+            .order_by(LlmBatch.created_at)
         )
     ).scalars()
     return {
@@ -363,6 +365,7 @@ async def llm_status(admin: CurrentViewer, session: Session, request: Request):
             {
                 "stage": b.stage,
                 "model": b.model,
+                "status": b.status,
                 "requests": b.request_count,
                 "estimated_cost_usd": b.estimated_cost_usd,
                 "created_at": b.created_at,

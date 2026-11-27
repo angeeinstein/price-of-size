@@ -21,7 +21,7 @@ def upgrade() -> None:
     op.create_table(
         "llm_batch",
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("remote_id", sa.Text(), nullable=False),
+        sa.Column("remote_id", sa.Text(), nullable=True),
         sa.Column("stage", sa.Text(), nullable=False),
         sa.Column("model", sa.Text(), nullable=False),
         sa.Column("status", sa.Text(), server_default="submitted", nullable=False),
@@ -40,7 +40,9 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("ended_at", sa.DateTime(timezone=True), nullable=True),
-        sa.CheckConstraint("status IN ('submitted','ended','failed')", name="llm_batch_status"),
+        sa.CheckConstraint(
+            "status IN ('submitting','submitted','ended','failed')", name="llm_batch_status"
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("remote_id"),
     )
