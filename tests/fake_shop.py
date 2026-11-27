@@ -30,6 +30,40 @@ def product_page(n: int) -> str:
     )
 
 
+SPARQL_JSON = "application/sparql-results+json"
+
+
+def sparql_page(path: str) -> dict:
+    """Three items in pages of LIMIT/OFFSET, the shape the Wikidata adapter asks for."""
+    import re
+    from urllib.parse import parse_qs, urlsplit
+
+    query = parse_qs(urlsplit(path).query).get("query", [""])[0]
+    m = re.search(r"LIMIT (\d+) OFFSET (\d+)", query)
+    limit, offset = (int(m.group(1)), int(m.group(2))) if m else (100, 0)
+    items = [
+        ("Q101", "Tanker A", "P2130~250000000~Q4917~USD~2020-01-01T00:00:00Z", "330", "60000000"),
+        ("Q102", "Liner B", "P2130~900000000~Q4916~EUR~", "300", ""),
+        ("Q103", "Barque C", "P2130~16150~Q25224~GBP~1869-01-01T00:00:00Z", "85.4", "2133000"),
+    ]
+
+    def lit(v):
+        return {"type": "literal", "value": v}
+
+    rows = [
+        {
+            "item": {"type": "uri", "value": f"http://www.wikidata.org/entity/{q}"},
+            "label": lit(label),
+            "costs": lit(cost),
+            "lengths": lit(length),
+            "masss": lit(mass),
+            "P729": lit("2019-06-01T00:00:00Z"),
+        }
+        for q, label, cost, length, mass in items[offset : offset + limit]
+    ]
+    return {"head": {"vars": []}, "results": {"bindings": rows}}
+
+
 class FakeShop:
     def __init__(self):
         self.requests: list[tuple[float, str, str]] = []  # (time, host, path)
@@ -112,6 +146,11 @@ class FakeShop:
             if path.startswith("/p/"):
                 return 200, product_page(int(path.rsplit("/", 1)[-1])), {}
             return 200, "<html><body>about us</body></html>", {}
+        if host == "127.0.0.5":  # a SPARQL endpoint whose robots.txt disallows it
+            if path == "/robots.txt":
+                return 200, "User-agent: *\nDisallow: /sparql\n", {}
+            if path.startswith("/sparql?"):
+                return 200, json.dumps(sparql_page(path)), {"Content-Type": SPARQL_JSON}
         return 404, "unknown host", {}
 
     def gz_route(self, host: str, path: str) -> bytes | None:

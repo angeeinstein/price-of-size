@@ -41,7 +41,7 @@ from pos_coordinator.models import (
 from pos_coordinator.rawstore import RawStore
 from pos_shared.extract import EXTRACT_VERSION
 from pos_shared.extract.model import Extraction, MeasurementCandidate
-from pos_shared.extract.pipeline import extract_evidence
+from pos_shared.extract.pipeline import api_records, extract_evidence
 from pos_shared.extract.price_rules import price_flags
 from pos_shared.units import UNITS_VERSION
 
@@ -75,6 +75,8 @@ NOT_A_VALID_PRICE = {
     "fetch_throttled",
     "fetch_error",
     "fetch_gone",
+    "older_cost",
+    "undated_cost",
 }
 OFFER_LEVEL = {
     "placeholder_price",
@@ -83,6 +85,7 @@ OFFER_LEVEL = {
     "aggregate_low_price",
     "no_price",
     "no_currency",
+    "older_cost",
 }  # computed per offer, not per page
 
 MIN_DENSITY, MAX_DENSITY = 1.0, 23_000.0  # kg/m³ (osmium is 22,600)
@@ -190,7 +193,7 @@ async def process_batch(
         select(RawFetch)
         .where(
             RawFetch.blob_sha256.is_not(None),
-            RawFetch.mode.in_(("http", "browser")),
+            RawFetch.mode.in_(("http", "browser", "api")),
             RawFetch.received_at <= func.now() - settle,
         )
         .order_by(RawFetch.received_at, RawFetch.id)
@@ -218,15 +221,14 @@ async def process_batch(
             # One fetch, one savepoint: a page that breaks a parser (or a value the
             # database refuses) is logged and skipped, it never stops the stage.
             async with session.begin_nested():
-                product_id = await _derive_one(session, store, f, fx, report)
+                product_ids = await _derive_one(session, store, f, fx, report)
         except Exception as e:  # noqa: BLE001
             report.errors += 1
             cur.errors = (cur.errors or 0) + 1
             cur.last_error = f"{f.id}: {type(e).__name__}: {e}"[:2000]
             log.warning("derive: fetch %s failed: %s", f.id, cur.last_error, exc_info=True)
             continue
-        if product_id is not None:
-            touched.add(product_id)
+        touched |= product_ids
     if not store.available():
         await session.rollback()  # the store went away mid-batch: retry it all later
         return BatchReport(store_unavailable=1)
@@ -239,15 +241,37 @@ async def process_batch(
     return report
 
 
-async def _derive_one(session, store: RawStore, f: RawFetch, fx: RateCache, report) -> Any:
+async def _derive_one(session, store: RawStore, f: RawFetch, fx: RateCache, report) -> set:
+    """The products a fetch touched: one for a shop page, one per item for an API
+    response (a SPARQL result lists many)."""
     evidence = await asyncio.to_thread(_load, store, f.blob_sha256)
     if evidence is None:
         report.missing_blobs += 1
-        return None
-    if not isinstance(evidence, dict) or "snippets" not in evidence:
-        return None  # robots.txt or sitemap evidence: nothing to derive
+        return set()
+    if not isinstance(evidence, dict):
+        return set()
+    if isinstance(evidence.get("api"), dict):
+        touched = set()
+        for rec in await asyncio.to_thread(api_records, evidence):
+            pid = await _write(session, f, rec.extraction, fx, report, url=rec.url)
+            if pid is not None:
+                touched.add(pid)
+        return touched
+    if "snippets" not in evidence:
+        return set()  # robots.txt or sitemap evidence: nothing to derive
     ex = await asyncio.to_thread(extract_evidence, evidence)
-    return await _write(session, f, ex, fx, report)
+    pid = await _write(session, f, ex, fx, report)
+    return {pid} if pid is not None else set()
+
+
+def _as_of(value: str | None):
+    """'1999-01-04' -> date; None for anything else."""
+    from datetime import date
+
+    try:
+        return date.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
 
 
 def _money(value: float | None) -> Decimal | None:
@@ -258,11 +282,14 @@ def _money(value: float | None) -> Decimal | None:
     return d if d.is_finite() and abs(d) < MAX_PRICE else None
 
 
-async def _write(session, f: RawFetch, ex: Extraction, fx: RateCache, report) -> Any:
+async def _write(
+    session, f: RawFetch, ex: Extraction, fx: RateCache, report, url: str | None = None
+) -> Any:
+    """`url`: the record's own page when a fetch holds several (an API response)."""
     if not (ex.offers or ex.measurements or ex.title):
         return None
     report.pages += 1
-    url = f.final_url or f.url
+    url = url or f.final_url or f.url
     key = match_key(ex, url)
     stmt = pg_insert(Product).values(
         match_key=key,
@@ -301,8 +328,10 @@ async def _write(session, f: RawFetch, ex: Extraction, fx: RateCache, report) ->
         if o.price is not None and price is None:
             flags.add("invalid_price")
         price_eur = fx_rate = None
+        # a cost that refers to another date than the fetch's converts at that date
+        fx_day = _as_of(o.as_of) or day
         if price is not None and o.currency:
-            rate = await fx.rate(o.currency, day)
+            rate = await fx.rate(o.currency, fx_day)
             if rate is None:
                 flags.add("no_fx_rate")
             else:
@@ -325,7 +354,12 @@ async def _write(session, f: RawFetch, ex: Extraction, fx: RateCache, report) ->
             pack_size=ex.pack_size,
             flags=sorted(flags),
             fields={
-                "price": {"method": o.method, "confidence": o.confidence, "kind": o.price_kind}
+                "price": {
+                    "method": o.method,
+                    "confidence": o.confidence,
+                    "kind": o.price_kind,
+                    **({"as_of": o.as_of, "as_of_method": o.as_of_method} if o.as_of else {}),
+                }
             },
             parser_version=EXTRACT_VERSION,
             validator_version=VALIDATOR_VERSION,

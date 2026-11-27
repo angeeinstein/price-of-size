@@ -62,6 +62,8 @@ def price_flags(offer: OfferCandidate) -> list[str]:
         flags.append("unit_price")
     if offer.price_kind == "aggregate_low":
         flags.append("aggregate_low_price")
+    if offer.price_kind == "older_cost":
+        flags.append("older_cost")  # a newer cost of the same item exists
     if offer.condition and offer.condition != "new":
         flags.append(f"condition_{offer.condition}")
     if not offer.currency:

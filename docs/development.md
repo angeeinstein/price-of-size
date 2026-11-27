@@ -138,6 +138,8 @@ Next steps:
 - [x] Polite fetching: per-(domain, egress group) rate slots, AIMD back-off, robots.txt,
       blocks, raw evidence capture, HTML retention (Phase 2 groundwork)
 - [x] Discovery: sitemaps (from robots.txt or explicit), indexes, gzip, per-source URL patterns
+- [x] API sources (`crawl/apisources.py`, `fetch_api` jobs): Wikidata SPARQL per class,
+      paged; one fetch derives many products (`pos_shared/extract/wikidata.py`)
 - [ ] Discovery from category pages (links), scheduled re-discovery and re-fetch
 - [ ] Browser fetching (Playwright) for pages without data over plain HTTP
 - [ ] Node dashboard (local web UI) and quiet hours; Raspberry Pi SD-card friendly spool

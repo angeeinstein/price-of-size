@@ -375,3 +375,88 @@ async def fetch_sitemap(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
         },
         fetches=[fetch],
     )
+
+
+# What an API job may ask for: the response formats the adapters read. Anything else
+# in the payload is ignored (node input is untrusted both ways).
+API_ACCEPT = {"application/sparql-results+json", "application/json"}
+API_MAX_BYTES = 30 * 1024 * 1024
+
+
+@handler("fetch_api")
+async def fetch_api(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
+    """Fetch an API response (a SPARQL query, a JSON endpoint) as raw evidence. The
+    whole response is the evidence: the derive stage reads it by adapter. Only a row
+    count travels in the result, for the coordinator's pagination."""
+    url = str(job.payload["url"])
+    domain = urlsplit(url).hostname or ""
+    accept = job.payload.get("accept")
+    headers = {"Accept": accept if accept in API_ACCEPT else "application/json"}
+    got = await _gated_fetch(job, url, API_MAX_BYTES, headers=headers)
+    if got is None:
+        return _skipped(job, domain)
+    fetched_at, res = got
+    text = _decode(res.body, res.content_type) if res.body else ""
+    verdict = blocks.classify(res.status, text[:20_000], res.error)
+    body, parse_error, rows = None, None, None
+    if res.status == 200 and text and not res.truncated:
+        try:
+            body = json.loads(text)
+        except ValueError as e:
+            parse_error = f"json: {e}"[:500]
+    if isinstance(body, dict):
+        bindings = (body.get("results") or {}).get("bindings")
+        rows = len(bindings) if isinstance(bindings, list) else None
+    if body is not None and verdict.kind == "blocked":
+        verdict = blocks.Verdict("ok")  # data that mentions a captcha is not a challenge
+    breaker.trip(domain, verdict.kind, res.retry_after_s, breaker.block_pause(job.payload))
+    params = job.payload.get("params")
+    evidence = {
+        "url": url,
+        "final_url": res.final_url,
+        "status": res.status,
+        "headers": res.headers,
+        "fetched_at": fetched_at.isoformat(),
+        "elapsed_ms": res.elapsed_ms,
+        "error": res.error,
+        "truncated": res.truncated,
+        "verdict": {"kind": verdict.kind, "reason": verdict.reason},
+        "api": {
+            "adapter": str(job.payload.get("adapter") or "")[:50] or None,
+            "params": params if isinstance(params, dict) else None,
+            "parse_error": parse_error,
+            "body": body,
+            # a response that is not JSON (an error page) is kept as text, shortened
+            "text": text[:20_000] if body is None else None,
+        },
+    }
+    sha = await _store(ctx, "snippets", json.dumps(evidence, sort_keys=True).encode())
+    fetch = api.FetchRecord(
+        id=uuid7(),
+        url=url,
+        final_url=res.final_url,
+        status=res.status,
+        fetched_at=fetched_at,
+        mode="api",
+        content_type=(res.content_type or "")[:200] or None,
+        response_bytes=len(res.body),
+        blob_sha256=sha,
+        content_sha256=hashlib.sha256(res.body).hexdigest() if res.body else None,
+        source=job.payload.get("source"),
+        error=res.error or parse_error,
+    )
+    return done(
+        job,
+        {
+            "status": res.status,
+            "elapsed_ms": res.elapsed_ms,
+            "bytes": len(res.body),
+            "error": res.error or parse_error,
+            "retry_after_s": res.retry_after_s,
+            "verdict": verdict.kind,
+            "reason": verdict.reason,
+            "rows": rows,
+            "evidence_sha256": sha,
+        },
+        fetches=[fetch],
+    )
