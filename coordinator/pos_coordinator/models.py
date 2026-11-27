@@ -732,6 +732,15 @@ class TaxonomyEmbedding(Base):
 
 class Parser(Base):
     __tablename__ = "parser"
+    __table_args__ = (
+        # one active version per domain (activation also takes a lock per domain)
+        Index(
+            "uq_parser_active_domain",
+            "domain",
+            unique=True,
+            postgresql_where=text("active"),
+        ),
+    )
     id: Mapped[uuid.UUID] = pk()
     domain: Mapped[str] = mapped_column(Text, index=True)
     version: Mapped[int] = mapped_column(Integer)

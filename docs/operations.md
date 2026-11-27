@@ -376,8 +376,10 @@ selectors, no code. Regular expressions are checked by their structure (no
 repetition or alternation inside repetition, no back-references) and run with a
 50 ms limit per match. On the held-out pages, a price's currency must match the
 LLM's, and so must whether the product is unavailable (out of stock,
-discontinued: such a price never counts); a size must match in basis (product or
-package) and net or gross. A bare "$" or
+discontinued: such a price never counts) and whether the item is not new (used,
+refurbished, damaged: flagged); a size must match in basis (product or package)
+and net or gross. One version per shop is active: activation takes a lock per
+shop, and the database refuses a second active version. A bare "$" or
 "kr" is the shop's default currency when that uses the symbol. A page whose price
 the LLM read as a unit, monthly, net or "from" price never passes (a parser reads
 item prices only). A shop with such pages among the checked ones gets no automatic

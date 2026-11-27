@@ -29,6 +29,9 @@ function TestRun({ id }: { id: string }) {
               <div className="text-muted">Parser</div>
               <div>{r.found.title}</div>
               <div>price: {r.found.price ?? "—"} {r.found.currency ?? ""}</div>
+              {(r.found.availability || r.found.condition) && (
+                <div>{[r.found.availability, r.found.condition].filter(Boolean).join(", ")}</div>
+              )}
               {r.found.sizes.map((s, i) => <div key={i}>{s.label}: {s.value}</div>)}
             </div>
             <div>
@@ -36,6 +39,9 @@ function TestRun({ id }: { id: string }) {
               {r.llm ? <>
                 <div>price: {r.llm.price_text ?? "—"} {r.llm.currency ?? ""}
                   {r.llm.price_kind && !["item", "unknown"].includes(r.llm.price_kind) && <> ({r.llm.price_kind})</>}</div>
+                {[r.llm.availability, r.llm.condition].some((v) => v && v !== "unknown") && (
+                  <div>{[r.llm.availability, r.llm.condition].filter((v) => v && v !== "unknown").join(", ")}</div>
+                )}
                 {r.llm.sizes?.map((s, i) => <div key={i}>{s.label}: {s.value}</div>)}
               </> : <div className="text-muted">not read by the LLM</div>}
             </div>
@@ -70,7 +76,8 @@ export function ParsersPage() {
       <p className="text-sm text-muted">
         Per-site parsers: CSS selectors the LLM wrote for a shop from pages the LLM tier had read, checked on
         further pages before they run. A page passes when the parser finds every price and size the LLM found
-        there, with the same currency and availability and the same kind of size (product or package, net or gross). One version
+        there, with the same currency, availability and condition and the same kind of size (product or package,
+        net or gross). One version
         per domain is active; every version is kept.
       </p>
       <Card>

@@ -43,6 +43,7 @@ SPEC = {
     "currency": None,
     "currency_default": "EUR",
     "availability": None,
+    "condition": None,
     "category": {"css": "nav.crumbs a", "attr": None, "regex": None, "index": 0},
     "size_rows": [{"css": "table.facts tr", "label": "th", "value": "td"}],
     "size_picks": [],
@@ -213,6 +214,68 @@ def test_a_page_passes_only_with_the_availability_the_llm_read():
     available = {**_answer_for(1), "availability": "in_stock"}
     assert not site_parsers.page_passes(reads_it, sold_out.encode(), available, "de")
     assert site_parsers.page_passes(blind, _html(1).encode(), available, "de")
+
+
+def test_a_page_passes_only_with_the_condition_the_llm_read():
+    used_page = _html(1).replace(
+        '<div class="buy">', '<div class="buy"><link itemprop="itemCondition" '
+        'href="https://schema.org/UsedCondition">',
+    )  # fmt: skip
+    reads_it = site_parser.parse(
+        {
+            **SPEC,
+            "condition": {
+                "css": "[itemprop=itemCondition]",
+                "attr": "href",
+                "regex": None,
+                "index": 0,
+            },
+        }  # fmt: skip
+    )
+    blind = site_parser.parse(SPEC)
+    used = {**_answer_for(1), "condition": "used"}
+    assert site_parsers.page_passes(reads_it, used_page.encode(), used, "de")
+    # a spec that cannot see it would make a used item's price a new one's
+    assert not site_parsers.page_passes(blind, used_page.encode(), used, "de")
+    new = {**_answer_for(1), "condition": "new"}
+    assert not site_parsers.page_passes(reads_it, used_page.encode(), new, "de")
+    assert site_parsers.page_passes(blind, _html(1).encode(), new, "de")
+    # and the offer it makes carries the condition (flagged downstream)
+    ex = Extraction(extract_version="t", title="Regal")
+    result = site_parser.run(reads_it, used_page)
+    assert site_parser.apply(ex, result, reads_it, "de", "holz.example@1")
+    assert ex.offers[0].condition == "used"
+    for text, want in (("Generalüberholt", "refurbished"), ("B-Ware", "used"),
+                       ("https://schema.org/NewCondition", "new"), ("Neu", "new"),
+                       ("https://schema.org/DamagedCondition", "damaged"), ("", None)):  # fmt: skip
+        assert site_parser._condition(text) == want, text
+
+
+async def test_activating_two_versions_at_once_leaves_one_active(app):
+    import asyncio
+
+    sm = app.state.sessionmaker
+    async with sm() as s:
+        ids = []
+        for v in (1, 2):
+            p = Parser(domain="holz.example", version=v, kind="declarative", artifact=SPEC,
+                       validation_score=1.0, active=False)  # fmt: skip
+            s.add(p)
+            await s.flush()
+            ids.append(p.id)
+        await s.commit()
+
+    async def activate(pid):
+        async with sm() as s:
+            p = await s.get(Parser, pid)
+            await site_parsers.set_active(s, p, True, "test")
+            await asyncio.sleep(0.2)  # the other activation runs meanwhile
+            await s.commit()
+
+    await asyncio.gather(activate(ids[0]), activate(ids[1]))
+    async with sm() as s:
+        active = (await s.execute(select(Parser.version).where(Parser.active))).scalars().all()
+    assert len(active) == 1
 
 
 def test_condensed_html_for_the_llm():

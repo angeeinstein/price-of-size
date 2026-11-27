@@ -66,6 +66,9 @@ no repetition or alternation inside a repeated group, no back-references.
 price); the text as on the page, e.g. "1.299,00 €".
 - currency: where the page names the currency, or null; currency_default: its ISO \
 code when the page never names it.
+- availability: where the page says whether the product is in stock (e.g. a \
+schema.org availability link or the shop's stock text); condition: where it says \
+whether the item is new, used, refurbished or damaged. Null if the pages never say.
 - category: matches every breadcrumb level (top first).
 - size_rows: tables or lists of label/value rows (css for a row, label and value \
 selectors inside it); size_picks: a size or weight that has no label of its own on \
@@ -153,6 +156,10 @@ def _close(a: float | None, b: float | None, tol: float) -> bool:
     return abs(a - b) <= tol * max(abs(a), abs(b), 1e-12)
 
 
+def _not_new(condition: Any) -> str | None:
+    return condition if condition in ("used", "refurbished", "damaged") else None
+
+
 def qualified_price(answer: dict[str, Any]) -> bool:
     """The LLM read the page's price as something other than the item's price."""
     return answer.get("price_kind") in set(llm_page.PRICE_KINDS) - {"item", "unknown"}
@@ -162,8 +169,9 @@ def page_passes(
     spec: site_parser.SiteSpec, page: bytes, answer: dict[str, Any], locale: str | None
 ) -> bool:
     """The spec finds every price and size the LLM tier found on the page, with the
-    same meaning: the price in the currency the LLM read and unavailable where the
-    LLM read so, each size with the same basis (product, package) and net or gross.
+    same meaning: the price in the currency the LLM read, unavailable and not new
+    where the LLM read so, each size with the same basis (product, package) and net
+    or gross.
     A page whose price the LLM read as something other than the item's price (a
     unit, monthly, net or "from" price) never passes: a spec only reads item
     prices."""
@@ -180,6 +188,9 @@ def page_passes(
         if (answer.get("availability") in price_rules.UNAVAILABLE) != (
             got.availability in price_rules.UNAVAILABLE
         ):
+            return False
+        # so does an item that is not new (flagged by its condition)
+        if _not_new(answer.get("condition")) != _not_new(got.condition):
             return False
         want_currency = str(answer.get("currency") or "").strip().upper()
         if re.fullmatch(r"[A-Z]{3}", want_currency) and (
@@ -262,6 +273,9 @@ def _expected_text(answer: dict[str, Any]) -> str:
     lines = [f"price: {answer.get('price_text') or '(none)'}"]
     for s in answer.get("sizes") or []:
         lines.append(f"{s.get('label')}: {s.get('value')}")
+    for key in ("currency", "availability", "condition"):
+        if answer.get(key) and answer.get(key) != "unknown":
+            lines.append(f"({key}: {answer[key]})")
     return "\n".join(lines)
 
 
@@ -383,6 +397,15 @@ async def score(
     return passed, checked, qualified
 
 
+async def lock_domain(session: AsyncSession, domain: str) -> None:
+    """Serialise new versions and (de)activation for one domain until the transaction
+    ends: version numbers stay unique, and at most one version is active (the
+    database also refuses a second one)."""
+    await session.execute(
+        select(func.pg_advisory_xact_lock(common.lock_key(f"parser\x1f{domain}")))
+    )
+
+
 async def store_parser(
     session: AsyncSession,
     domain: str,
@@ -391,6 +414,7 @@ async def store_parser(
     activate: bool,
     created_by: str,
 ) -> Parser:
+    await lock_domain(session, domain)
     latest = (
         await session.execute(select(func.max(Parser.version)).where(Parser.domain == domain))
     ).scalar_one()
@@ -411,11 +435,17 @@ async def store_parser(
 
 
 async def set_active(session: AsyncSession, p: Parser, on: bool, actor: str) -> None:
+    await lock_domain(session, p.domain)
     if on:
         site_parser.parse(p.artifact)  # never activate what cannot run
+        # (under the lock: a version another transaction activated is committed, and
+        # this statement sees it)
         await session.execute(
-            update(Parser).where(Parser.domain == p.domain, Parser.active).values(active=False)
+            update(Parser)
+            .where(Parser.domain == p.domain, Parser.active, Parser.id != p.id)
+            .values(active=False)
         )
+        await session.flush()
     p.active = on
     session.add(
         AuditLog(

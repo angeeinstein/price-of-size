@@ -88,6 +88,7 @@ class SiteSpec(BaseModel):
     currency: Pick | None
     currency_default: str | None  # ISO 4217 when the page never names it
     availability: Pick | None
+    condition: Pick | None  # new, used, refurbished, damaged (schema.org or the shop's words)
     category: Pick | None  # every match is one breadcrumb level (index ignored)
     size_rows: list[Rows]
     size_picks: list[Labelled]
@@ -180,7 +181,7 @@ def _check_pick(p: Pick | None) -> None:
 def check(spec: SiteSpec) -> SiteSpec:
     """Raise SpecError unless the spec is safe and well-formed."""
     for p in (spec.title, spec.brand, spec.gtin, spec.price, spec.currency,
-              spec.availability, spec.category):  # fmt: skip
+              spec.availability, spec.condition, spec.category):  # fmt: skip
         _check_pick(p)
     if len(spec.size_rows) > MAX_ROW_RULES or len(spec.size_picks) > 20:
         raise SpecError("too many size rules")
@@ -254,6 +255,7 @@ class SiteResult:
     price_text: str | None = None
     currency: str | None = None
     availability: str | None = None
+    condition: str | None = None
     category_path: list[str] = field(default_factory=list)
     pairs: list[tuple[str, str]] = field(default_factory=list)
 
@@ -270,6 +272,27 @@ _AVAILABILITY = (
 def _availability(v: str | None) -> str | None:
     key = re.sub(r"[^a-z]", "", (v or "").lower().rsplit("/", 1)[-1])
     return next((out for k, out in _AVAILABILITY if k in key), None)
+
+
+# schema.org's conditions and the usual German and English words (refurbished and
+# damaged before used and new: "Neuwertig, gebraucht" is used)
+_CONDITION = (
+    ("refurbish", "refurbished"),
+    ("generalüberholt", "refurbished"),
+    ("aufbereitet", "refurbished"),
+    ("damaged", "damaged"),
+    ("beschädigt", "damaged"),
+    ("used", "used"),
+    ("gebraucht", "used"),
+    ("bware", "used"),
+    ("new", "new"),
+    ("neu", "new"),
+)
+
+
+def _condition(v: str | None) -> str | None:
+    key = re.sub(r"[^a-zäöüß]", "", (v or "").lower().rsplit("/", 1)[-1])
+    return next((out for k, out in _CONDITION if k in key), None)
 
 
 _META_CHARSET = re.compile(rb"""<meta[^>]+charset\s*=\s*["']?\s*([A-Za-z0-9_.:-]{1,40})""", re.I)
@@ -312,6 +335,7 @@ def run(spec: SiteSpec, page: bytes | str) -> SiteResult:
         price_text=_one(doc, spec.price),
         currency=_one(doc, spec.currency),
         availability=_availability(_one(doc, spec.availability)),
+        condition=_condition(_one(doc, spec.condition)),
     )
     if spec.category is not None:
         crumbs = [_value(el, spec.category) for el in _selector(spec.category.css)(doc)[:10]]
@@ -385,6 +409,7 @@ def apply(
                     currency=currency_of(result, spec),
                     price_raw=result.price_text[:100],
                     availability=result.availability,
+                    condition=result.condition,
                     method=f"{METHOD}:{version}",
                     confidence=CONFIDENCE,
                 )
