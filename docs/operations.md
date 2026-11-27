@@ -357,8 +357,8 @@ behind the others.
 ### Per-site parsers (tier 2)
 
 Once the LLM tier has read `parser_min_pages` (12) product pages of a shop with the
-full HTML archived, the `parser_generation` model (Sonnet) writes a parser for the
-shop. The parser is declarative: CSS selectors, optionally with an attribute and a
+full HTML archived (distinct URLs: a page fetched again counts once), the
+`parser_generation` model (Sonnet) writes a parser for the shop. The parser is declarative: CSS selectors, optionally with an attribute and a
 short regular expression, for title, price, breadcrumbs and size lines. The model
 sees 5 of the pages as compact HTML, with what the LLM tier found on each. The
 parser is then run on up to 15 further pages. A page passes when the parser finds

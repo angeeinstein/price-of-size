@@ -4,6 +4,7 @@ stage."""
 
 import hashlib
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -527,6 +528,38 @@ async def test_a_new_version_learns_from_the_pages_the_current_one_left(app):
     # only the pages of the new template: the old ones would let a version pass
     # that still misses the new price
     assert len(sampled) == 14 and {str(f) for f in changed} == set(sampled)
+
+
+async def test_pages_are_counted_and_sampled_by_their_url(app):
+    sm, store = app.state.sessionmaker, app.state.rawstore
+    # one product fetched 15 times is one page: too few for a parser
+    for _ in range(15):
+        await _page(sm, store, 1)
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    await _read_by_llm(sm)
+    fake = FakeClient()
+    llm = LlmService(sm, lambda: fake)
+    assert await site_parsers.schedule(sm, llm, store) == {"parsers_requested": 0}
+    # 14 products, each fetched twice: one capture of each, on one side of the split
+    for i in range(2, 16):
+        for _ in range(2):
+            await _page(sm, store, i)
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    await _read_by_llm(sm)
+    assert await site_parsers.schedule(sm, llm, store) == {"parsers_requested": 1}
+    async with sm() as s:
+        meta = (await s.execute(select(LlmBatch))).scalar_one().requests["0"]["meta"]
+        sampled = meta["train"] + meta["held_out"]
+        urls = (
+            (
+                await s.execute(
+                    select(RawFetch.url).where(RawFetch.id.in_([uuid.UUID(x) for x in sampled]))
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(sampled) == len(urls) == len(set(urls)) == 15
 
 
 async def test_too_few_pages_and_the_switch(app):

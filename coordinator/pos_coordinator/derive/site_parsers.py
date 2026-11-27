@@ -247,16 +247,19 @@ def domain_sql(final_url: Any, url: Any) -> Any:
     )
 
 
+# pages are counted and sampled by their URL (after redirects): a product fetched
+# again and again is one page, and its captures never sit on both sides of the
+# split between examples and held-out pages
 _CANDIDATES_SQL = f"""
     WITH pages AS (
-      SELECT {_DOMAIN_SQL} AS domain, e.fetch_id, e.created_at
+      SELECT {_DOMAIN_SQL} AS domain, coalesce(f.final_url, f.url) AS page_url, e.created_at
       FROM llm_extraction e
       JOIN raw_fetch f ON f.id = e.fetch_id AND f.fetched_at = e.fetched_at
       WHERE e.status = 'ok' AND e.prompt_version = :prompt
         AND (e.output->>'is_product_page')::boolean
         AND f.html_sha256 IS NOT NULL
     )
-    SELECT pages.domain, count(*) AS pages
+    SELECT pages.domain, count(DISTINCT pages.page_url) AS pages
     FROM pages
     LEFT JOIN parser cur ON cur.domain = pages.domain AND cur.active
     WHERE pages.domain IS NOT NULL
@@ -266,8 +269,8 @@ _CANDIDATES_SQL = f"""
         WHERE tried.domain = pages.domain AND NOT tried.active
           AND tried.created_at > :retry_since)
     GROUP BY pages.domain
-    HAVING count(*) >= :min_pages
-    ORDER BY count(*) DESC, pages.domain
+    HAVING count(DISTINCT pages.page_url) >= :min_pages
+    ORDER BY count(DISTINCT pages.page_url) DESC, pages.domain
     LIMIT 5
 """
 
@@ -275,15 +278,21 @@ _CANDIDATES_SQL = f"""
 # saw (with an active parser, only the pages it left to the LLM since: the ones a
 # changed template broke)
 _PAGES_SQL = f"""
-    SELECT e.fetch_id, f.url, f.html_sha256, f.blob_sha256, e.output
-    FROM llm_extraction e
-    JOIN raw_fetch f ON f.id = e.fetch_id AND f.fetched_at = e.fetched_at
-    LEFT JOIN parser cur ON cur.domain = :domain AND cur.active
-    WHERE e.status = 'ok' AND e.prompt_version = :prompt
-      AND (e.output->>'is_product_page')::boolean
-      AND f.html_sha256 IS NOT NULL AND {_DOMAIN_SQL} = :domain
-      AND (cur.id IS NULL OR e.created_at > cur.created_at)
-    ORDER BY md5(e.fetch_id::text)
+    SELECT * FROM (
+      -- the latest capture of each page
+      SELECT DISTINCT ON (coalesce(f.final_url, f.url))
+             e.fetch_id, coalesce(f.final_url, f.url) AS url, f.html_sha256, f.blob_sha256,
+             e.output
+      FROM llm_extraction e
+      JOIN raw_fetch f ON f.id = e.fetch_id AND f.fetched_at = e.fetched_at
+      LEFT JOIN parser cur ON cur.domain = :domain AND cur.active
+      WHERE e.status = 'ok' AND e.prompt_version = :prompt
+        AND (e.output->>'is_product_page')::boolean
+        AND f.html_sha256 IS NOT NULL AND {_DOMAIN_SQL} = :domain
+        AND (cur.id IS NULL OR e.created_at > cur.created_at)
+      ORDER BY coalesce(f.final_url, f.url), f.fetched_at DESC, e.fetch_id
+    ) one
+    ORDER BY md5(one.url), one.fetch_id
     LIMIT :n
 """
 
