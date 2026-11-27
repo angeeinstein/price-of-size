@@ -250,6 +250,11 @@ async def _derive_one(session, store: RawStore, f: RawFetch, fx: RateCache, repo
     if evidence is None:
         report.missing_blobs += 1
         return set()
+    return await derive_evidence(session, f, evidence, fx, report)
+
+
+async def derive_evidence(session, f: RawFetch, evidence: Any, fx: RateCache, report) -> set:
+    """_derive_one with the fetch's evidence already loaded."""
     if not isinstance(evidence, dict):
         return set()
     if isinstance(evidence.get("api"), dict):

@@ -217,17 +217,56 @@ async def test_an_answer_waits_for_the_raw_store(app, monkeypatch):
     assert await llm_tier.apply_pending(sm) == 0
 
 
-async def test_gold_labels_keep_their_fetch_when_a_page_is_derived_again(app, monkeypatch):
-    from pos_coordinator.models import GoldLabel
-
-    sm, store = app.state.sessionmaker, app.state.rawstore
+def _priced_page():
+    """A page whose price the structured data gives (an offer before any answer);
+    the sizes are left to the LLM."""
     page = _page()
     page["snippets"]["price_blocks"] = []
     offer = {"price": "1299", "priceCurrency": "EUR"}
     page["snippets"]["json_ld"] = [
         json.dumps({"@type": "Product", "name": "Eichenregal", "offers": offer})
     ]
-    fid = await _fetch(sm, store, page, "https://holz.example/regal", "holz")
+    return page
+
+
+async def test_a_missing_blob_never_replaces_derived_rows_with_nothing(app, monkeypatch):
+    sm, store = app.state.sessionmaker, app.state.rawstore
+    await _fetch(sm, store, _priced_page(), "https://holz.example/regal", "holz")
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    fake = FakeClient()
+    llm = LlmService(sm, lambda: fake)
+    assert await llm_tier.schedule(sm, llm, store) == {"llm_extractions_queued": 1}  # sizes
+    (bid,) = fake.batches
+    fake.batches[bid]["status"] = "ended"
+    fake.batches[bid]["results"] = [_answer("0", json.dumps(ANSWER))]
+    # a partial restore: the store is there, this fetch's blob is not
+    monkeypatch.setattr(store, "exists", lambda kind, sha: False)
+    assert await llm.poll_batches() == 1
+    async with sm() as s:
+        (o,) = (await s.execute(select(Offer))).scalars().all()  # still there
+        assert float(o.price) == 1299
+        assert (await s.execute(select(Measurement))).scalars().all() == []
+        row = (await s.execute(select(LlmExtraction))).scalar_one()
+        assert row.status == "ok" and row.applied_at is None and row.apply_tried_at
+    monkeypatch.undo()
+    assert await llm_tier.apply_pending(sm) == 0  # tried again only after a while
+    async with sm() as s:
+        row = (await s.execute(select(LlmExtraction))).scalar_one()
+        row.apply_tried_at -= llm_tier.RETRY_AFTER + timedelta(seconds=1)
+        await s.commit()
+    assert await llm_tier.apply_pending(sm) == 1
+    async with sm() as s:
+        (o,) = (await s.execute(select(Offer))).scalars().all()
+        assert float(o.price) == 1299
+        assert (await s.execute(select(Measurement))).scalars().all()  # from the answer
+        assert (await s.execute(select(LlmExtraction))).scalar_one().applied_at is not None
+
+
+async def test_gold_labels_keep_their_fetch_when_a_page_is_derived_again(app, monkeypatch):
+    from pos_coordinator.models import GoldLabel
+
+    sm, store = app.state.sessionmaker, app.state.rawstore
+    fid = await _fetch(sm, store, _priced_page(), "https://holz.example/regal", "holz")
     await stage.run_until_caught_up(sm, store, settle=NOW)
     async with sm() as s:
         (o,) = (await s.execute(select(Offer))).scalars().all()

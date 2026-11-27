@@ -347,7 +347,11 @@ copies the price as written and the size and weight lines with their labels; the
 same parsers as for every other tier turn them into numbers. Its answer only fills
 what was missing, with method `llm`. Answers are stored per raw fetch
 (`llm_extraction`, kept across rebuilds), and the page is derived again when its
-answer arrives.
+answer arrives. If the raw store is away at that point, the answer waits and is
+applied as soon as the store is back. If the page's evidence is missing from the
+store (a partial restore), the page keeps what it has and the answer is tried
+again every 10 minutes (`applied_at` stays empty, `apply_tried_at` shows the last
+try).
 
 ### Price checks
 

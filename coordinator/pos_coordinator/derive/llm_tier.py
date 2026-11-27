@@ -11,7 +11,7 @@ answers without asking again (the table is kept, like the ledger).
 import asyncio
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -39,6 +39,9 @@ log = logging.getLogger(__name__)
 STAGE = "llm_extract"
 PROMPT = llm_page.PROMPT_VERSION
 MAX_RUNNING_BATCHES = 2
+# an answer whose fetch could not be derived again (evidence missing) is tried again
+# after this; one that waited only for the raw store, as soon as the store is back
+RETRY_AFTER = timedelta(minutes=10)
 
 SYSTEM = """\
 You read product pages of online shops (as condensed text) and copy out what a \
@@ -130,9 +133,18 @@ async def schedule(
         return await _schedule(sm, llm, store)
 
 
+def _waited(row: LlmExtraction) -> None:
+    """An answer that could not be applied: tried again after RETRY_AFTER, behind the
+    others (not when only the raw store was away: then as soon as it is back)."""
+    if _store is not None and _store.available():
+        row.apply_tried_at = datetime.now(UTC)
+
+
 async def apply_pending(sm: async_sessionmaker[AsyncSession], limit: int = 200) -> int:
     """Answers that could not reach the derived layer when they arrived (the raw
-    store was away): their fetches are derived again now. Returns how many."""
+    store was away, or the fetch's evidence missing from it): their fetches are
+    derived again now. One that has to wait again is tried after RETRY_AFTER, behind
+    the others. Returns how many were applied."""
     if _store is None or not _store.available():
         return 0
     async with sm() as s:
@@ -144,8 +156,15 @@ async def apply_pending(sm: async_sessionmaker[AsyncSession], limit: int = 200) 
                         LlmExtraction.status == "ok",
                         LlmExtraction.applied_at.is_(None),
                         LlmExtraction.prompt_version == PROMPT,
+                        or_(
+                            LlmExtraction.apply_tried_at.is_(None),
+                            LlmExtraction.apply_tried_at < func.now() - RETRY_AFTER,
+                        ),
                     )
-                    .order_by(LlmExtraction.answered_at)
+                    .order_by(
+                        LlmExtraction.apply_tried_at.asc().nulls_first(),
+                        LlmExtraction.answered_at,
+                    )
                     .limit(limit)
                 )
             )
@@ -161,6 +180,8 @@ async def apply_pending(sm: async_sessionmaker[AsyncSession], limit: int = 200) 
             if await rederive(s, row.fetch_id):
                 row.applied_at = datetime.now(UTC)
                 done += 1
+            else:
+                _waited(row)
             await s.commit()
     return done
 
@@ -253,7 +274,8 @@ async def handle(session: AsyncSession, outcome: service.Outcome) -> None:
         row.applied_at = row.answered_at  # nothing to add to the derived layer
     elif await rederive(session, fetch_id):
         row.applied_at = datetime.now(UTC)
-    # else: applied later, by apply_pending() or when the derive stage reaches it
+    else:
+        _waited(row)  # applied later: by apply_pending(), or when the derive stage reaches it
 
 
 async def rederive(session: AsyncSession, fetch_id: uuid.UUID) -> bool:
@@ -261,7 +283,13 @@ async def rederive(session: AsyncSession, fetch_id: uuid.UUID) -> bool:
     fetch the derive stage has passed: one it has not reached yet is derived later
     anyway, with the answer. Returns whether it ran."""
     from pos_coordinator.derive.fx import RateCache
-    from pos_coordinator.derive.stage import BatchReport, _canonical_prices, _cursor, _derive_one
+    from pos_coordinator.derive.stage import (
+        BatchReport,
+        _canonical_prices,
+        _cursor,
+        _load,
+        derive_evidence,
+    )
 
     if _store is None or not _store.available():
         log.warning("LLM extraction of %s stored; re-derive waits for the raw store", fetch_id)
@@ -273,6 +301,15 @@ async def rederive(session: AsyncSession, fetch_id: uuid.UUID) -> bool:
         return False
     cur = await _cursor(session)  # also holds the derive loop off meanwhile
     if cur.last_received_at is None or (f.received_at, f.id) > (cur.last_received_at, cur.last_id):
+        return False
+    # the evidence first: what is derived now is replaced only by what it derives again
+    try:
+        evidence = await asyncio.to_thread(_load, _store, f.blob_sha256) if f.blob_sha256 else None
+    except Exception:
+        log.exception("evidence of %s unreadable", fetch_id)
+        evidence = None
+    if evidence is None:
+        log.warning("evidence of %s not in the raw store; its LLM extraction waits", fetch_id)
         return False
     old = (
         await session.execute(select(Offer.id, Offer.product_id).where(Offer.fetch_id == f.id))
@@ -299,7 +336,7 @@ async def rederive(session: AsyncSession, fetch_id: uuid.UUID) -> bool:
     )
     if offer_ids:
         await session.execute(delete(Offer).where(Offer.id.in_(offer_ids)))
-    touched = await _derive_one(session, _store, f, RateCache(session), BatchReport())
+    touched = await derive_evidence(session, f, evidence, RateCache(session), BatchReport())
     await _canonical_prices(session, {p for p in touched | old_products if p is not None})
     return True
 
