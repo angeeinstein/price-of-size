@@ -49,6 +49,10 @@ PACK = [
 ]
 
 
+# availability that keeps an offer's price out of the product's price
+UNAVAILABLE = ("out_of_stock", "discontinued")
+
+
 def price_flags(offer: OfferCandidate) -> list[str]:
     flags = []
     p = offer.price
@@ -56,7 +60,7 @@ def price_flags(offer: OfferCandidate) -> list[str]:
         flags.append("no_price")
     elif p < 0 or p in PLACEHOLDERS or NINES.match(f"{p:.2f}"):
         flags.append("placeholder_price")
-    if offer.availability in ("out_of_stock", "discontinued"):
+    if offer.availability in UNAVAILABLE:
         flags.append("unavailable")
     if offer.price_kind == "unit_price":
         flags.append("unit_price")

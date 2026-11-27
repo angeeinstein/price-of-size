@@ -250,10 +250,12 @@ async def _derive_one(session, store: RawStore, f: RawFetch, fx: RateCache, repo
     if evidence is None:
         report.missing_blobs += 1
         return set()
-    return await derive_evidence(session, f, evidence, fx, report)
+    return await derive_evidence(session, store, f, evidence, fx, report)
 
 
-async def derive_evidence(session, f: RawFetch, evidence: Any, fx: RateCache, report) -> set:
+async def derive_evidence(
+    session, store: RawStore, f: RawFetch, evidence: Any, fx: RateCache, report
+) -> set:
     """_derive_one with the fetch's evidence already loaded."""
     if not isinstance(evidence, dict):
         return set()
@@ -268,9 +270,10 @@ async def derive_evidence(session, f: RawFetch, evidence: Any, fx: RateCache, re
         return set()  # robots.txt or sitemap evidence: nothing to derive
     ex = await asyncio.to_thread(extract_evidence, evidence)
     if f.mode in ("http", "browser"):
-        from pos_coordinator.derive import llm_tier
+        from pos_coordinator.derive import llm_tier, site_parsers
 
         lang = ((evidence.get("snippets") or {}).get("lang") or "")[:2].lower() or None
+        await site_parsers.merge(session, store, f, ex, lang)  # tier 2: the site's parser
         await llm_tier.merge(session, f, ex, lang)  # tier 4: an answer, or a request for one
     pid = await _write(session, f, ex, fx, report)
     return {pid} if pid is not None else set()

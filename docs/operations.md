@@ -354,6 +354,41 @@ again every 10 minutes (`applied_at` stays empty, `tried_at` shows the last
 try). A page whose evidence is missing when its request is due waits the same way,
 behind the others.
 
+### Per-site parsers (tier 2)
+
+Once the LLM tier has read `parser_min_pages` (12) product pages of a shop with the
+full HTML archived (distinct URLs: a page fetched again counts once), the
+`parser_generation` model (Sonnet) writes a parser for the shop. The parser is declarative: CSS selectors, optionally with an attribute and a
+short regular expression, for title, price, breadcrumbs and size lines. The model
+sees 5 of the pages as compact HTML, with what the LLM tier found on each. The
+parser is then run on up to 15 further pages. A page passes when the parser finds
+every price and size the LLM found there, and no price or size the LLM did not
+find. With a score of at least
+`parser_min_score` (0.8) it becomes the shop's active parser, unless
+`parser_auto_activate` is off. From then on the derive stage reads that shop's
+pages with it, without the LLM (except a page the LLM already found is no product
+page, such as a category).
+
+Pages the parser cannot fill still go to the LLM tier. When enough of them have
+gathered, a new version is generated. A version that fails its check is kept,
+inactive, and the shop is not tried again for a week. The new version learns from,
+and is checked on, only the pages the current one left to the LLM: the ones a
+changed template broke. Specs are untrusted input: size limits, compiled
+selectors, no code. Regular expressions are checked by their structure (no
+repetition or alternation inside repetition, no back-references) and run with a
+50 ms limit per match. On the held-out pages, a price's currency must match the
+LLM's, and so must whether the product is unavailable (out of stock,
+discontinued: such a price never counts) and whether the item is not new (used,
+refurbished, damaged: flagged); a size must match in basis (product or package)
+and net or gross. One version per shop is active: activation takes a lock per
+shop, and the database refuses a second active version. A bare "$" or
+"kr" is the shop's default currency when that uses the symbol. A page whose price
+the LLM read as a unit, monthly, net or "from" price never passes (a parser reads
+item prices only). A shop with such pages among the checked ones gets no automatic
+activation: a person activates its parser after a test run. Panel: Parsers lists every version with its check. *Test* runs a version on
+the shop's latest archived pages, beside the LLM's answers. Activating or
+deactivating needs a recent sign-in. Switch: `site_parsers`.
+
 ### Price checks
 
 Beyond the checks on each product's own offers (other shops, earlier visits), the

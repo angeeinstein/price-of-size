@@ -172,6 +172,10 @@ pos-coordinator fx-refresh        # ECB reference rates (also fetched daily)
 - [x] LLM review of flagged offers (`validity/review.py`, table `price_review`): a
       rejection takes the offer out of the canonical price; panel: Price checks
 - [ ] Tier 2 (microdata/RDFa)
+- [x] Per-site declarative parsers (`pos_shared/extract/site_parser.py`,
+      `derive/site_parsers.py`): written by the LLM from pages the LLM tier read,
+      checked on held-out pages, active per domain, run in the derive stage on the
+      archived HTML; panel: Parsers (versions, test run, activate)
 - [x] Tier 4: LLM extraction of pages without price or sizes (`derive/llm_tier.py`,
       `pos_shared/extract/llm_page.py`): the LLM copies price and size lines, the
       usual parsers read them; answers kept per fetch (`llm_extraction`) across rebuilds

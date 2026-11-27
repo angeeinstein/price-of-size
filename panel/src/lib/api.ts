@@ -124,3 +124,15 @@ export type PriceChecks = {
     flags: string[]; verdict: string; confidence: number | null; reason: string | null;
     version: string; at: string }[];
 };
+
+export type ParserRow = { id: string; domain: string; version: number; kind: string; active: boolean;
+  validation_score: number | null; held_out: [number, number] | null; train: [number, number] | null;
+  qualified_prices: number; error: string | null; created_by: string | null; created_at: string };
+
+export type ParserTestRun = { url: string; fetched_at: string; passes: boolean | null;
+  found: { title: string | null; price: string | null; currency: string | null;
+    availability: string | null; condition: string | null; category_path: string[];
+    sizes: { label: string; value: string }[] };
+  llm: { price_text: string | null; currency?: string | null; price_kind?: string | null;
+    availability?: string | null; condition?: string | null;
+    sizes?: { label: string; value: string }[] } | null };

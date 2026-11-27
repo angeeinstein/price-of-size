@@ -8,6 +8,8 @@ dependencies = [
     "cryptography>=43",
     "lxml>=5.3",
     "numpy>=2.5.5",
+    "cssselect>=1.2",
+    "regex>=2024.11.6",
 ]
 
 [build-system]

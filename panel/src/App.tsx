@@ -10,6 +10,7 @@ import { JobsPage } from "@/pages/Jobs";
 import { LoginPage } from "@/pages/Login";
 import { NodesPage } from "@/pages/Nodes";
 import { OverviewPage } from "@/pages/Overview";
+import { ParsersPage } from "@/pages/Parsers";
 import { PricesPage } from "@/pages/Prices";
 import { ReleasesPage } from "@/pages/Releases";
 import { SettingsPage } from "@/pages/Settings";
@@ -31,6 +32,7 @@ function Gate() {
           <Route path="/sources" element={<SourcesPage />} />
           <Route path="/categories" element={<CategoriesPage />} />
           <Route path="/prices" element={<PricesPage />} />
+          <Route path="/parsers" element={<ParsersPage />} />
           <Route path="/explorer" element={<ExplorerPage />} />
           <Route path="/releases" element={<ReleasesPage />} />
           <Route path="/settings" element={<SettingsPage />} />

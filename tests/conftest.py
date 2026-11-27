@@ -131,11 +131,14 @@ def _reset_embedding_recheck():
 @pytest.fixture(autouse=True)
 def _reset_classifier_caches():
     from pos_coordinator.classify import common, knn, proposals
+    from pos_coordinator.derive import site_parsers
 
     common._nodes = knn._examples = None
     proposals._last_run = 0.0
+    site_parsers.forget()
     yield
     common._nodes = knn._examples = None
+    site_parsers.forget()
 
 
 @pytest.fixture(autouse=True)
