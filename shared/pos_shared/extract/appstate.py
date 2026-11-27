@@ -18,7 +18,32 @@ from typing import Any
 from pos_shared import units
 from pos_shared.extract import spectext
 
-PACKAGE_PATH = re.compile(r"package|packaging|shipping|carton|parcel|box|verpackung|paket", re.I)
+_PACKAGE_WORDS = r"packages?|packaging|shipping|cartons?|parcels?|box(?:es)?|verpackung|pakete?"
+_BOX_WORDS = r"packages?|packaging|cartons?|parcels?|box(?:es)?|verpackung|pakete?"
+
+
+def _words(segment: str) -> list[str]:
+    split = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", segment)
+    return [w.lower() for w in re.split(r"[^A-Za-z0-9äöüÄÖÜß]+", split) if w]
+
+
+def _named(segment: str, words: str) -> bool:
+    """The segment's first or last word names it ("packageMeasurements", "shippingBox",
+    "verpackungsmasse"); a word in the middle does not ("catalogBoxSlim")."""
+    w = _words(segment)
+    return bool(w) and bool(re.match(words, w[0]) or re.fullmatch(words, w[-1]))
+
+
+def is_package_segment(segment: str) -> bool:
+    return _named(segment, _PACKAGE_WORDS)
+
+
+def is_box_list_segment(segment: str) -> bool:
+    """A list whose entries are boxes ("packages", "packageMeasurements"), not shipping
+    options or methods."""
+    return _named(segment, _BOX_WORDS)
+
+
 # Blocks of other products than the page's own.
 RELATED_PATH = re.compile(
     r"recommend|related|similar|suggest|accessor|cross_?sell|upsell|also_?(bought|viewed)|"
@@ -121,7 +146,7 @@ def package_root(path: str) -> str | None:
     box, "p.packageMeasurements[0]" and "p.packageMeasurements[1]" two. None: not a
     package."""
     tokens = _TOKEN.findall(path)
-    named = [i for i, t in enumerate(tokens) if not t.startswith("[") and PACKAGE_PATH.search(t)]
+    named = [i for i, t in enumerate(tokens) if not t.startswith("[") and is_package_segment(t)]
     if not named:
         return None
     end = named[-1]
@@ -141,39 +166,65 @@ def _owner(item: dict) -> str:
     tokens = _TOKEN.findall(item.get("path", ""))
     end = None
     for i, t in enumerate(tokens):
-        if not t.startswith("[") and PACKAGE_PATH.search(t):
+        if not t.startswith("[") and is_package_segment(t):
             break  # indexes below the package are its boxes, not products
         if t.startswith("[") and i and PRODUCT_LIST.search(tokens[i - 1]):
             end = i
     return _join(tokens[: end + 1]) if end is not None else ""
 
 
+# Shop item numbers are the shop's SKU under another name.
+_SKU_KEYS = {"sku", "itemno", "itemnumber", "articlenumber", "articleno", "artnr",
+             "productnumber", "productid"}  # fmt: skip
+
+
+def _kind(key: str) -> str:
+    if key.startswith("gtin") or key == "ean":
+        return "gtin"
+    return "sku" if key in _SKU_KEYS else key
+
+
 def _canon(key: str, value: str) -> str:
+    """Comparable form: GTINs as digits without leading zeros, SKUs and MPNs without
+    case and separators ("202.133.12" is item 20213312)."""
     v = value.strip().lower()
-    return re.sub(r"\D", "", v).lstrip("0") if key.startswith("gtin") or key == "ean" else v
+    if _kind(key) == "gtin":
+        return re.sub(r"\D", "", v).lstrip("0")
+    return re.sub(r"[\s._/-]", "", v)
 
 
 def _matches(item: dict, main: dict[str, str | None]) -> bool:
     ids = (item.get("owner") or {}).get("ids") or {}
     if not isinstance(ids, dict):
         return False
-    wanted = {k: _canon(k, v) for k, v in main.items() if isinstance(v, str) and v.strip()}
-    for k, v in ids.items():
-        if not isinstance(v, str):
-            continue
-        kind = "gtin" if k.startswith("gtin") or k == "ean" else k
-        if kind in wanted and wanted[kind] and _canon(kind, v) == wanted[kind]:
-            return True
-    return False
+    wanted: dict[str, set[str]] = {}
+    for k, v in main.items():
+        if isinstance(v, str) and _canon(k, v):
+            # a JSON-LD mpn is often the shop's item number too
+            for kind in {_kind(k), "sku"} if k == "mpn" else {_kind(k)}:
+                wanted.setdefault(kind, set()).add(_canon(k, v))
+    return any(
+        isinstance(v, str) and _canon(k, v) in wanted.get(_kind(k), set()) for k, v in ids.items()
+    )
 
 
 def _related(path: str) -> bool:
     return any(RELATED_PATH.search(t) for t in _TOKEN.findall(path) if not t.startswith("["))
 
 
+def _owner_key(item: dict, owner_path: str) -> str:
+    """One product described twice (IKEA: in the page state and in a component's
+    props) has one key: its identifiers. Without any, its path."""
+    ids = (item.get("owner") or {}).get("ids") or {}
+    strong = {k: v for k, v in ids.items() if k not in ("name", "title", "id")} or ids
+    if isinstance(strong, dict) and strong:
+        return "ids:" + "|".join(f"{k}={_canon(k, str(v))}" for k, v in sorted(strong.items()))
+    return owner_path
+
+
 def main_product(state: list[dict], main: dict[str, str | None] | None = None) -> list[dict]:
     """The nodes of the page's own product (see the module docstring)."""
-    groups: dict[str, list[dict]] = {}
+    items = []
     for it in state:
         if not isinstance(it, dict) or not isinstance(it.get("node"), dict):
             continue
@@ -182,18 +233,43 @@ def main_product(state: list[dict], main: dict[str, str | None] | None = None) -
         # identifiers, which would otherwise count as the page's own).
         if _related(it.get("path", "")[len(owner) :]):
             continue
-        groups.setdefault(owner, []).append(it)
-    matched = [o for o, its in groups.items() if main and any(_matches(it, main) for it in its)]
+        items.append((it, owner, bool(_measures(it["node"]))))
+    # Boxes are known from lists that measure at least one of them; a list that measures
+    # none only describes them ("1 package, item 202.133.12") and is left out. In a list
+    # that does, a box without measurements stays: it stops the package total.
+    measured_lists = {_box_list(it.get("path", "")) for it, _, m in items if m} - {None}
+    groups: dict[str, list[dict]] = {}
+    paths: dict[str, list[str]] = {}
+    for it, owner, measured in items:
+        if measured or _box_list(it.get("path", "")) in measured_lists:
+            key = _owner_key(it, owner)
+            groups.setdefault(key, []).append(it)
+            paths.setdefault(key, []).append(owner)
+    groups = {k: its for k, its in groups.items() if any(_measures(i["node"]) for i in its)}
+    matched = [k for k, its in groups.items() if main and any(_matches(it, main) for it in its)]
     if len(matched) == 1:
         return groups[matched[0]]
-    candidates = [o for o in (matched or groups) if not _related(o)]
+
+    def depth(key: str) -> int:
+        return min(len(_TOKEN.findall(p)) for p in paths[key])
+
+    candidates = [k for k in (matched or groups) if not all(_related(p) for p in paths[k])]
     if not candidates:
         return []
-    depth = min(len(_TOKEN.findall(o)) for o in candidates)
-    top = [o for o in candidates if len(_TOKEN.findall(o)) == depth]
+    top_depth = min(depth(k) for k in candidates)
+    top = [k for k in candidates if depth(k) == top_depth]
     if len(top) != 1:
         return []  # several products side by side: none is the page's for sure
     return groups[top[0]]
+
+
+def _box_list(path: str) -> str | None:
+    """The list a box belongs to ("p.packages" for "p.packages[1].dimensions"), or the
+    package object itself; None outside packages."""
+    root = package_root(path)
+    if root is None:
+        return None
+    return re.sub(r"\[\d+\]$", "", root)
 
 
 def _measures(node: dict) -> dict[str, str]:

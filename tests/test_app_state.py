@@ -265,3 +265,67 @@ def test_a_capture_cut_short_gives_no_package_total():
     assert not any(it.get("truncated") for it in snip["app_state"])
     pkg = next(m for m in ex.measurements if m.basis == "package")
     assert pkg.mass_kg == pytest.approx(30)
+
+
+def test_a_box_without_a_weight_stops_the_total():
+    boxes = [{"weight": "10 kg"}, {"weight": "2 kg"}, {"dimensions": "100 x 50 x 20 cm"}]
+    snip, ex = _extract({"product": {"packages": boxes}})
+    assert [n["path"] for n in snip["app_state"]] == [f"product.packages[{i}]" for i in range(3)]
+    assert not [m for m in ex.measurements if m.basis == "package"]
+    # also a box that names no size at all
+    boxes[2] = {"itemNumber": "A-3", "info": {"label": "Kleinteile"}}
+    snip, ex = _extract({"product": {"packages": boxes}})
+    assert len(snip["app_state"]) == 3
+    assert not [m for m in ex.measurements if m.basis == "package"]
+
+
+def test_one_product_described_in_several_places():
+    """The shape of a real shop page: the box measured in one place, listed without
+    measurements in two others, the same item number under two owners, and a UI
+    config list whose name contains "Box"."""
+    described = {"name": "Regal", "itemNo": "20213312", "quantity": {"label": "Pakete", "value": 1}}
+    state = {
+        "0": {
+            "config": {"catalogBoxSlim": [{"id": f"c{i}", "name": "Kategorie"} for i in range(30)]},
+            "pageProps": {
+                "product": {
+                    "itemNo": "20213312",
+                    "name": "Regal",
+                    "packaging": {"packages": [described]},
+                },
+                "infoProps": {"packaging": {"contentProps": {"packages": [described]}}},
+            },
+        },
+        "1": {
+            "product": {
+                "itemNo": "20213312",
+                "name": "Regal",
+                "packageMeasurements": [_box(202, 39, 9, 27.56)],
+            }
+        },
+    }
+    html = _page(state).replace('"name": "Regal', '"sku": "202.133.12", "name": "Regal', 1)
+    snip = snippets.capture(html, "https://shop.example/p/10")
+    assert not any("catalogBox" in n.get("path", "") for n in snip["app_state"])
+    assert not any(n.get("truncated") for n in snip["app_state"])
+    ex = extract_evidence({"status": 200, "verdict": {"kind": "ok"}, "snippets": snip})
+    pkg = next(m for m in ex.measurements if m.basis == "package")
+    assert (pkg.a_m, pkg.b_m, pkg.c_m, pkg.mass_kg) == pytest.approx((2.02, 0.39, 0.09, 27.56))
+
+
+@pytest.mark.parametrize(
+    ("segment", "package"),
+    [
+        ("packageMeasurements", True),
+        ("packages", True),
+        ("shippingBox", True),
+        ("Verpackungsmasse", True),
+        ("catalogBoxSlim", False),
+        ("inboxCount", False),
+        ("product", False),
+    ],
+)
+def test_package_segments(segment, package):
+    from pos_shared.extract import appstate
+
+    assert appstate.is_package_segment(segment) is package

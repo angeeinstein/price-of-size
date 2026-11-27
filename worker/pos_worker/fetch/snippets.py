@@ -14,7 +14,7 @@ from typing import Any
 
 from lxml import etree, html
 
-from pos_shared.extract.appstate import PACKAGE_PATH
+from pos_shared.extract.appstate import is_box_list_segment, is_package_segment
 
 SNIPPETS_VERSION = "2"
 
@@ -229,7 +229,13 @@ def _inside_package(path: str, owner) -> bool:
     """A box with its own item number belongs to the product around it, not to itself
     (a product with SKU A shipped in two numbered boxes is one product)."""
     below = path[len(owner["path"]) :] if owner else path
-    return any(PACKAGE_PATH.search(seg) for seg in re.split(r"[.\[\]]+", below) if seg)
+    return any(is_package_segment(seg) for seg in re.split(r"[.\[\]]+", below) if seg)
+
+
+def _box_entry(path: str) -> bool:
+    """An entry of a list of boxes ("product.packages[2]")."""
+    m = re.search(r"([^.\[\]]+)\[\d+\]$", path)
+    return bool(m and is_box_list_segment(m.group(1)))
 
 
 def _state_nodes(obj, path: str, found: list, meta: dict, depth: int = 0, owner=None) -> None:
@@ -247,9 +253,18 @@ def _state_nodes(obj, path: str, found: list, meta: dict, depth: int = 0, owner=
         ids = _owner_ids(obj)
         if ids and not _inside_package(path, owner):
             owner = {"path": path, "ids": ids}
-        if len(keys & SIZE_KEYS) >= 2 or ({"weight", "netweight", "grossweight"} & keys):
+        sized = len(keys & SIZE_KEYS)
+        box_entry = _box_entry(path)
+        if (
+            sized >= 2
+            or {"weight", "netweight", "grossweight"} & keys
+            or (sized and _inside_package(path, None))
+            or box_entry
+        ):
+            # Inside a package every box counts, also one with only "dimensions" or no
+            # size at all: a box without a known weight must stop a total, not vanish.
             node = _compact(obj)
-            if not node:
+            if not node and not box_entry:
                 pass
             elif len(found) >= MAX_STATE_NODES or (
                 len(json.dumps(node, default=str)) > MAX_STATE_NODE_CHARS
