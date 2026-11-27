@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pos_shared.extract import EXTRACT_VERSION, appstate, jsonld, price_rules, spectext
+from pos_shared.extract import EXTRACT_VERSION, appstate, jsonld, price_rules, spectext, wikidata
 from pos_shared.extract.model import Extraction
 
 
@@ -33,3 +33,16 @@ def extract_evidence(evidence: dict[str, Any]) -> Extraction:
     if verdict and verdict != "ok":
         ex.flags.append(f"fetch_{verdict}")
     return ex
+
+
+def api_records(evidence: dict[str, Any]) -> list[wikidata.Record]:
+    """Records of an API response (`evidence["api"]`), by adapter; unknown adapters
+    give none (their raw responses stay, a later version can read them)."""
+    api = evidence.get("api") or {}
+    if (evidence.get("status") or 0) != 200 or not isinstance(api, dict):
+        return []
+    if api.get("adapter") == wikidata.ADAPTER:
+        params = api.get("params") if isinstance(api.get("params"), dict) else {}
+        label = params.get("class_label") or params.get("class")
+        return wikidata.records(api, label if isinstance(label, str) else None)
+    return []

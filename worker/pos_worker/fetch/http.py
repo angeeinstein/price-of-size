@@ -235,13 +235,18 @@ class _Decoder:
 
 
 async def _get(
-    client: httpx.AsyncClient, url: str, res: Response, max_bytes: int, follow: bool
+    client: httpx.AsyncClient,
+    url: str,
+    res: Response,
+    max_bytes: int,
+    follow: bool,
+    headers: dict[str, str] | None = None,
 ) -> None:
     for _ in range(MAX_REDIRECTS + 1):
         if urlsplit(url).scheme not in ("http", "https"):
             res.error = "bad_url"
             return
-        async with client.stream("GET", url) as r:
+        async with client.stream("GET", url, headers=headers) as r:
             res.status = r.status_code
             res.final_url = str(r.url)
             res.headers = {k.lower(): v for k, v in r.headers.items() if k.lower() in KEEP_HEADERS}
@@ -275,6 +280,7 @@ async def fetch(
     max_bytes: int = MAX_BODY_BYTES,
     total_timeout_s: float = TOTAL_TIMEOUT_S,
     follow_redirects: bool = False,
+    headers: dict[str, str] | None = None,
 ) -> Response:
     """`follow_redirects`: robots.txt only (RFC 9309 follows its redirects, also to
     www. or a CDN); every hop still passes the address check."""
@@ -282,7 +288,7 @@ async def fetch(
     res = Response(url=url)
     try:
         async with asyncio.timeout(total_timeout_s):
-            await _get(client, url, res, max_bytes, follow_redirects)
+            await _get(client, url, res, max_bytes, follow_redirects, headers)
     except (TimeoutError, httpx.TimeoutException):
         res.error = "timeout"
     except BadEncoding:

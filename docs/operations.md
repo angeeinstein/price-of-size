@@ -235,6 +235,46 @@ For a domain whose robots.txt is not known yet, `discover` queues robots.txt
 none. Sitemaps and pages fetched recently are not queued again, so `discover`
 can be run as often as wanted.
 
+### API sources: Wikidata
+
+The upper end of the size range (aircraft, ships, spacecraft, bridges, buildings)
+comes from Wikidata's query service: an `api` source with one SPARQL query per
+class, paged, each response stored as raw evidence and read into one product per
+item (cost or price with its currency and the date it refers to; mass, length,
+width, height, diameter, normalised to kg and m by Wikidata).
+
+```bash
+curl -X PUT https://pos.example.org/api/admin/sources/wikidata -H "Authorization: Bearer $POS_ADMIN_TOKEN" \
+  -H 'content-type: application/json' -d '{"type": "api", "config": {
+    "adapter": "wikidata", "page_size": 1000,
+    "classes": [
+      {"id": "Q15056995", "label": "aircraft model"},
+      {"id": "Q11446", "label": "ship"},
+      {"id": "Q40218", "label": "spacecraft"},
+      {"id": "Q26540", "label": "artificial satellite"},
+      {"id": "Q12280", "label": "bridge"},
+      {"id": "Q29048322", "label": "vehicle model"},
+      {"id": "Q41176", "label": "building", "subclasses": false}]}}'
+curl -X POST https://pos.example.org/api/admin/sources/wikidata/discover -H "Authorization: Bearer $POS_ADMIN_TOKEN"
+```
+
+* A class includes its subclasses unless `"subclasses": false`; very broad classes
+  (buildings) exceed the query service's 60 s limit with them and fail as errors.
+  Only items that have a cost (P2130) or price (P2284) are queried: a few hundred
+  per class.
+* API jobs are rate-limited and back off like pages, but robots.txt does not apply
+  to them: query.wikidata.org disallows `/sparql` for crawlers that would follow
+  query links, while the query service itself is meant for programs. Its
+  User-Agent policy asks for a contact: set `user_agent` to something like
+  `PriceOfSizeBot/0.1 (https://example.org/bot; bot@example.org)`.
+* Costs are nominal. The newest cost of an item is its price; older ones are kept
+  (`older_cost`). A cost converts to EUR at the ECB rate of the date it refers to
+  (its `point in time`, else the item's inception, first flight, launch or service
+  entry, noted in the offer's `fields.price.as_of_method`). Costs before 1999 or in
+  historical currencies (gold mark) have no reference rate and stay without a EUR
+  value (`no_fx_rate`, `no_currency`) until an inflation stage exists.
+* `endpoint` points the source at a mirror or a self-hosted query service.
+
 Exchange rates: the ECB reference rates are fetched daily. An offer in another
 currency that arrives before its rate is stored with `no_fx_rate` and converted
 (and its product's price recomputed) once the rate is there;

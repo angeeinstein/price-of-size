@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 
 from pos_coordinator import partitions, queue, runtime_settings, txn
 from pos_coordinator.api.deps import CurrentNode, Session, check_api_version
-from pos_coordinator.crawl import discovery, feedback, scheduler
+from pos_coordinator.crawl import apisources, discovery, feedback, scheduler
 from pos_coordinator.models import Job, RawObject
 from pos_shared import api
 
@@ -135,6 +135,7 @@ async def results(body: api.ResultBatch, request: Request, node: CurrentNode, se
             stored = [r for r in results if r.job_id in applied]
             await feedback.apply(session, node, applied, stored, cfg)
             await discovery.process_results(session, applied, stored, request.app.state.rawstore)
+            await apisources.process_results(session, applied, stored)
         return api.ResultAck(accepted=accepted, rejected=rejected)
 
     return await txn.run(session, work, refresh=[node])
