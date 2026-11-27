@@ -164,3 +164,21 @@ async def test_revoked_nodes_jobs_return_to_queue(http, admin, sessionmaker):
     assert stats == [{"type": "noop", "status": "queued", "count": 3}]
     async with sessionmaker() as s:
         assert (await s.execute(select(Node.revoked_at))).scalar_one() is not None
+
+
+async def test_enrollment_retry_after_lost_response_returns_the_same_node(http, admin):
+    """Codex finding: enrollment committed but the response was lost; retrying with
+    the same code and key must recover the node instead of stranding it."""
+    code = await new_enrollment_code(admin)
+    _, pub = keypair()
+    body = {"enrollment_code": code, "public_key": pub, "name": "t", "version": "0.1.0"}
+    first = await http.post("/api/v1/nodes/enroll", json=body)
+    retry = await http.post("/api/v1/nodes/enroll", json=body)
+    assert first.status_code == retry.status_code == 200
+    assert first.json()["node_id"] == retry.json()["node_id"]
+    assert len((await admin.get("/api/admin/nodes")).json()) == 1
+
+    # ...but the used code still cannot enroll a different key
+    _, other = keypair()
+    r = await http.post("/api/v1/nodes/enroll", json={**body, "public_key": other})
+    assert r.status_code == 403

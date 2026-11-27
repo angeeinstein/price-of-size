@@ -42,20 +42,24 @@ async def enroll(
     code = (
         await session.execute(
             select(EnrollmentCode)
-            .where(
-                EnrollmentCode.code_hash == hash_secret(normalize_code(body.enrollment_code)),
-                EnrollmentCode.used_at.is_(None),
-                EnrollmentCode.expires_at > func.now(),
-            )
+            .where(EnrollmentCode.code_hash == hash_secret(normalize_code(body.enrollment_code)))
             .with_for_update()
         )
     ).scalar_one_or_none()
-    if code is None:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "invalid, used or expired enrollment code")
-
     existing = (
         await session.execute(select(Node).where(Node.public_key == public_key))
     ).scalar_one_or_none()
+    rejected = HTTPException(status.HTTP_403_FORBIDDEN, "invalid, used or expired enrollment code")
+    if code is None:
+        raise rejected
+    if code.used_at is not None:
+        # A retry after a lost response: the same code with the same key gets the
+        # node it already created, so a node never ends up stranded.
+        if existing is not None and code.used_by_node_id == existing.id:
+            return api.EnrollResponse(node_id=existing.id, coordinator_api_version=API_VERSION)
+        raise rejected
+    if code.expires_at <= datetime.now(UTC):
+        raise rejected
     if existing is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "public key already enrolled")
 
