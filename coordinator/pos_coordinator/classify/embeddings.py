@@ -16,7 +16,7 @@ import logging
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -79,50 +79,74 @@ async def _node_items(session: AsyncSession, limit: int) -> list[dict[str, str]]
     return out
 
 
+# Products that have a vector are re-checked for a changed text a slice at a time,
+# going round the whole catalogue (from the start again after a restart).
+RECHECK_SLICE = 5_000
+_recheck_after: uuid.UUID | None = None
+
+
 async def _product_items(session: AsyncSession, limit: int) -> list[dict[str, str]]:
+    """Products without a vector first; then a slice of those with one, whose text
+    may have changed since."""
+    global _recheck_after
+    out = await _product_slice(session, limit, missing=True)
+    if len(out) < limit:
+        start = _recheck_after
+        found, last, full = await _product_slice(
+            session, limit - len(out), missing=False, after=start, with_cursor=True
+        )
+        out += found
+        # a short slice reached the end of the catalogue: round again from the start
+        _recheck_after = last if full else None
+    return out
+
+
+async def _product_slice(
+    session: AsyncSession,
+    limit: int,
+    missing: bool,
+    after: uuid.UUID | None = None,
+    with_cursor: bool = False,
+) -> Any:
     # the product's own measurement (else any): sizes help tell a shelf from a bookcase
     m = (
-        select(
-            Measurement.product_id,
-            Measurement.a_m,
-            Measurement.b_m,
-            Measurement.c_m,
-            Measurement.mass_kg,
-            func.row_number()
-            .over(
-                partition_by=Measurement.product_id,
-                order_by=[(Measurement.basis == "product").desc(), Measurement.id],
-            )
-            .label("rn"),
-        )
-        .where(func.cardinality(Measurement.flags) == 0)  # only clean measurements
-        .subquery()
+        select(Measurement.a_m, Measurement.b_m, Measurement.c_m, Measurement.mass_kg)
+        .where(Measurement.product_id == Product.id, func.cardinality(Measurement.flags) == 0)
+        .order_by((Measurement.basis == "product").desc(), Measurement.id)
+        .limit(1)
+        .lateral()
     )
-    rows = (
-        await session.execute(
-            select(
-                Product.id,
-                Product.title,
-                Product.brand,
-                Product.attributes,
-                Embedding.text_hash,
-                m.c.a_m,
-                m.c.b_m,
-                m.c.c_m,
-                m.c.mass_kg,
-            )
-            .outerjoin(
-                Embedding,
-                (Embedding.product_id == Product.id) & (Embedding.model == embedding.MODEL_KEY),
-            )
-            .outerjoin(m, (m.c.product_id == Product.id) & (m.c.rn == 1))
-            .where(Product.title.is_not(None))
-            .order_by(Embedding.text_hash.is_not(None), Product.created_at)
-            .limit(limit * 4)
+    q = (
+        select(
+            Product.id,
+            Product.title,
+            Product.brand,
+            Product.attributes,
+            Embedding.text_hash,
+            m.c.a_m,
+            m.c.b_m,
+            m.c.c_m,
+            m.c.mass_kg,
         )
-    ).all()
+        .outerjoin(
+            Embedding,
+            (Embedding.product_id == Product.id) & (Embedding.model == embedding.MODEL_KEY),
+        )
+        .outerjoin(m, true())
+        .where(Product.title.is_not(None))
+    )
+    if missing:
+        q = q.where(Embedding.text_hash.is_(None)).order_by(Product.created_at, Product.id)
+        q = q.limit(limit * 4)
+    else:
+        q = q.where(Embedding.text_hash.is_not(None)).order_by(Product.id).limit(RECHECK_SLICE)
+        if after is not None:
+            q = q.where(Product.id > after)
+    rows = (await session.execute(q)).all()
     out = []
+    last, filled = None, False
     for pid, title, brand, attrs, have, a, b, c, mass in rows:
+        last = pid
         path = (attrs or {}).get("category_path") if isinstance(attrs, dict) else None
         t = embedding.product_text(
             title, path if isinstance(path, list) else None, (a, b, c), mass, brand
@@ -130,7 +154,10 @@ async def _product_items(session: AsyncSession, limit: int) -> list[dict[str, st
         if have != _hash(t):
             out.append({"id": str(pid), "text": t, "h": _hash(t)})
             if len(out) >= limit:
+                filled = True
                 break
+    if with_cursor:
+        return out, last, filled or len(rows) == RECHECK_SLICE
     return out
 
 

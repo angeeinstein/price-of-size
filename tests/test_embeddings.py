@@ -245,3 +245,29 @@ async def test_embed_jobs_end_to_end(app, admin, sessionmaker, tmp_path, monkeyp
         await task
     async with sessionmaker() as s:
         assert (await s.execute(select(TaxonomyEmbedding))).scalars().all()
+
+
+async def test_changed_texts_are_found_across_the_whole_catalogue(sessionmaker, monkeypatch):
+    monkeypatch.setattr(embeddings, "RECHECK_SLICE", 2)
+    monkeypatch.setattr(embeddings, "_recheck_after", None)
+    vec = np.zeros(embedding.DIM, dtype=np.float32)
+    vec[0] = 1.0
+    async with sessionmaker() as s:
+        products = [
+            Product(match_key=f"url:https://shop.example/{i}", source="shop", title=f"Regal {i}")
+            for i in range(5)
+        ]
+        s.add_all(products)
+        await s.flush()
+        for p in products:
+            t = embedding.product_text(p.title)
+            s.add(Embedding(product_id=p.id, model=embedding.MODEL_KEY, vector=vec,
+                            text_hash=embeddings._hash(t)))  # fmt: skip
+        last = max(products, key=lambda p: p.id)
+        last.title = "Bücherregal"  # changed after it was embedded
+        await s.commit()
+    seen = []
+    async with sessionmaker() as s:
+        for _ in range(4):  # slices of two: the third one reaches it
+            seen += [it["id"] for it in await embeddings._product_items(s, 10)]
+    assert seen.count(str(last.id)) >= 1 and set(seen) == {str(last.id)}
