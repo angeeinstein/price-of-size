@@ -17,7 +17,7 @@ may later also run other roles.
 """
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -26,6 +26,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -36,6 +37,7 @@ from sqlalchemy import (
     PrimaryKeyConstraint,
     SmallInteger,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -290,6 +292,7 @@ class RawFetch(Base):
     __table_args__ = (
         PrimaryKeyConstraint("id", "fetched_at"),
         Index("ix_raw_fetch_url", "url"),
+        Index("ix_raw_fetch_received", "received_at", "id"),  # derive stage cursor
         {"postgresql_partition_by": "RANGE (fetched_at)"},
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
@@ -444,9 +447,36 @@ class TaxonomyNode(Base):
     is_custom: Mapped[bool] = mapped_column(Boolean, server_default="false")
 
 
+class FxRate(Base):
+    """ECB euro reference rates: 1 EUR = rate_per_eur units of currency, per day."""
+
+    __tablename__ = "fx_rate"
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    currency: Mapped[str] = mapped_column(Text, primary_key=True)
+    rate_per_eur: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+
+
+class DeriveCursor(Base):
+    """How far a derive stage got through the raw layer (per stage version)."""
+
+    __tablename__ = "derive_cursor"
+    stage: Mapped[str] = mapped_column(Text, primary_key=True)
+    version: Mapped[str] = mapped_column(Text)
+    last_received_at: Mapped[datetime | None]
+    last_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    processed: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    started_at: Mapped[datetime] = created()
+    updated_at: Mapped[datetime] = created()
+
+
 class Product(Base):
     __tablename__ = "product"
+    __table_args__ = (UniqueConstraint("match_key", name="uq_product_match_key"),)
     id: Mapped[uuid.UUID] = pk()
+    # gtin:<gtin> | bm:<brand>|<mpn> | url:<normalized url>; how offers are grouped
+    match_key: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str | None] = mapped_column(Text)
+    url: Mapped[str | None] = mapped_column(Text)
     gtin: Mapped[str | None] = mapped_column(Text, index=True)
     brand: Mapped[str | None] = mapped_column(Text)
     model: Mapped[str | None] = mapped_column(Text)
@@ -496,6 +526,7 @@ class Measurement(Base):
     id: Mapped[uuid.UUID] = pk()
     product_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("product.id"), index=True)
     offer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("offer.id"))
+    fetch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     basis: Mapped[str] = mapped_column(Text, server_default="unknown")
     basis_method: Mapped[str | None] = mapped_column(Text)
     basis_confidence: Mapped[float | None] = mapped_column(Float)

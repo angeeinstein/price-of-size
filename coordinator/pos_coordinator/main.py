@@ -64,6 +64,31 @@ async def _check() -> int:
     return 0 if ok else 1
 
 
+async def _derived_cmd(cmd: str) -> int:
+    import json as _json
+
+    from pos_coordinator.config import get_settings
+    from pos_coordinator.db import make_engine, make_sessionmaker
+    from pos_coordinator.derive import fx, stage
+    from pos_coordinator.rawstore import RawStore
+
+    settings = get_settings()
+    engine = make_engine(settings.database_url)
+    sm = make_sessionmaker(engine)
+    try:
+        if cmd == "fx-refresh":
+            async with sm() as s:
+                n = await fx.refresh_from_ecb(s)
+                await s.commit()
+            print(f"stored {n} rates")
+            return 0
+        result = await stage.rebuild(sm, RawStore(settings.raw_store_path))
+        print(_json.dumps(result, indent=2, default=str))
+        return 0 if result["identical"] else 2
+    finally:
+        await engine.dispose()
+
+
 async def _create_user(args) -> int:
     import getpass
 
@@ -122,6 +147,10 @@ def main() -> None:
         action="store_true",
         help="read the password from stdin instead of prompting",
     )
+    sub.add_parser(
+        "rebuild-derived", help="rebuild drill: drop derived rows, derive again from raw, compare"
+    )
+    sub.add_parser("fx-refresh", help="load ECB euro reference rates now")
     bk = sub.add_parser("backup", help="pg_dump the database")
     bk.add_argument("--out", type=Path, default=None)
     bk.add_argument("--label", default="manual")
@@ -136,6 +165,8 @@ def main() -> None:
         return
     if args.cmd == "check":
         sys.exit(asyncio.run(_check()))
+    if args.cmd in ("rebuild-derived", "fx-refresh"):
+        sys.exit(asyncio.run(_derived_cmd(args.cmd)))
     if args.cmd == "create-user":
         sys.exit(asyncio.run(_create_user(args)))
     if args.cmd == "backup":

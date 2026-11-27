@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     default_job_lease_s: int = 300
     max_raw_object_bytes: int = 50 * 1024 * 1024
     reaper_interval_s: float = 15.0
+    derive_interval_s: float = 10.0
     node_offline_after_s: int = 90
 
 

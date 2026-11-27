@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -12,11 +13,30 @@ from pos_coordinator.api import admin, crawl, jobs, nodes, raw, releases
 from pos_coordinator.api.deps import Session
 from pos_coordinator.config import Settings, get_settings
 from pos_coordinator.db import make_engine, make_sessionmaker
+from pos_coordinator.derive import fx
+from pos_coordinator.derive import stage as derive_stage
 from pos_coordinator.panel import api as panel_api
 from pos_coordinator.panel import static as panel_static
 from pos_coordinator.partitions import PartitionCache
 from pos_coordinator.rawstore import RawStore
 from pos_shared.version import API_VERSION, __version__
+
+
+async def fx_daily(sm) -> None:
+    """ECB reference rates, refreshed once a day (failures only delay conversion)."""
+    log = logging.getLogger("pos_coordinator.fx")
+    while True:
+        try:
+            async with sm() as session:
+                n = await fx.refresh_from_ecb(session)
+                await session.commit()
+            log.info("ECB rates refreshed (%d rows)", n)
+            await asyncio.sleep(24 * 3600)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # network or ECB down: retry in an hour
+            log.warning("ECB rate refresh failed: %s", e)
+            await asyncio.sleep(3600)
 
 
 def create_app(settings: Settings | None = None, *, run_maintenance: bool = True) -> FastAPI:
@@ -32,21 +52,32 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
         )
         app.state.engine = engine
         app.state.sessionmaker = make_sessionmaker(engine)
-        task = None
+        tasks: list[asyncio.Task] = []
         if run_maintenance:
-            task = asyncio.create_task(
-                maintenance.loop(
-                    app.state.sessionmaker,
-                    settings.reaper_interval_s,
-                    settings.agent_dir,
-                    app.state.signing_key,
+            tasks.append(
+                asyncio.create_task(
+                    maintenance.loop(
+                        app.state.sessionmaker,
+                        settings.reaper_interval_s,
+                        settings.agent_dir,
+                        app.state.signing_key,
+                    )
                 )
             )
+            tasks.append(
+                asyncio.create_task(
+                    derive_stage.loop(
+                        app.state.sessionmaker, app.state.rawstore, settings.derive_interval_s
+                    )
+                )
+            )
+            tasks.append(asyncio.create_task(fx_daily(app.state.sessionmaker)))
         try:
             yield
         finally:
-            if task is not None:
+            for task in tasks:
                 task.cancel()
+            for task in tasks:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
             await engine.dispose()
