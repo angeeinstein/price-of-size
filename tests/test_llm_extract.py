@@ -7,9 +7,17 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from pos_coordinator import runtime_settings
+from pos_coordinator.classify import shopmap
 from pos_coordinator.derive import llm_tier, stage
 from pos_coordinator.llm.service import LlmService
-from pos_coordinator.models import LlmExtraction, Measurement, Offer, Product
+from pos_coordinator.models import (
+    Classification,
+    LlmExtraction,
+    Measurement,
+    Offer,
+    Product,
+    TaxonomyNode,
+)
 from pos_shared.extract import llm_page
 from pos_shared.extract.model import Extraction, MeasurementCandidate, OfferCandidate
 from tests.test_classification import _answer
@@ -292,6 +300,15 @@ async def test_the_earliest_fetch_with_breadcrumbs_names_the_category(app):
                  "https://a.example/p2", "a")  # fmt: skip
     await stage.run_until_caught_up(sm, store, settle=NOW)
     assert (await _product(sm)).attributes["category_path"] == ["Möbel", "Spätere"]
+    # the later path is mapped and classifies the product
+    async with sm() as s:
+        node = TaxonomyNode(name="Shelves", path="Furniture > Shelves", depth=1)
+        s.add(node)
+        await s.flush()
+        await shopmap.set_mapping(s, "a", "Möbel > Spätere", node.id)
+        await s.commit()
+    await stage.classify_until_settled(sm)
+    assert (await _product(sm)).category_id == node.id
     fake = FakeClient()
     llm = LlmService(sm, lambda: fake)
     assert await llm_tier.schedule(sm, llm, store) == {"llm_extractions_queued": 1}
@@ -304,6 +321,20 @@ async def test_the_earliest_fetch_with_breadcrumbs_names_the_category(app):
         assert (await s.execute(select(LlmExtraction.fetch_id))).scalar_one() == first
     # the earlier fetch's breadcrumbs (from the answer) take precedence, as in a rebuild
     assert (await _product(sm)).attributes["category_path"] == ["Möbel", "Frühere"]
+    # ... and the earlier path has no mapping: the later one's classification goes
+    assert await stage.classify_until_settled(sm) == 1
+    product = await _product(sm)
+    assert product.category_id is None
+    async with sm() as s:
+        current = (
+            await s.execute(
+                select(Classification).where(
+                    Classification.product_id == product.id, Classification.is_current
+                )
+            )
+        ).scalar_one_or_none()
+        assert current is None
     result = await stage.rebuild(sm, store, settle=NOW)
     assert result["identical"], result
     assert (await _product(sm)).attributes["category_path"] == ["Möbel", "Frühere"]
+    assert (await _product(sm)).category_id is None

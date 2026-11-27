@@ -158,6 +158,24 @@ async def test_mappings_classify_and_follow_changes(sessionmaker):
         ).all()
         assert len(history) == 2 and not any(c for _, c in history)  # kept, not current
 
+        # a product whose breadcrumbs change to a path without a mapping loses the
+        # classification of its old path (one with a mapping follows that one)
+        await shopmap.set_mapping(s, "ikea", "Produkte > Regale > Regalsysteme", nodes["6356"])
+        assert await shopmap.classify(s) == {"classified": 1, "withdrawn": 0}
+        await shopmap.set_mapping(s, "ikea", "Produkte > Leuchten", nodes["436"])
+        assert await shopmap.classify(s) == {"classified": 1, "withdrawn": 0}
+        p0 = (await s.execute(select(Product).where(Product.title == "p0"))).scalar_one()
+        p2 = (await s.execute(select(Product).where(Product.title == "p2"))).scalar_one()
+        p0.attributes = {**p0.attributes, "category_path": ["Produkte", "Neu"]}
+        p2.attributes = {**p2.attributes, "category_path": shelf_path}
+        await s.flush()
+        assert await shopmap.classify(s) == {"classified": 1, "withdrawn": 1}
+        assert await shopmap.classify(s) == {"classified": 0, "withdrawn": 0}
+        state = await current()
+        assert state["p0"] == (None, None)
+        assert state["p2"] == (nodes["6356"], "shop_mapping")
+        assert state["p1"][1] == "manual"
+
 
 async def test_taxonomy_and_mapping_api(admin, sessionmaker):
     r = await admin.post(
