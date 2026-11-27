@@ -65,6 +65,7 @@ async def apply(
         key=lambda r: jobs[r.job_id].domain,
     )
     redirects: list[tuple[Job, str]] = []
+    resumed: list[tuple[str, list[str]]] = []
     for r in ordered:
         job = jobs.get(r.job_id)
         if job is None or job.type not in FETCH_TYPES or not job.domain or not r.output:
@@ -96,11 +97,26 @@ async def apply(
         except Exception:  # noqa: BLE001
             log.exception("feedback for job %s failed", job.id)
             continue
+        if (
+            job.type == "fetch_robots"
+            and ds.pending_discovery
+            and ds.robots_status
+            in (
+                "rules",
+                "none",
+            )
+        ):
+            resumed.append((ds.domain, list(ds.pending_discovery)))
+            ds.pending_discovery = None
         target = r.output.get("redirect_to")
         if job.type == "fetch_http" and isinstance(target, str):
             redirects.append((job, target))
     for job, target in redirects:
         await _follow_redirect(session, job, target)
+    for domain, sources in resumed:
+        from pos_coordinator.crawl import discovery  # discovery imports this module's peers
+
+        await discovery.resume(session, domain, sources)
 
 
 def _apply_one(session, job: Job, ds: DomainState, eg: DomainEgressState, out, now, cfg) -> None:

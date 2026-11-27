@@ -257,3 +257,71 @@ async def test_cross_host_redirect_goes_through_the_scheduler(sessionmaker):
         r2 = JobResult(job_id=moved.id, attempt=1, outcome=JobOutcome.done, output=away)
         await feedback.apply(s, n, {moved.id: moved}, [r2], cfg)
         assert await s.get(DomainState, "tracker.example") is None
+
+
+# --- Codex findings ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("rules", "path", "ok"),
+    [
+        ("Disallow: /*?secret=", "/p?secret=1", False),
+        ("Disallow: /\nAllow: /products/", "/products/123", True),  # longest match wins
+        ("Disallow: /\nAllow: /products/", "/about", False),
+        ("Disallow: /*.pdf$", "/a/b.pdf", False),
+        ("Disallow: /*.pdf$", "/a/b.pdf?x=1", True),  # $ anchors the end
+        ("Disallow: /fish\nAllow: /fish/salmon", "/fish/salmon.html", True),
+        ("Disallow: /fish\nAllow: /fish/salmon", "/fish.html", False),
+        ("Allow: /page\nDisallow: /page", "/page", True),  # tie: the less restrictive
+        ("Disallow: /%7Euser", "/~user/x", False),  # percent-encoding normalised
+        ("Disallow:", "/anything", True),  # empty disallow allows everything
+        ("Disallow: /", "/robots.txt", True),  # always fetchable
+    ],
+)
+def test_robots_rfc9309_matching(rules, path, ok):
+    text = f"User-agent: *\n{rules}\n"
+    assert robots.allowed("rules", text, f"https://a.example{path}") is ok
+
+
+async def test_discovery_waits_for_robots_of_new_domains(sessionmaker):
+    from pos_coordinator.models import Source
+
+    async with sessionmaker() as s:
+        n = await _node(s)
+        cfg = await _cfg(s)
+        src = Source(name="shop", type="scraper", config={"domains": ["shop.example"]})
+        other = Source(name="other", type="scraper", config={"domains": ["plain.example"]})
+        s.add_all([src, other])
+        await s.flush()
+        assert (await discovery.discover(s, src))["waiting_for_robots"] == 1
+        assert (await discovery.discover(s, other))["waiting_for_robots"] == 1
+        robots_jobs = {
+            j.domain: j
+            for j in (await s.execute(select(Job).where(Job.type == "fetch_robots"))).scalars()
+        }
+        assert set(robots_jobs) == {"shop.example", "plain.example"}
+        with_sitemap = "User-agent: *\nAllow: /\nSitemap: https://shop.example/sm.xml\n"
+        results = [
+            JobResult(
+                job_id=robots_jobs["shop.example"].id,
+                attempt=1,
+                outcome=JobOutcome.done,
+                output={"verdict": "ok", "status": 200, "body": with_sitemap},
+            ),
+            JobResult(
+                job_id=robots_jobs["plain.example"].id,
+                attempt=1,
+                outcome=JobOutcome.done,
+                output={"verdict": "gone", "status": 404},
+            ),
+        ]
+        await feedback.apply(s, n, {j.id: j for j in robots_jobs.values()}, results, cfg)
+        sitemaps = {
+            (j.payload["url"], j.payload["source"])
+            for j in (await s.execute(select(Job).where(Job.type == "fetch_sitemap"))).scalars()
+        }
+        assert sitemaps == {
+            ("https://shop.example/sm.xml", "shop"),
+            ("https://plain.example/sitemap.xml", "other"),  # none named: the convention
+        }
+        assert (await s.get(DomainState, "shop.example")).pending_discovery is None

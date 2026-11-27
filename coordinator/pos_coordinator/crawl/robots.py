@@ -1,12 +1,17 @@
-"""robots.txt evaluation (RFC 9309 semantics on top of urllib.robotparser).
+"""robots.txt evaluation (RFC 9309), with our own matcher.
+
+urllib.robotparser differs between Python versions (first match vs. longest match,
+no `*` / `$` before 3.13) and matches user-agents by substring; robots.txt decides
+what may be fetched, so its semantics are implemented here, version-independent.
 
 Status handling as in RFC 9309: 4xx = no rules (allow all), 5xx / unreachable =
 disallow all until it can be fetched again, 200 = the rules.
 """
 
 import re
-import urllib.robotparser
+from dataclasses import dataclass
 from functools import lru_cache
+from urllib.parse import quote, unquote, urlsplit
 
 PRODUCT_TOKEN = "PriceOfSizeBot"
 ROBOTS_MAX_AGE_S = 24 * 3600
@@ -23,43 +28,82 @@ def status_kind(status: int | None) -> str:
     return "none"  # e.g. 3xx loops that ended elsewhere: no usable rules
 
 
-_OTHER = "x-other-crawler"  # stands for every group that is not ours or "*"
-
-
 def _token(value: str) -> str:
     return value.split("/", 1)[0].strip().lower()
 
 
-def _our_groups(text: str, agent: str) -> list[str]:
-    """robotparser matches user-agent lines by substring ("User-agent: bot" would apply
-    to us, "User-agent: PriceOfSizeBot/1.0" would not). RFC 9309 matches the product
-    token, case-insensitively: rewrite the lines so robotparser does exactly that."""
-    ours = _token(agent)
-    out = []
-    for raw in text.splitlines():
-        m = re.match(r"\s*user-agent\s*:\s*([^#]*)", raw, re.I)
-        if m:
-            token = _token(m.group(1))
-            name = "*" if token == "*" else ours if token == ours else _OTHER
-            out.append(f"User-agent: {name}")
-        else:
-            out.append(raw)
-    return out
+@dataclass(frozen=True)
+class Rule:
+    allow: bool
+    pattern: str  # as written, percent-encoding normalised
+    regex: re.Pattern[str]
+
+
+def _normalise(path: str) -> str:
+    """Percent-encoding as in RFC 9309 matching: decode unreserved, upper-case the rest,
+    encode non-ASCII as UTF-8 octets."""
+    return quote(unquote(path), safe="/?=&;:@!$'()*+,-._~%")
+
+
+def _compile(pattern: str) -> re.Pattern[str]:
+    anchored = pattern.endswith("$")
+    body = pattern[:-1] if anchored else pattern
+    regex = ".*".join(re.escape(part) for part in body.split("*"))
+    return re.compile(regex + ("$" if anchored else ""))
 
 
 @lru_cache(maxsize=4096)
-def _parser(text: str, agent: str = PRODUCT_TOKEN) -> urllib.robotparser.RobotFileParser:
-    rp = urllib.robotparser.RobotFileParser()
-    rp.parse(_our_groups(text, agent))
-    return rp
+def _rules(text: str, agent: str) -> tuple[Rule, ...]:
+    """The rules that apply to `agent` (RFC 9309 2.2): all groups naming its product
+    token (case-insensitive, merged), else all `*` groups, else none."""
+    ours, groups = _token(agent), {"ours": [], "star": []}
+    current: list[str] = []
+    in_rules = False
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if ":" not in line:
+            continue
+        key, value = (x.strip() for x in line.split(":", 1))
+        key = key.lower()
+        if key == "user-agent":
+            if in_rules:
+                current, in_rules = [], False
+            current.append(_token(value))
+            continue
+        if key not in ("allow", "disallow"):
+            continue
+        in_rules = True
+        if not value:
+            continue  # "Disallow:" (empty) allows everything: no rule
+        path = _normalise(value)
+        rule = Rule(key == "allow", path, _compile(path))
+        if ours in current:
+            groups["ours"].append(rule)
+        if "*" in current:
+            groups["star"].append(rule)
+    return tuple(groups["ours"] or groups["star"])
 
 
 def allowed(kind: str, text: str | None, url: str, agent: str = PRODUCT_TOKEN) -> bool:
+    """RFC 9309 2.2.2: the longest matching path wins, Allow over Disallow on a tie,
+    `*` matches any sequence and `$` ends the pattern; /robots.txt is always allowed."""
     if kind == "none":
         return True
     if kind == "unreachable":
         return False
-    return _parser(text or "", agent).can_fetch(_token(agent), url)
+    parts = urlsplit(url)
+    target = _normalise((parts.path or "/") + (f"?{parts.query}" if parts.query else ""))
+    if target == "/robots.txt":
+        return True
+    best: Rule | None = None
+    for rule in _rules(text or "", agent):
+        if rule.regex.match(target) and (
+            best is None
+            or len(rule.pattern) > len(best.pattern)
+            or (len(rule.pattern) == len(best.pattern) and rule.allow)
+        ):
+            best = rule
+    return best is None or best.allow
 
 
 def crawl_delay(kind: str, text: str | None, agent: str = PRODUCT_TOKEN) -> float | None:

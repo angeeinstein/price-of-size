@@ -101,6 +101,8 @@ class DomainState(Base):
     robots_crawl_delay_s: Mapped[float | None] = mapped_column(Float)
     robots_next_check_at: Mapped[datetime | None]
     sitemaps: Mapped[list[str] | None] = mapped_column(JSONB)  # advertised in robots.txt
+    # sources whose discovery waits for this domain's robots.txt (its Sitemap: lines)
+    pending_discovery: Mapped[list[str] | None] = mapped_column(JSONB)
     # Slot schedule for the optional hard cap across all egress groups.
     next_global_slot_at: Mapped[datetime | None]
     pages_fetched: Mapped[int] = mapped_column(BigInteger, server_default="0")
@@ -495,6 +497,14 @@ class Product(Base):
 
 class Offer(Base):
     __tablename__ = "offer"
+    __table_args__ = (
+        # offers waiting for an exchange rate (backfilled when the ECB rates arrive)
+        Index(
+            "ix_offer_no_fx_rate",
+            "id",
+            postgresql_where=text("flags @> ARRAY['no_fx_rate']::text[]"),
+        ),
+    )
     id: Mapped[uuid.UUID] = pk()
     product_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("product.id"), index=True)
     fetch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)

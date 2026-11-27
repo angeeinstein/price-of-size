@@ -30,7 +30,8 @@ async def fx_daily(sm) -> None:
             async with sm() as session:
                 n = await fx.refresh_from_ecb(session)
                 await session.commit()
-            log.info("ECB rates refreshed (%d rows)", n)
+            converted = await derive_stage.backfill_fx(sm)
+            log.info("ECB rates refreshed (%d rows); %d waiting offers converted", n, converted)
             await asyncio.sleep(24 * 3600)
         except asyncio.CancelledError:
             raise

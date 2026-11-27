@@ -202,8 +202,16 @@ curl -X PUT https://pos.example.org/api/admin/sources/ikea -H "Authorization: Be
 curl -X POST https://pos.example.org/api/admin/sources/ikea/discover -H "Authorization: Bearer $POS_ADMIN_TOKEN"
 ```
 
-The first `discover` of a new domain queues its robots.txt (and seeds); once
-robots.txt is known, `discover` again queues the advertised sitemaps.
+For a domain whose robots.txt is not known yet, `discover` queues robots.txt
+(and the seeds) and the sitemaps follow by themselves once it arrives: those its
+`Sitemap:` lines name on the shop's own hosts, or `/sitemap.xml` if there are
+none. Sitemaps and pages fetched recently are not queued again, so `discover`
+can be run as often as wanted.
+
+Exchange rates: the ECB reference rates are fetched daily. An offer in another
+currency that arrives before its rate is stored with `no_fx_rate` and converted
+(and its product's price recomputed) once the rate is there;
+`pos-coordinator fx-refresh` does both at once.
 
 ## Backups
 

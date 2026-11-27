@@ -353,3 +353,26 @@ async def test_an_unmounted_store_pauses_derivation(world):
     finally:
         marker.write_text(saved)
     assert (await stage.run_until_caught_up(sm, store, settle=NOW)).fetches == 1
+
+
+async def test_offers_waiting_for_a_rate_are_converted_when_it_arrives(world):
+    """Codex finding: a temporary ECB outage must not exclude observations for good."""
+    sm, store = world
+    gtin = "4006381333931"
+    await _fetch(sm, store, _evidence(gtin, "100", "EUR"), "https://a.example/p", "a")
+    await _fetch(sm, store, _evidence(gtin, "11000", "JPY"), "https://jp.example/p", "jp")
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    async with sm() as s:
+        assert (await s.execute(select(Product))).scalar_one().canonical_price_eur == 100
+    async with sm() as s:  # the ECB rates arrive later
+        await fx.store(
+            s, [{"day": date.today(), "currency": "JPY", "rate_per_eur": Decimal("100")}]
+        )
+        await s.commit()
+    assert await stage.backfill_fx(sm) == 1
+    async with sm() as s:
+        jp = (await s.execute(select(Offer).where(Offer.source == "jp"))).scalar_one()
+        product = (await s.execute(select(Product))).scalar_one()
+    assert jp.price_eur == Decimal("110.0000") and "no_fx_rate" not in jp.flags
+    assert product.canonical_price_eur == Decimal("105.0000")  # both pages count now
+    assert await stage.backfill_fx(sm) == 0  # nothing left

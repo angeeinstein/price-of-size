@@ -26,6 +26,7 @@ import logging
 import re
 from datetime import timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 import zstandard
 from sqlalchemy import exc as sa_exc
@@ -64,26 +65,84 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+def _base_url(cfg: dict[str, Any], domain: str) -> str:
+    """Scheme and port for a bare domain: from the source's own URLs on that host if it
+    has any (a seed or a sitemap), else https."""
+    for u in [*cfg.get("seeds", []), *cfg.get("sitemaps", [])]:
+        if isinstance(u, str) and urls.host_of(u) == domain:
+            try:
+                parts = urlsplit(urls.normalize(u))
+            except urls.BadUrl:
+                continue
+            return f"{parts.scheme}://{parts.netloc}/"
+    return f"https://{domain}/"
+
+
+def _domain_sitemaps(
+    ds: DomainState, domain: str, allowed: set[str], cfg: dict[str, Any]
+) -> list[str]:
+    """Sitemaps of a domain from its robots.txt (only on the shop's own or allowed
+    hosts: robots.txt may name any host), or the conventional /sitemap.xml."""
+    named = [u for u in (ds.sitemaps or []) if urls.host_of(u) in {domain, *allowed}]
+    return named or [_base_url(cfg, domain) + "sitemap.xml"]
+
+
 async def discover(session: AsyncSession, source: Source) -> dict[str, int]:
     """Queue the entry points of a source: its sitemaps (explicit and from robots.txt)
-    and its seed pages."""
+    and its seed pages. Domains whose robots.txt is not known yet get it fetched first;
+    their sitemaps are queued when it arrives (`resume`)."""
     cfg = source.config or {}
-    sitemap_urls = list(cfg.get("sitemaps", []))
     allowed = {d.lower() for d in cfg.get("allow_domains", [])}
-    for domain in cfg.get("domains", []):
-        ds = await session.get(DomainState, domain)
-        if ds is not None and ds.sitemaps:
-            # robots.txt may name any host; only the shop's own (or allowed) hosts count
-            sitemap_urls += [
-                u for u in ds.sitemaps if urls.host_of(u) in {domain.lower(), *allowed}
-            ]
+    sitemap_urls = list(cfg.get("sitemaps", []))
+    waiting = 0
+    for raw in cfg.get("domains", []):
+        domain = raw.strip().lower().rstrip(".")
+        if not domain:
+            continue
+        await scheduler.ensure_domains(session, {domain: _base_url(cfg, domain)})
+        ds = await session.get(DomainState, domain, with_for_update=True, populate_existing=True)
+        if ds is None:
+            continue
+        if ds.robots_status in (None, "unreachable"):
+            ds.pending_discovery = sorted({*(ds.pending_discovery or []), source.name})
+            waiting += 1
+            continue
+        sitemap_urls += _domain_sitemaps(ds, domain, allowed, cfg)
     s = await scheduler.enqueue_urls(
-        session, sitemap_urls, source.name, SITEMAP_PRIORITY, job_type="fetch_sitemap"
+        session,
+        sitemap_urls,
+        source.name,
+        SITEMAP_PRIORITY,
+        job_type="fetch_sitemap",
+        skip_done_within=SITEMAP_REFETCH,
     )
     p = await scheduler.enqueue_urls(
         session, list(cfg.get("seeds", [])), source.name, int(cfg.get("priority", 0))
     )
-    return {"sitemaps": s.queued, "seeds": p.queued}
+    return {"sitemaps": s.queued, "seeds": p.queued, "waiting_for_robots": waiting}
+
+
+async def resume(session: AsyncSession, domain: str, source_names: list[str]) -> None:
+    """robots.txt of `domain` arrived: queue its sitemaps for the sources waiting on it."""
+    ds = await session.get(DomainState, domain)
+    if ds is None:
+        return
+    for name in source_names:
+        source = (
+            await session.execute(select(Source).where(Source.name == name))
+        ).scalar_one_or_none()
+        if source is None or source.status != "active":
+            continue
+        cfg = source.config or {}
+        allowed = {d.lower() for d in cfg.get("allow_domains", [])}
+        await scheduler.enqueue_urls(
+            session,
+            _domain_sitemaps(ds, domain, allowed, cfg),
+            name,
+            SITEMAP_PRIORITY,
+            job_type="fetch_sitemap",
+            skip_done_within=SITEMAP_REFETCH,
+        )
 
 
 async def process_results(
