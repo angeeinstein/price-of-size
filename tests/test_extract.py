@@ -365,3 +365,21 @@ def test_without_packaging_is_the_product():
     rows = "<table><tr><th>Gewicht ohne Verpackung</th><td>8 kg</td></tr></table>"
     (m,) = extract_evidence(evidence(tables=[rows])).measurements
     assert m.basis == "product"
+
+
+@pytest.mark.parametrize(
+    ("block", "flag"),
+    [
+        ('<div class="price">ab 199 €</div>', "from_price"),
+        ('<div class="price">29 € / <span>Monat</span></div>', "monthly_price"),
+        ('<p class="price">29,00&nbsp;€<br><small>zzgl. MwSt.</small></p>', "net_price"),
+        ("<span>4,99 €</span><span>(1 kg = 9,98 €) pro kg</span>", "unit_price_text"),
+    ],
+)
+def test_price_flags_read_the_visible_text_of_captured_html(block, flag):
+    """Codex finding: workers capture price blocks as HTML, the rules read text."""
+    offer = {"@type": "Offer", "price": "199", "priceCurrency": "EUR"}
+    ex = extract_evidence(
+        evidence([{"@type": "Product", "name": "x", "offers": offer}], price_blocks=[block])
+    )
+    assert flag in ex.flags, ex.flags

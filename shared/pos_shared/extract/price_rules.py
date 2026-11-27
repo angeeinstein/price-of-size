@@ -1,7 +1,10 @@
 """Rule flags for prices (the spec's trap table). Flags only: nothing is dropped,
 analysis decides what to filter."""
 
+import html
 import re
+
+from lxml import html as lxml_html
 
 from pos_shared.extract.model import Extraction, OfferCandidate
 
@@ -66,8 +69,23 @@ def price_flags(offer: OfferCandidate) -> list[str]:
     return flags
 
 
+def visible_text(fragment: str) -> str:
+    """The text a reader sees in a captured HTML block ("ab <b>199 €</b>" -> "ab 199 €"),
+    whitespace collapsed. Plain text passes through unchanged."""
+    if "<" not in fragment:
+        return " ".join(html.unescape(fragment).split())
+    try:
+        root = lxml_html.fragment_fromstring(fragment, create_parent="div")
+        for el in root.iter():  # element boundaries separate words
+            el.tail = " " + (el.tail or "")
+        text = root.text_content()
+    except Exception:  # noqa: BLE001 - broken markup: drop the tags by hand
+        text = html.unescape(re.sub(r"<[^>]*>", " ", fragment))
+    return " ".join(text.split())
+
+
 def text_flags(price_blocks: list[str], title: str | None) -> list[str]:
-    text = " ".join(price_blocks[:20]) + " " + (title or "")
+    text = " ".join(visible_text(b) for b in price_blocks[:20]) + " " + (title or "")
     return [name for name, pattern in TEXT_FLAGS if pattern.search(text)]
 
 
