@@ -18,7 +18,13 @@ def load_or_create(path: Path) -> Ed25519PrivateKey:
         if not isinstance(key, Ed25519PrivateKey):
             raise ValueError(f"{path} is not an Ed25519 private key")
         return key
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except PermissionError as e:
+        raise PermissionError(
+            f"cannot create the signing key directory {path.parent}; "
+            "set POS_SIGNING_KEY_PATH to a writable location"
+        ) from e
     key = Ed25519PrivateKey.generate()
     pem = key.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()

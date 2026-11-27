@@ -28,6 +28,7 @@ destructive for `pos-*` resources on the Docker host.
 ```bash
 export POS_DATABASE_URL=postgresql+psycopg://pos:pos@localhost:5432/pos
 export POS_RAW_STORE_PATH=./data/raw
+export POS_SIGNING_KEY_PATH=./data/signing_key.pem   # default is /var/lib/pos/... (images)
 export POS_ADMIN_TOKEN=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')
 uv run pos-coordinator migrate
 uv run pos-coordinator serve --port 8000
