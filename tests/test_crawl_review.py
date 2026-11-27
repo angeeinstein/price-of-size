@@ -276,6 +276,10 @@ async def test_cross_host_redirect_goes_through_the_scheduler(sessionmaker):
         ("Disallow: /%7Euser", "/~user/x", False),  # percent-encoding normalised
         ("Disallow:", "/anything", True),  # empty disallow allows everything
         ("Disallow: /", "/robots.txt", True),  # always fetchable
+        ("Disallow: /\nAllow: /public/", "/public%2Fprivate", False),  # %2F is not "/"
+        ("Disallow: /\nAllow: /public/", "/public/x", True),
+        ("Disallow: /a%2Ab", "/aXb", True),  # an encoded "*" is no wildcard
+        ("Disallow: /a%2Ab", "/a%2ab", False),  # but matches itself, any hex case
     ],
 )
 def test_robots_rfc9309_matching(rules, path, ok):
@@ -325,3 +329,10 @@ async def test_discovery_waits_for_robots_of_new_domains(sessionmaker):
             ("https://plain.example/sitemap.xml", "other"),  # none named: the convention
         }
         assert (await s.get(DomainState, "shop.example")).pending_discovery is None
+
+
+def test_an_empty_group_for_us_replaces_the_star_group():
+    text = "User-agent: *\nDisallow: /\n\nUser-agent: PriceOfSizeBot\nDisallow:\n"
+    assert robots.allowed("rules", text, "https://a.example/p/1")
+    only_ua = "User-agent: *\nDisallow: /\n\nUser-agent: PriceOfSizeBot\n"
+    assert robots.allowed("rules", only_ua, "https://a.example/p/1")

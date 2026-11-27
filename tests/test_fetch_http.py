@@ -128,3 +128,18 @@ async def test_broken_gzip_is_an_encoding_error(lab):
         s.routes["/bad"] = respond(b"not gzip at all", headers=["Content-Encoding: gzip"])
         async with http.make_client("t") as c:
             assert (await http.fetch(c, s.url("/bad"))).error == "encoding"
+
+
+async def test_overflow_keeps_the_prefix_that_fits(lab):
+    """A gzip robots.txt whose first chunk inflates past the limit must keep its start
+    (a leading Disallow: / must not turn into an empty, allow-all file)."""
+    body = gzip.compress(b"User-agent: *\nDisallow: /\n" + b"#" * 2_000_000)
+    async with Server() as s:
+        s.routes["/robots.txt"] = respond(body, headers=["Content-Encoding: gzip"])
+        s.routes["/plain"] = respond(b"x" * 5000)
+        async with http.make_client("t") as c:
+            r = await http.fetch(c, s.url("/robots.txt"), max_bytes=100_000)
+            assert r.error == "too_large" and len(r.body) == 100_000
+            assert r.body.startswith(b"User-agent: *\nDisallow: /")
+            r = await http.fetch(c, s.url("/plain"), max_bytes=1000)
+            assert r.error == "too_large" and r.body == b"x" * 1000

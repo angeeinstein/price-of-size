@@ -173,7 +173,11 @@ def make_client(user_agent: str, timeout_s: float = 30.0) -> httpx.AsyncClient:
 
 
 class TooLarge(Exception):
-    pass
+    """Over the limit; `prefix` holds the decoded bytes that still fit."""
+
+    def __init__(self, prefix: bytes = b""):
+        super().__init__("too large")
+        self.prefix = prefix
 
 
 class BadEncoding(Exception):
@@ -197,10 +201,14 @@ class _Decoder:
         self.limit = limit
         self.size = 0
 
-    def _grow(self, n: int) -> None:
-        self.size += n
-        if self.size > self.limit:
-            raise TooLarge
+    def _take(self, data: bytes) -> bytes:
+        """Count `data`; past the limit, keep what fits and stop."""
+        room = self.limit - self.size
+        if len(data) > room:
+            self.size = self.limit
+            raise TooLarge(data[: max(room, 0)])
+        self.size += len(data)
+        return data
 
     def feed(self, data: bytes) -> bytes:
         if not data:
@@ -209,14 +217,15 @@ class _Decoder:
             wbits = zlib.MAX_WBITS if data[:1] == b"\x78" else -zlib.MAX_WBITS
             self._z = zlib.decompressobj(wbits)
         if self._z is None:
-            self._grow(len(data))
-            return data
+            return self._take(data)
         out = []
         try:
             while data and not self._z.eof:
                 chunk = self._z.decompress(data, self.limit - self.size + 1)
-                self._grow(len(chunk))
-                out.append(chunk)
+                try:
+                    out.append(self._take(chunk))
+                except TooLarge as e:
+                    raise TooLarge(b"".join(out) + e.prefix) from None
                 data = self._z.unconsumed_tail
         except zlib.error as e:
             raise BadEncoding(str(e)) from e
@@ -251,7 +260,8 @@ async def _get(client: httpx.AsyncClient, url: str, res: Response, max_bytes: in
             try:
                 async for raw in r.aiter_raw():
                     chunks.append(decoder.feed(raw))
-            except TooLarge:
+            except TooLarge as e:
+                chunks.append(e.prefix)  # what fits: a truncated robots.txt is still read
                 res.truncated = True
                 res.error = "too_large"
             res.body = b"".join(chunks)

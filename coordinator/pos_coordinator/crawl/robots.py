@@ -11,7 +11,7 @@ disallow all until it can be fetched again, 200 = the rules.
 import re
 from dataclasses import dataclass
 from functools import lru_cache
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import quote, urlsplit
 
 PRODUCT_TOKEN = "PriceOfSizeBot"
 ROBOTS_MAX_AGE_S = 24 * 3600
@@ -39,10 +39,21 @@ class Rule:
     regex: re.Pattern[str]
 
 
+_UNRESERVED = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+
+
 def _normalise(path: str) -> str:
-    """Percent-encoding as in RFC 9309 matching: decode unreserved, upper-case the rest,
-    encode non-ASCII as UTF-8 octets."""
-    return quote(unquote(path), safe="/?=&;:@!$'()*+,-._~%")
+    """Percent-encoding for matching (RFC 3986 6.2.2): only unreserved characters are
+    decoded ("%7E" = "~"); reserved ones stay encoded and upper-cased ("%2f" -> "%2F" is
+    not "/", "%2A" is a literal "*", not the wildcard); raw non-ASCII becomes UTF-8
+    octets."""
+
+    def octet(m: re.Match[str]) -> str:
+        char = chr(int(m.group(1), 16))
+        return char if char in _UNRESERVED else f"%{m.group(1).upper()}"
+
+    decoded = re.sub(r"%([0-9A-Fa-f]{2})", octet, path)
+    return quote(decoded, safe="/?=&;:@!$'()*+,-._~%#[]")
 
 
 def _compile(pattern: str) -> re.Pattern[str]:
@@ -57,6 +68,7 @@ def _rules(text: str, agent: str) -> tuple[Rule, ...]:
     """The rules that apply to `agent` (RFC 9309 2.2): all groups naming its product
     token (case-insensitive, merged), else all `*` groups, else none."""
     ours, groups = _token(agent), {"ours": [], "star": []}
+    has_ours = False  # a group for us, even one without rules, replaces the * groups
     current: list[str] = []
     in_rules = False
     for raw in text.splitlines():
@@ -69,6 +81,7 @@ def _rules(text: str, agent: str) -> tuple[Rule, ...]:
             if in_rules:
                 current, in_rules = [], False
             current.append(_token(value))
+            has_ours = has_ours or current[-1] == ours
             continue
         if key not in ("allow", "disallow"):
             continue
@@ -81,7 +94,7 @@ def _rules(text: str, agent: str) -> tuple[Rule, ...]:
             groups["ours"].append(rule)
         if "*" in current:
             groups["star"].append(rule)
-    return tuple(groups["ours"] or groups["star"])
+    return tuple(groups["ours"] if has_ours else groups["star"])
 
 
 def allowed(kind: str, text: str | None, url: str, agent: str = PRODUCT_TOKEN) -> bool:
