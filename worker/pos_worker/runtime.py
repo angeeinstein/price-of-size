@@ -19,7 +19,7 @@ import httpx
 
 from pos_shared import api, exchange, signing
 from pos_shared.version import API_VERSION, __version__, is_compatible
-from pos_worker import cgroup, identity
+from pos_worker import cgroup, embed, identity
 from pos_worker.client import CoordinatorClient, CoordinatorError, IncompatibleCoordinator
 from pos_worker.config import WorkerSettings
 from pos_worker.fetch import handlers as fetch_handlers  # registers the fetch handlers
@@ -29,6 +29,7 @@ from pos_worker.spool import Spool
 log = logging.getLogger(__name__)
 
 EXIT_RESTART = 75  # tells the supervisor (Docker restart policy, systemd) to start us again
+EMBED_MIN_RAM = 1536 * 1024 * 1024
 JOB_OVERCOMMIT = 4  # jobs held per HTTP slot (most of them waiting for a rate slot)
 
 
@@ -83,6 +84,7 @@ class Worker:
         self.limits = cgroup.read_limits(settings.cgroup_root, settings.state_dir)
         self.slots = self._compute_slots()
         fetch_handlers.set_concurrency(self.slots.http)
+        embed.set_model_dir(settings.state_dir / "models")
         self.active: dict[uuid.UUID, ActiveJob] = {}
         self.exit_code = 0
         self._stop = asyncio.Event()
@@ -376,9 +378,19 @@ class Worker:
 
     def _job_types(self) -> list[str]:
         types = [t for t in self.handlers if t != "fetch_browser" or self.slots.browser > 0]
+        if not self._can_embed():
+            types = [t for t in types if t != "embed"]
         if self.desired.job_types is not None:
             types = [t for t in types if t in self.desired.job_types]
         return types
+
+    def _can_embed(self) -> bool:
+        """The model needs about 500 MB of RAM: only nodes with room (and not turned
+        off with POS_WORKER_EMBED=false) take embed jobs."""
+        if not self.settings.embed:
+            return False
+        total = self.limits.effective_mem
+        return total is None or total >= EMBED_MIN_RAM
 
     async def lease_once(self) -> int:
         if self.state != api.RunState.running or not self.compatible or self.spool.full:

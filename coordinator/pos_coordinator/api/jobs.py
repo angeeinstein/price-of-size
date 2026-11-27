@@ -1,5 +1,6 @@
 """Job leasing and result submission for nodes."""
 
+import logging
 import time
 
 from fastapi import APIRouter, Depends, Request
@@ -7,9 +8,12 @@ from sqlalchemy import func, select
 
 from pos_coordinator import partitions, queue, runtime_settings, txn
 from pos_coordinator.api.deps import CurrentNode, Session, check_api_version
+from pos_coordinator.classify import embeddings
 from pos_coordinator.crawl import apisources, discovery, feedback, scheduler
 from pos_coordinator.models import Job, RawObject
 from pos_shared import api
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/jobs", dependencies=[Depends(check_api_version)])
 HTML_SIZE_CACHE_S = 300
@@ -130,6 +134,15 @@ async def results(body: api.ResultBatch, request: Request, node: CurrentNode, se
         results = [feedback.reinterpret(types.get(r.job_id, ""), r) for r in body.results]
         applied: dict = {}
         accepted, rejected = await queue.complete(session, node.id, results, applied)
+        stored = [r for r in results if r.job_id in applied]
+        for r in stored:
+            job = applied[r.job_id]
+            if job.type == embeddings.JOB_TYPE and r.outcome == api.JobOutcome.done:
+                try:
+                    async with session.begin_nested():
+                        await embeddings.ingest(session, job, r.output)
+                except ValueError as e:  # untrusted output: dropped, the job is done
+                    log.warning("embed result of job %s dropped: %s", job.id, e)
         if any(j.type in scheduler.FETCH_TYPES for j in applied.values()):
             cfg = await crawl_config(request, session)
             stored = [r for r in results if r.job_id in applied]

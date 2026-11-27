@@ -30,6 +30,8 @@ class WorkerSettings(BaseSettings):
     # Local caps (None = no local cap).
     max_http_slots: int | None = None
     max_browser_slots: int | None = None
+    # Take embed jobs (local embedding model, ~500 MB of RAM, downloaded once).
+    embed: bool = True
 
     resource_poll_s: float = 30.0
     flush_interval_s: float = 2.0

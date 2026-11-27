@@ -172,4 +172,6 @@ pos-coordinator fx-refresh        # ECB reference rates (also fetched daily)
 - [x] Classification tier 1: shop category mappings (`classify/shopmap.py`, panel: Categories)
 - [x] LLM service (`llm/`): budget per priority, ledger, cache by input, strict JSON,
       retry once then flag, refusals, Message Batches with stage handlers
-- [ ] LLM proposals for mappings; embeddings and classifier; per-category size scalar
+- [x] Embeddings: `embed` jobs on workers (multilingual-e5-small, ONNX, pinned and
+      verified), product and taxonomy vectors in pgvector, nearest categories
+- [ ] LLM proposals for mappings; LLM classification and k-NN classifier

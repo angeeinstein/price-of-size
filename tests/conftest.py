@@ -120,6 +120,15 @@ def sessionmaker(app):
 
 
 @pytest.fixture(autouse=True)
+def _reset_embedding_recheck():
+    from pos_coordinator.classify import embeddings
+
+    embeddings._recheck_after = None
+    yield
+    embeddings._recheck_after = None
+
+
+@pytest.fixture(autouse=True)
 def _reset_fetch_breaker():
     from pos_worker.fetch import breaker
 

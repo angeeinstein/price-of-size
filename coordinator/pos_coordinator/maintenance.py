@@ -127,6 +127,14 @@ async def run_once(
         log.exception("retrying blocked domains failed")
     try:
         async with sm() as session:
+            from pos_coordinator.classify import embeddings
+
+            out["embed_jobs"] = await embeddings.enqueue(session)
+            await session.commit()
+    except Exception:
+        log.exception("queueing embed jobs failed")
+    try:
+        async with sm() as session:
             from pos_coordinator.classify import shopmap
 
             res = await shopmap.classify(session)
