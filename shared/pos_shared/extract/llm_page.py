@@ -139,8 +139,8 @@ def apply(ex: Extraction, answer: dict[str, Any], locale: str | None) -> bool:
     if not ex.category_path:
         path = [_clean(c, 100) for c in answer.get("category_path") or [] if _clean(c, 100)]
         ex.category_path = path[:8]
-    if not ex.brand and _clean(answer.get("brand"), 100):
-        ex.brand = _clean(answer.get("brand"), 100)
+    # (no brand, GTIN or MPN from an answer: they decide the product's match key, and a
+    # product must keep the identity its first derivation gave it)
     if added:
         ex.sources.append("llm")
     return added

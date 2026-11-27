@@ -58,6 +58,7 @@ async def llm_loop(service, interval_s: float, store: RawStore) -> None:
                 ("queueing mapping proposals", lambda: proposals.schedule(service.sm, service)),
                 ("queueing LLM classification", lambda: by_llm.schedule(service.sm, service)),
                 ("queueing price reviews", lambda: review.schedule(service.sm, service, store)),
+                ("applying LLM extractions", lambda: llm_tier.apply_pending(service.sm)),
                 ("queueing LLM extraction", lambda: llm_tier.schedule(service.sm, service, store)),
             ):
                 try:

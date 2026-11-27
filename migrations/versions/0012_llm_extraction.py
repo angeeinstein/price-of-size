@@ -35,6 +35,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("answered_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("applied_at", sa.DateTime(timezone=True), nullable=True),
         sa.CheckConstraint(
             "status IN ('wanted','ok','invalid','refused')", name="llm_extraction_status"
         ),

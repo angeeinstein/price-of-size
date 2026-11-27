@@ -75,7 +75,7 @@ def test_an_answer_fills_only_the_gaps():
     assert (o.price, o.currency, o.method, o.price_raw) == (1299.0, "EUR", "llm", "1.299,00 €")
     (m,) = ex.measurements
     assert (m.a_m, m.b_m, m.c_m, m.mass_kg, m.method) == (1.8, 0.8, 0.4, 35.0, "llm")
-    assert ex.category_path == ["Möbel", "Regale"] and ex.brand == "Holzwerk"
+    assert ex.category_path == ["Möbel", "Regale"] and ex.brand is None
     assert ex.sources == ["llm"]
     # a price found by the other tiers stays the only one
     ex = Extraction(extract_version="t", title="Regal", offers=[OfferCandidate(99.0, "EUR", "99")])
@@ -175,3 +175,71 @@ async def test_the_switch_and_a_fetch_not_derived_yet(app):
     later = await _fetch(sm, store, _page("Neu"), "https://holz.example/neu", "holz")
     async with sm() as s:  # beyond the cursor: derived later, with the answer
         assert not await llm_tier.rederive(s, later)
+
+
+async def _answered(app, monkeypatch, store_up=True):
+    sm, store = app.state.sessionmaker, app.state.rawstore
+    fid = await _fetch(sm, store, _page(), "https://holz.example/regal", "holz")
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    fake = FakeClient()
+    llm = LlmService(sm, lambda: fake)
+    await llm_tier.schedule(sm, llm, store)
+    (bid,) = fake.batches
+    fake.batches[bid]["status"] = "ended"
+    fake.batches[bid]["results"] = [_answer("0", json.dumps(ANSWER))]
+    if not store_up:
+        monkeypatch.setattr(store, "available", lambda: False)
+    await llm.poll_batches()
+    return sm, store, fid
+
+
+async def test_an_answer_waits_for_the_raw_store(app, monkeypatch):
+    sm, store, _ = await _answered(app, monkeypatch, store_up=False)
+    async with sm() as s:
+        row = (await s.execute(select(LlmExtraction))).scalar_one()
+        assert row.status == "ok" and row.applied_at is None
+        assert (await s.execute(select(Offer))).scalars().all() == []
+    assert await llm_tier.apply_pending(sm) == 0  # the store is still away
+    monkeypatch.undo()
+    assert await llm_tier.apply_pending(sm) == 1
+    async with sm() as s:
+        (o,) = (await s.execute(select(Offer))).scalars().all()
+        assert float(o.price) == 1299
+        assert (await s.execute(select(LlmExtraction))).scalar_one().applied_at is not None
+    assert await llm_tier.apply_pending(sm) == 0
+
+
+async def test_gold_labels_keep_their_fetch_when_a_page_is_derived_again(app, monkeypatch):
+    from pos_coordinator.models import GoldLabel
+
+    sm, store = app.state.sessionmaker, app.state.rawstore
+    page = _page()
+    page["snippets"]["price_blocks"] = []
+    offer = {"price": "1299", "priceCurrency": "EUR"}
+    page["snippets"]["json_ld"] = [
+        json.dumps({"@type": "Product", "name": "Eichenregal", "offers": offer})
+    ]
+    fid = await _fetch(sm, store, page, "https://holz.example/regal", "holz")
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    async with sm() as s:
+        (o,) = (await s.execute(select(Offer))).scalars().all()
+        s.add(GoldLabel(offer_id=o.id, product_id=o.product_id, fetch_id=fid,
+                        labels={"price": 1299}, labelled_by="person"))  # fmt: skip
+        await s.commit()
+    fake = FakeClient()
+    llm = LlmService(sm, lambda: fake)
+    assert await llm_tier.schedule(sm, llm, store) == {"llm_extractions_queued": 1}  # sizes
+    (bid,) = fake.batches
+    fake.batches[bid]["status"] = "ended"
+    fake.batches[bid]["results"] = [_answer("0", json.dumps(ANSWER))]
+    assert await llm.poll_batches() == 1
+    async with sm() as s:
+        (g,) = (await s.execute(select(GoldLabel))).scalars().all()
+        assert g.offer_id is None and g.fetch_id == fid
+        assert (await s.execute(select(Measurement))).scalars().all()  # sizes added
+
+
+def test_an_answer_never_changes_a_product_identity():
+    ex = Extraction(extract_version="t", title="Regal", mpn="R-80")
+    llm_page.apply(ex, ANSWER, "de")
+    assert ex.brand is None  # a brand would turn the url: key into a bm: key

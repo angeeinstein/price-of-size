@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import and_, delete, func, or_, select, true
+from sqlalchemy import and_, delete, func, or_, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -24,6 +24,7 @@ from pos_coordinator.budget import Priority
 from pos_coordinator.classify import by_llm, common
 from pos_coordinator.llm import service
 from pos_coordinator.models import (
+    GoldLabel,
     LlmExtraction,
     Measurement,
     Offer,
@@ -113,6 +114,8 @@ async def merge(session: AsyncSession, f: RawFetch, ex: Any, locale: str | None)
         )
     elif row.status == "ok" and isinstance(row.output, dict):
         llm_page.apply(ex, row.output, locale)
+        if row.applied_at is None:
+            row.applied_at = datetime.now(UTC)
 
 
 # --- in the LLM loop -------------------------------------------------------------------
@@ -125,6 +128,41 @@ async def schedule(
         if not mine:
             return {"llm_extractions_queued": 0}
         return await _schedule(sm, llm, store)
+
+
+async def apply_pending(sm: async_sessionmaker[AsyncSession], limit: int = 200) -> int:
+    """Answers that could not reach the derived layer when they arrived (the raw
+    store was away): their fetches are derived again now. Returns how many."""
+    if _store is None or not _store.available():
+        return 0
+    async with sm() as s:
+        ids = (
+            (
+                await s.execute(
+                    select(LlmExtraction.id)
+                    .where(
+                        LlmExtraction.status == "ok",
+                        LlmExtraction.applied_at.is_(None),
+                        LlmExtraction.prompt_version == PROMPT,
+                    )
+                    .order_by(LlmExtraction.answered_at)
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    done = 0
+    for rid in ids:
+        async with sm() as s:
+            row = await s.get(LlmExtraction, rid, with_for_update=True)
+            if row is None or row.applied_at is not None:
+                continue
+            if await rederive(s, row.fetch_id):
+                row.applied_at = datetime.now(UTC)
+                done += 1
+            await s.commit()
+    return done
 
 
 async def _schedule(
@@ -211,8 +249,11 @@ async def handle(session: AsyncSession, outcome: service.Outcome) -> None:
     row.model = outcome.model
     row.answered_at = datetime.now(UTC)
     await session.flush()
-    if isinstance(data, PageAnswer) and data.is_product_page:
-        await rederive(session, fetch_id)
+    if not (isinstance(data, PageAnswer) and data.is_product_page):
+        row.applied_at = row.answered_at  # nothing to add to the derived layer
+    elif await rederive(session, fetch_id):
+        row.applied_at = datetime.now(UTC)
+    # else: applied later, by apply_pending() or when the derive stage reaches it
 
 
 async def rederive(session: AsyncSession, fetch_id: uuid.UUID) -> bool:
@@ -246,6 +287,10 @@ async def rederive(session: AsyncSession, fetch_id: uuid.UUID) -> bool:
     } | {r[1] for r in old}
     offer_ids = [r[0] for r in old]
     if offer_ids:
+        # hand-checked labels keep their link to the raw fetch, as in a rebuild
+        await session.execute(
+            update(GoldLabel).where(GoldLabel.offer_id.in_(offer_ids)).values(offer_id=None)
+        )
         await session.execute(delete(PriceReview).where(PriceReview.offer_id.in_(offer_ids)))
     await session.execute(
         delete(Measurement).where(

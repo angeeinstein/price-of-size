@@ -554,6 +554,8 @@ class LlmExtraction(Base):
     output: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = created()
     answered_at: Mapped[datetime | None]
+    # when the answer reached the derived layer (the fetch derived again with it)
+    applied_at: Mapped[datetime | None]
 
 
 class DeriveCursor(Base):
