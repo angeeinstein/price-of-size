@@ -35,7 +35,7 @@ from pos_coordinator.llm import service
 from pos_coordinator.models import AuditLog, LlmExtraction, Parser, RawFetch
 from pos_coordinator.rawstore import RawStore
 from pos_shared import units
-from pos_shared.extract import llm_page, site_parser, spectext
+from pos_shared.extract import llm_page, price_rules, site_parser, spectext
 
 log = logging.getLogger(__name__)
 
@@ -162,10 +162,11 @@ def page_passes(
     spec: site_parser.SiteSpec, page: bytes, answer: dict[str, Any], locale: str | None
 ) -> bool:
     """The spec finds every price and size the LLM tier found on the page, with the
-    same meaning: the price in the currency the LLM read, each size with the same
-    basis (product, package) and net or gross. A page whose price the LLM read as
-    something other than the item's price (a unit, monthly, net or "from" price)
-    never passes: a spec only reads item prices."""
+    same meaning: the price in the currency the LLM read and unavailable where the
+    LLM read so, each size with the same basis (product, package) and net or gross.
+    A page whose price the LLM read as something other than the item's price (a
+    unit, monthly, net or "from" price) never passes: a spec only reads item
+    prices."""
     want_price, want_sizes = _expected(answer, locale)
     got = site_parser.run(spec, page)
     if want_price is not None and qualified_price(answer):
@@ -173,6 +174,12 @@ def page_passes(
     if want_price is not None:
         got_price = units.parse_number(got.price_text or "", locale)
         if not _close(want_price, got_price, PRICE_TOLERANCE):
+            return False
+        # out of stock or discontinued keeps a price out of the product's price: the
+        # spec must see it where the LLM did, and only there
+        if (answer.get("availability") in price_rules.UNAVAILABLE) != (
+            got.availability in price_rules.UNAVAILABLE
+        ):
             return False
         want_currency = str(answer.get("currency") or "").strip().upper()
         if re.fullmatch(r"[A-Z]{3}", want_currency) and (
@@ -197,8 +204,18 @@ def page_passes(
 
 # --- generation ----------------------------------------------------------------------------
 
-_DOMAIN_SQL = r"""regexp_replace(lower(substring(coalesce(f.final_url, f.url)
-    from '^[a-zA-Z][a-zA-Z0-9+.-]*://(?:[^/@?#]*@)?([^/:?#]+)')), '^www\.', '')"""
+# a fetch's shop: the host of the page it ended on, as domain_of() has it
+_HOST_RE = r"^[a-zA-Z][a-zA-Z0-9+.-]*://(?:[^/@?#]*@)?([^/:?#]+)"
+_DOMAIN_SQL = rf"""regexp_replace(lower(substring(coalesce(f.final_url, f.url)
+    from '{_HOST_RE}')), '^www\.', '')"""
+
+
+def domain_sql(final_url: Any, url: Any) -> Any:
+    """_DOMAIN_SQL as an expression over the given columns."""
+    return func.regexp_replace(
+        func.lower(func.substring(func.coalesce(final_url, url), _HOST_RE)), r"^www\.", ""
+    )
+
 
 _CANDIDATES_SQL = f"""
     WITH pages AS (

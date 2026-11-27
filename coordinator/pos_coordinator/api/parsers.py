@@ -98,7 +98,9 @@ async def test_run(parser_id: uuid.UUID, admin: CurrentViewer, session: Session,
                 & (LlmExtraction.status == "ok"),
             )
             .where(RawFetch.html_sha256.is_not(None), RawFetch.mode.in_(("http", "browser")))
-            .where(RawFetch.url.ilike(f"%://{p.domain}/%") | RawFetch.url.ilike(f"%.{p.domain}/%"))
+            # the shop of the page a fetch ended on, as generation and the derive stage
+            # see it (a fetch redirected from another host belongs to its target)
+            .where(site_parsers.domain_sql(RawFetch.final_url, RawFetch.url) == p.domain)
             .order_by(RawFetch.fetched_at.desc())
             .limit(min(max(limit, 1), 50))
         )

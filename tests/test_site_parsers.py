@@ -188,6 +188,33 @@ def test_a_page_passes_only_with_the_meaning_the_llm_read():
     assert site_parsers.page_passes(spec, page, {**_answer_for(1), "price_kind": "unknown"}, "de")
 
 
+def test_a_page_passes_only_with_the_availability_the_llm_read():
+    sold_out = _html(1).replace(
+        '<div class="buy">', '<div class="buy"><link itemprop="availability" '
+        'href="https://schema.org/OutOfStock">',
+    )  # fmt: skip
+    reads_it = site_parser.parse(
+        {
+            **SPEC,
+            "availability": {
+                "css": "[itemprop=availability]",
+                "attr": "href",
+                "regex": None,
+                "index": 0,
+            },
+        }  # fmt: skip
+    )
+    blind = site_parser.parse(SPEC)
+    gone = {**_answer_for(1), "availability": "out_of_stock"}
+    assert site_parsers.page_passes(reads_it, sold_out.encode(), gone, "de")
+    # a spec that cannot see it would make an unavailable price count
+    assert not site_parsers.page_passes(blind, sold_out.encode(), gone, "de")
+    # nor may a spec see it where the LLM did not
+    available = {**_answer_for(1), "availability": "in_stock"}
+    assert not site_parsers.page_passes(reads_it, sold_out.encode(), available, "de")
+    assert site_parsers.page_passes(blind, _html(1).encode(), available, "de")
+
+
 def test_condensed_html_for_the_llm():
     t = site_parser.condensed_html(_html(1))
     assert t.startswith("<body>") and "tracking" not in t and "color:red" not in t
@@ -200,7 +227,7 @@ def test_condensed_html_for_the_llm():
 # --- generation and use ----------------------------------------------------------------
 
 
-async def _page(sm, store, i, html_text=None, domain="holz.example"):
+async def _page(sm, store, i, html_text=None, domain="holz.example", requested=None):
     """A fetch without structured data: snippets (title only) and the full page."""
     evidence = {
         "status": 200,
@@ -223,7 +250,7 @@ async def _page(sm, store, i, html_text=None, domain="holz.example"):
         store.put(kind, blobs[kind], blob)
     async with sm() as s:
         url = f"https://www.{domain}/p/{i}"
-        f = RawFetch(id=uuid7(), fetched_at=datetime.now(UTC), url=url, final_url=url,
+        f = RawFetch(id=uuid7(), fetched_at=datetime.now(UTC), url=requested or url, final_url=url,
                      status=200, mode="http", blob_sha256=blobs["snippets"],
                      html_sha256=blobs["html"], source=domain)  # fmt: skip
         s.add(f)
@@ -303,6 +330,15 @@ async def test_a_parser_is_generated_checked_activated_and_used(app, admin):
     assert r.status_code == 200 and not r.json()["active"]
     r = await admin.post(f"/api/admin/parsers/{row['id']}/activate")
     assert r.json()["active"]
+
+
+async def test_the_test_run_shows_pages_redirected_to_the_shop(app, admin):
+    sm, store = await _world(app)
+    await _generate(sm, store, SPEC)
+    await _page(sm, store, 77, requested="https://old-shop.example/artikel/77")
+    (row,) = (await admin.get("/api/admin/parsers")).json()
+    runs = (await admin.get(f"/api/admin/parsers/{row['id']}/test")).json()
+    assert "https://www.holz.example/p/77" in {r["url"] for r in runs}
 
 
 async def test_a_parser_that_fails_its_check_stays_inactive(app):

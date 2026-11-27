@@ -375,7 +375,9 @@ changed template broke. Specs are untrusted input: size limits, compiled
 selectors, no code. Regular expressions are checked by their structure (no
 repetition or alternation inside repetition, no back-references) and run with a
 50 ms limit per match. On the held-out pages, a price's currency must match the
-LLM's, and a size its basis (product or package) and net or gross. A bare "$" or
+LLM's, and so must whether the product is unavailable (out of stock,
+discontinued: such a price never counts); a size must match in basis (product or
+package) and net or gross. A bare "$" or
 "kr" is the shop's default currency when that uses the symbol. A page whose price
 the LLM read as a unit, monthly, net or "from" price never passes (a parser reads
 item prices only). A shop with such pages among the checked ones gets no automatic
