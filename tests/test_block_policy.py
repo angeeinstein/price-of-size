@@ -207,3 +207,61 @@ def test_an_unblock_releases_the_workers_pause():
     breaker.release_if_unblocked("shop.example", {"unblocked_at": before + 20})
     assert not breaker.paused("shop.example")
     breaker.reset()
+
+
+async def test_the_probe_outlives_pruned_jobs(sessionmaker):
+    """A block records the job to retry with; months later, when the job rows are
+    pruned, the automatic retry still has something to fetch."""
+    from pos_shared.api import JobOutcome, JobResult
+    from tests.test_crawl_review import _cfg, _node, _ready
+
+    async with sessionmaker() as s:
+        n = await _node(s)
+        cfg = await _cfg(s)
+        urls = ["https://gone.example/p/1", "https://gone.example/p/2"]
+        await scheduler.enqueue_urls(s, urls, "shop", 2, extra_payload={"depth": 3})
+        await _ready(s, "gone.example")
+        jobs = (
+            (await s.execute(select(Job).where(Job.type == "fetch_http").order_by(Job.id)))
+            .scalars()
+            .all()
+        )
+        for j in jobs:
+            j.status, j.node_id, j.attempts = "leased", n.id, 1
+        await s.flush()
+        for j in jobs:  # two challenge pages in a row: blocked
+            r = JobResult(
+                job_id=j.id,
+                attempt=1,
+                outcome=JobOutcome.done,
+                output={"verdict": "blocked", "reason": "captcha:x", "final_url": j.payload["url"]},
+            )
+            await feedback.apply(s, n, {j.id: j}, [r], cfg)
+        ds = await s.get(DomainState, "gone.example")
+        assert ds.block_status == "blocked"
+        event = (
+            await s.execute(select(DomainEvent).where(DomainEvent.kind == "blocked"))
+        ).scalar_one()
+        probe = event.details["probe"]
+        assert probe["type"] == "fetch_http" and probe["priority"] == 2
+        assert probe["payload"]["depth"] == 3 and probe["payload"]["url"] in urls
+        # months later: the jobs were pruned
+        await s.execute(Job.__table__.delete().where(Job.domain == "gone.example"))
+        await s.execute(
+            update(DomainState)
+            .where(DomainState.domain == "gone.example")
+            .values(blocked_at=func.now() - timedelta(days=90))
+        )
+        settings = {**runtime_settings.DEFAULTS, "block_retry_after_h": 24 * 80}
+        assert await feedback.retry_blocked(s, settings) == 1
+        (job,) = (
+            (
+                await s.execute(
+                    select(Job).where(Job.domain == "gone.example", Job.type == "fetch_http")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert job.status == "queued" and job.payload["url"] == probe["payload"]["url"]
+        assert job.payload["source"] == "shop" and job.priority == 2
