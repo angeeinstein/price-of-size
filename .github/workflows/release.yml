@@ -1,0 +1,84 @@
+name: Release
+
+# Push a tag vX.Y.Z (matching shared/pos_shared/version.py) to publish a release:
+# multi-arch images on GHCR, and a GitHub release with release.json (every image
+# pinned by digest) and install.sh. The coordinator signs a release only when an
+# admin registers it, so publishing here does not roll anything out by itself.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches the code version
+        run: |
+          code=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' shared/pos_shared/version.py)
+          [ "v$code" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != version.py $code"; exit 1; }
+          echo "VERSION=$code" >> "$GITHUB_ENV"
+          echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: coordinator
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/coordinator.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ env.VERSION }}
+          tags: ghcr.io/${{ env.OWNER }}/price-of-size-coordinator:${{ env.VERSION }}
+      - id: worker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/worker.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ env.VERSION }}
+          tags: ghcr.io/${{ env.OWNER }}/price-of-size-worker:${{ env.VERSION }}
+      - id: agent
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/agent.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ env.VERSION }}
+          tags: ghcr.io/${{ env.OWNER }}/price-of-size-agent:${{ env.VERSION }}
+
+      - name: Write release.json
+        env:
+          COORDINATOR: ghcr.io/${{ env.OWNER }}/price-of-size-coordinator@${{ steps.coordinator.outputs.digest }}
+          WORKER: ghcr.io/${{ env.OWNER }}/price-of-size-worker@${{ steps.worker.outputs.digest }}
+          AGENT: ghcr.io/${{ env.OWNER }}/price-of-size-agent@${{ steps.agent.outputs.digest }}
+        run: |
+          # Caddy is pinned by the digest of its multi-arch index.
+          caddy_digest=$(docker buildx imagetools inspect caddy:2.8-alpine --format '{{json .Manifest}}' | jq -r .digest)
+          jq -n --arg v "$VERSION" --arg c "$COORDINATOR" --arg w "$WORKER" --arg a "$AGENT" \
+                --arg caddy "caddy@$caddy_digest" \
+            '{version: $v, images: {coordinator: $c, worker: $w, agent: $a, caddy: $caddy}}' > release.json
+          cat release.json
+          jq -e '.images | to_entries | all(.value | test("@sha256:[0-9a-f]{64}$"))' release.json
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release.json install.sh \
+            --title "$GITHUB_REF_NAME" --generate-notes --verify-tag

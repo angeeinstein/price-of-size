@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from pos_shared import api
-from pos_shared.version import API_VERSION, API_VERSION_HEADER, __version__
+from pos_shared.version import API_VERSION, API_VERSION_HEADER, __version__, is_compatible
 from pos_worker.config import WorkerSettings
 from pos_worker.identity import Identity
 
@@ -122,6 +122,20 @@ class CoordinatorClient:
             self._raise(r)
             return r
         raise AssertionError("unreachable")
+
+    async def check_auth(self) -> None:
+        """Authenticate and check versions without changing any node state."""
+        r = await self._http.get("/api/v1/version")
+        self._raise(r)
+        theirs = r.json()["api_version"]
+        if not is_compatible(API_VERSION, theirs):
+            raise IncompatibleCoordinator(f"coordinator speaks {theirs}, we speak {API_VERSION}")
+        self._token = None
+        await self._ensure_token()
+
+    async def get_release(self, version: str) -> api.SignedManifest:
+        r = await self._call("GET", f"/api/v1/releases/{version}")
+        return api.SignedManifest.model_validate(r.json())
 
     async def heartbeat(self, hb: api.Heartbeat) -> api.HeartbeatResponse:
         r = await self._call("POST", "/api/v1/nodes/heartbeat", json=hb.model_dump(mode="json"))

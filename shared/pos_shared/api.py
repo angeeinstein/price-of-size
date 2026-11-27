@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Strict(BaseModel):
@@ -30,6 +30,9 @@ class EnrollRequest(Strict):
 class EnrollResponse(Strict):
     node_id: UUID
     coordinator_api_version: str
+    signing_public_key: str = Field(
+        description="Coordinator's Ed25519 signing key (base64url); nodes pin it"
+    )
 
 
 class ChallengeRequest(Strict):
@@ -50,6 +53,41 @@ class TokenRequest(Strict):
 class TokenResponse(Strict):
     access_token: str
     expires_at: datetime
+
+
+# --- releases --------------------------------------------------------------
+
+VERSION_PATTERN = r"^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$"
+# A digest-pinned image reference: name[:tag]@sha256:<64 hex>
+IMAGE_REF_PATTERN = r"^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$"
+
+
+class ReleaseManifest(Strict):
+    """What a release consists of, by immutable image digest."""
+
+    version: str = Field(pattern=VERSION_PATTERN)
+    images: dict[str, str] = Field(
+        description="component (worker, agent, coordinator) -> digest-pinned image reference"
+    )
+    created_at: datetime
+
+    @field_validator("images")
+    @classmethod
+    def _digest_pinned(cls, v: dict[str, str]) -> dict[str, str]:
+        import re
+
+        for component, ref in v.items():
+            if not re.fullmatch(r"[a-z_]{1,30}", component):
+                raise ValueError(f"bad component name {component!r}")
+            if not re.fullmatch(IMAGE_REF_PATTERN, ref):
+                raise ValueError(f"image for {component} must be pinned by digest: {ref!r}")
+        return v
+
+
+class SignedManifest(Strict):
+    manifest: ReleaseManifest
+    signature: str
+    key_id: str
 
 
 # --- heartbeat and control channel ---------------------------------------
@@ -81,9 +119,22 @@ class CommandResult(Strict):
     output: Any = None
 
 
+class AgentStatus(Strict):
+    """What the node agent (A/B updater) last reported through the shared volume."""
+
+    agent_version: str | None = Field(None, max_length=50)
+    active_slot: str | None = Field(None, max_length=5)
+    running_version: str | None = Field(None, max_length=50)
+    update_state: str | None = Field(None, max_length=30)  # idle | updating | failed | ...
+    update_target: str | None = Field(None, max_length=50)
+    update_error: str | None = Field(None, max_length=2000)
+    updated_at: datetime | None = None
+
+
 class Heartbeat(Strict):
     version: str
     state: RunState
+    agent: AgentStatus | None = None
     resources: Resources = Field(default_factory=Resources)
     concurrency: Concurrency = Field(default_factory=Concurrency)
     active_jobs: int = 0

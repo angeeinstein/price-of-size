@@ -15,6 +15,14 @@ The tests use `POS_TEST_DATABASE_URL`
 (default `postgresql+psycopg://pos:pos@localhost:5432/pos_test`) and **wipe that
 database**. DB tests are skipped if it is unreachable.
 
+## Docker tests
+
+`deploy/test/e2e_agent.py` builds three versions of the images, pushes them to
+a local registry and exercises bootstrap, updates, rollback, blue-green and
+agent self-update with real Docker. `deploy/test/install_test.sh` runs
+`install.sh` through its lifecycle. Both run in CI (`docker` job) and are
+destructive for `pos-*` resources on the Docker host.
+
 ## Running locally
 
 ```bash
@@ -53,6 +61,21 @@ and watch `GET /api/admin/jobs/stats`. Interactive API docs: `/docs`.
 | Cost ledger and budget pacing | `budget.py`, `llm_call` table |
 | Raw store on the NAS, content-addressed | `rawstore.py`, `api/raw.py` |
 | API versioning, incompatible workers refused | `pos_shared/version.py`, `api/deps.py` |
+| Signed releases, nodes pin the coordinator key | `pos_shared/signing.py`, `api/releases.py`, `signing_key.py` |
+| Node agent: A/B slots, health checks, rollback, self-update | `agent/pos_agent/` |
+| Blue-green coordinator, backup before migrations | `agent/pos_agent/services.py`, `coordinator/.../backup.py` |
+| Bootstrap script for all roles | `install.sh`, `deploy/docker/` |
+
+### Deviations from the spec
+
+- The agent manages containers itself (Docker Engine API) instead of Docker
+  Compose: it needs per-slot containers, health gates and rollback, which
+  Compose does not model. `install.sh` still drives everything.
+- The worker never gets the Docker socket. The agent updates itself through a
+  short-lived helper container from the new agent image, instead of the worker
+  recreating the agent; one healthy component always remains.
+- Caddy switches traffic through health-checked upstreams (both slots) rather
+  than reconfiguration, so a Caddy restart can never point at a stale slot.
 
 ### Deviations from the spec's draft names
 
@@ -72,9 +95,12 @@ Done in this step:
 - [x] Cost ledger table and budget pacing logic
 - [x] Gate test: dummy jobs end to end; a second worker joins and dies without data loss
 
+- [x] Docker images (amd64 + arm64), release workflow, `install.sh` for all roles
+- [x] Node agent with A/B slots, signed releases, blue-green coordinator, agent self-update
+- [x] Docker end-to-end test (`deploy/test/e2e_agent.py`) and installer lifecycle test
+
 Next steps:
 
 - [ ] Control panel skeleton (React + Vite + Tailwind + shadcn/ui), user accounts, live updates
-- [ ] Docker images (multi-arch), Compose stacks, `install.sh` for all roles
-- [ ] Node agent / updater with A/B slots, signed releases
 - [ ] Domain leases and adaptive per-domain rates (needed before real fetching in Phase 2)
+- [ ] Node dashboard (local web UI) and quiet hours; Raspberry Pi SD-card friendly spool

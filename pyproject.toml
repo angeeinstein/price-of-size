@@ -3,15 +3,16 @@ name = "price-of-size"
 version = "0.1.0"
 description = "The Price of Size: data collection system (workspace root)"
 requires-python = ">=3.12"
-dependencies = ["pos-shared", "pos-coordinator", "pos-worker"]
+dependencies = ["pos-shared", "pos-coordinator", "pos-worker", "pos-agent"]
 
 [tool.uv.workspace]
-members = ["shared", "coordinator", "worker"]
+members = ["shared", "coordinator", "worker", "agent"]
 
 [tool.uv.sources]
 pos-shared = { workspace = true }
 pos-coordinator = { workspace = true }
 pos-worker = { workspace = true }
+pos-agent = { workspace = true }
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.8"]
@@ -29,7 +30,7 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["pos_shared", "pos_coordinator", "pos_worker"]
+known-first-party = ["pos_shared", "pos_coordinator", "pos_worker", "pos_agent"]
 
 [tool.ruff.lint.per-file-ignores]
 "migrations/versions/*" = ["E501", "UP", "I"]

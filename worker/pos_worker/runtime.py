@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from pos_shared import api
+from pos_shared import api, exchange, signing
 from pos_shared.version import API_VERSION, __version__, is_compatible
 from pos_worker import cgroup, identity
 from pos_worker.client import CoordinatorClient, CoordinatorError, IncompatibleCoordinator
@@ -54,7 +54,7 @@ class RingLogHandler(logging.Handler):
         self.lines.append(self.format(record))
 
 
-class Agent:
+class Worker:
     def __init__(
         self,
         settings: WorkerSettings,
@@ -62,14 +62,17 @@ class Agent:
         transport: httpx.AsyncBaseTransport | None = None,
         handlers: dict[str, Handler] | None = None,
         log_buffer: RingLogHandler | None = None,
+        open_spool: bool = True,
     ):
         self.settings = settings
         self.handlers = handlers if handlers is not None else dict(HANDLERS)
         self.log_buffer = log_buffer
         self.identity = identity.load_or_create(settings.state_dir)
         self.client = CoordinatorClient(settings, self.identity, transport=transport)
+        # selftest runs beside the live worker and must not touch its spool
         spool_path = settings.spool_path or str(settings.state_dir / "spool.db")
-        self.spool = Spool(spool_path, settings.spool_max_results)
+        self.spool = Spool(spool_path if open_spool else ":memory:", settings.spool_max_results)
+        self.agent_dir = settings.agent_dir
 
         self.desired = api.DesiredState()
         self.local_paused = False
@@ -102,8 +105,9 @@ class Agent:
         resp = await self.client.enroll(self.settings.enrollment_code, name, self.capabilities)
         if not is_compatible(API_VERSION, resp.coordinator_api_version):
             raise IncompatibleCoordinator(resp.coordinator_api_version)
-        identity.save_node_id(self.settings.state_dir, resp.node_id)
+        identity.save_enrollment(self.settings.state_dir, resp.node_id, resp.signing_public_key)
         self.identity.node_id = resp.node_id
+        self.identity.coordinator_signing_key = resp.signing_public_key
         log.info("enrolled as node %s", resp.node_id)
 
     @property
@@ -185,6 +189,7 @@ class Agent:
                 browser_slots=self.slots.browser,
                 embed_batch=self.slots.embed_batch,
             ),
+            agent=self._agent_status(),
             active_jobs=len(self.active),
             spooled_results=self.spool.result_count(),
             command_results=[api.CommandResult(**c) for c in self.spool.unreported_commands()],
@@ -211,7 +216,72 @@ class Agent:
             self._capacity_freed.set()
         for cmd in resp.commands:
             await self._run_command(cmd)
+        if self.agent_dir is not None:
+            self._offer_signing_key()
+            exchange.write_health(self.agent_dir, __version__, node_id=str(self.identity.node_id))
+            await self._reconcile_release(resp.desired.target_version)
         return resp
+
+    # --- updates (through the node agent) ------------------------------------
+
+    def _offer_signing_key(self) -> None:
+        """The agent pins this once (trust on first use) in its own private volume."""
+        key = self.identity.coordinator_signing_key
+        assert self.agent_dir is not None
+        path = self.agent_dir / exchange.PINNED_KEY
+        if key and not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".{path.name}.tmp")
+            tmp.write_text(key + "\n")
+            tmp.replace(path)
+
+    def _agent_status(self) -> api.AgentStatus | None:
+        if self.agent_dir is None:
+            return None
+        raw = exchange.read_json(self.agent_dir / exchange.STATUS)
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return api.AgentStatus.model_validate(
+                {k: v for k, v in raw.items() if k in api.AgentStatus.model_fields}
+            )
+        except ValueError:
+            return None
+
+    async def _reconcile_release(self, target: str | None) -> None:
+        """Hand the signed manifest for the target version to the node agent.
+
+        The agent verifies the signature itself against its own pinned key; the
+        check here only avoids handing over something that will be refused.
+        """
+        if target is None or self.agent_dir is None:
+            return
+        path = self.agent_dir / exchange.DESIRED
+        current = exchange.read_json(path)
+        if isinstance(current, dict) and current.get("manifest", {}).get("version") == target:
+            return
+        signed = await self.client.get_release(target)
+        key = self.identity.coordinator_signing_key
+        payload = signed.manifest.model_dump(mode="json")
+        if key is None or not signing.verify(key, payload, signed.signature):
+            log.error("release %s has an invalid signature; not handing it to the agent", target)
+            return
+        exchange.write_json(path, signed.model_dump(mode="json"))
+        log.info("requested update to %s from the node agent", target)
+
+    async def selftest(self) -> dict[str, object]:
+        """Checks for `pos-worker selftest`. Values are True or an error description."""
+        report: dict[str, object] = {}
+        report["identity"] = (
+            True if self.identity.node_id is not None else "not enrolled (no node id)"
+        )
+        report["handlers"] = True if self.handlers else "no job handlers"
+        try:
+            await self.client.check_auth()
+            report["coordinator"] = True
+        except Exception as e:  # noqa: BLE001 - the report shows whatever went wrong
+            report["coordinator"] = f"{type(e).__name__}: {e}"
+        return report
 
     async def _heartbeat_loop(self) -> None:
         while True:

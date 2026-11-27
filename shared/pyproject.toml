@@ -3,7 +3,7 @@ name = "pos-shared"
 version = "0.1.0"
 description = "Shared schemas, ids and rules for The Price of Size"
 requires-python = ">=3.12"
-dependencies = ["pydantic>=2.7"]
+dependencies = ["pydantic>=2.7", "cryptography>=43"]
 
 [build-system]
 requires = ["hatchling"]

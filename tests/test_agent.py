@@ -200,7 +200,7 @@ async def test_stale_renewal_response_does_not_cancel_a_newer_attempt(app, admin
     """Codex finding: the response to a renewal of attempt N arrives after the job
     was leased again as attempt N+1; only attempt N may be considered lost."""
     from pos_shared import api
-    from pos_worker.agent import ActiveJob
+    from pos_worker.runtime import ActiveJob
 
     agent = await make_agent(app, admin, tmp_path / "a", "a")
     await admin.post(

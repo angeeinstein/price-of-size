@@ -81,6 +81,7 @@ def settings(db, tmp_path) -> Settings:
     return Settings(
         database_url=db,
         raw_store_path=tmp_path / "raw",
+        signing_key_path=tmp_path / "signing_key.pem",
         admin_token=ADMIN_TOKEN,
     )
 

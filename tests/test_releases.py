@@ -1,0 +1,113 @@
+"""Signed releases: registration, node delivery, and hand-over to the node agent."""
+
+from pos_coordinator import maintenance
+from pos_coordinator.backup import libpq_env, libpq_url
+from pos_shared import exchange, signing
+from tests.helpers import make_agent
+
+W = "ghcr.io/x/price-of-size-worker@sha256:" + "1" * 64
+A = "ghcr.io/x/price-of-size-agent@sha256:" + "2" * 64
+
+
+async def _release(admin, version="0.2.0", **images):
+    return await admin.post(
+        "/api/admin/releases",
+        json={"version": version, "images": images or {"worker": W, "agent": A}},
+    )
+
+
+async def test_releases_are_digest_pinned_signed_and_immutable(admin):
+    r = await _release(admin)
+    assert r.status_code == 201, r.text
+    signed = r.json()
+    key = (await admin.get("/api/admin/releases/signing-key")).json()["public_key"]
+    assert signing.verify(key, signed["manifest"], signed["signature"])
+    assert signed["key_id"] == signing.key_id(key)
+
+    assert (await _release(admin)).status_code == 409  # a version is one set of digests forever
+    r = await _release(admin, "0.3.0", worker="ghcr.io/x/worker:latest")
+    assert r.status_code == 422 and "pinned by digest" in r.text
+    r = await _release(admin, "not-a-version")
+    assert r.status_code == 422
+    listed = (await admin.get("/api/admin/releases")).json()
+    assert [x["manifest"]["version"] for x in listed] == ["0.2.0"]
+
+
+async def test_node_target_must_be_a_known_release(app, admin, tmp_path):
+    worker = await make_agent(app, admin, tmp_path / "w", "w")
+    node_id = worker.identity.node_id
+    r = await admin.patch(f"/api/admin/nodes/{node_id}", json={"target_version": "9.9.9"})
+    assert r.status_code == 422
+    await _release(admin)
+    r = await admin.patch(f"/api/admin/nodes/{node_id}", json={"target_version": "0.2.0"})
+    assert r.status_code == 200
+    await worker.client.aclose()
+
+
+async def test_worker_hands_signed_release_to_the_agent(app, admin, tmp_path):
+    exch = tmp_path / "exchange"
+    worker = await make_agent(app, admin, tmp_path / "w", "w", agent_dir=exch)
+    key = (await admin.get("/api/admin/releases/signing-key")).json()["public_key"]
+    assert worker.identity.coordinator_signing_key == key  # pinned at enrollment
+
+    await worker.heartbeat_once()
+    assert (exch / exchange.PINNED_KEY).read_text().strip() == key
+    assert exchange.read_json(exch / exchange.HEALTH)["version"] == "0.1.0"
+    assert not (exch / exchange.DESIRED).exists()
+
+    await _release(admin)
+    await admin.patch(
+        f"/api/admin/nodes/{worker.identity.node_id}", json={"target_version": "0.2.0"}
+    )
+    await worker.heartbeat_once()
+    desired = exchange.read_json(exch / exchange.DESIRED)
+    assert desired["manifest"]["version"] == "0.2.0"
+    assert signing.verify(key, desired["manifest"], desired["signature"])
+
+    # The agent's status comes back to the coordinator with the next heartbeat.
+    exchange.write_json(
+        exch / exchange.STATUS,
+        {
+            "agent_version": "0.1.0",
+            "active_slot": "a",
+            "running_version": "0.1.0",
+            "update_state": "health_check",
+            "update_target": "0.2.0",
+            "unknown_key": 1,
+        },
+    )
+    await worker.heartbeat_once()
+    node = (await admin.get("/api/admin/nodes")).json()[0]
+    assert node["agent_status"]["update_state"] == "health_check"
+    await worker.client.aclose()
+
+
+async def test_coordinator_syncs_its_own_agent_exchange(app, admin, tmp_path):
+    exch = tmp_path / "coord-exchange"
+    sm, key = app.state.sessionmaker, app.state.signing_key
+    await maintenance.run_once(sm, exch, key)
+    assert (exch / exchange.PINNED_KEY).read_text().strip() == signing.public_key_b64(key)
+    assert not (exch / exchange.DESIRED).exists()
+
+    await _release(admin, coordinator="ghcr.io/x/c@sha256:" + "3" * 64, agent=A)
+    await admin.put("/api/admin/settings/coordinator.target_version", json={"value": "0.2.0"})
+    await maintenance.run_once(sm, exch, key)
+    assert exchange.read_json(exch / exchange.DESIRED)["manifest"]["version"] == "0.2.0"
+
+    await admin.put("/api/admin/settings/coordinator.target_version", json={"value": None})
+    await maintenance.run_once(sm, exch, key)
+    assert not (exch / exchange.DESIRED).exists()  # mirrors the database
+
+
+def test_backup_connection_settings():
+    url = "postgresql+psycopg://pos:p%40ss@db.lan:6543/pos?sslmode=require"
+    assert libpq_url(url) == "postgresql://pos:p%40ss@db.lan:6543/pos?sslmode=require"
+    env = libpq_env(url)
+    assert env == {
+        "PGHOST": "db.lan",
+        "PGPORT": "6543",
+        "PGDATABASE": "pos",
+        "PGUSER": "pos",
+        "PGPASSWORD": "p@ss",
+        "PGSSLMODE": "require",
+    }

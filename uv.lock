@@ -4,6 +4,7 @@ requires-python = ">=3.12"
 
 [manifest]
 members = [
+    "pos-agent",
     "pos-coordinator",
     "pos-shared",
     "pos-worker",
@@ -621,6 +622,23 @@ wheels = [
 ]
 
 [[package]]
+name = "pos-agent"
+version = "0.1.0"
+source = { editable = "agent" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pos-shared" },
+    { name = "pydantic-settings" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pos-shared", editable = "shared" },
+    { name = "pydantic-settings", specifier = ">=2.4" },
+]
+
+[[package]]
 name = "pos-coordinator"
 version = "0.1.0"
 source = { editable = "coordinator" }
@@ -654,11 +672,15 @@ name = "pos-shared"
 version = "0.1.0"
 source = { editable = "shared" }
 dependencies = [
+    { name = "cryptography" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2.7" }]
+requires-dist = [
+    { name = "cryptography", specifier = ">=43" },
+    { name = "pydantic", specifier = ">=2.7" },
+]
 
 [[package]]
 name = "pos-worker"
@@ -686,6 +708,7 @@ name = "price-of-size"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "pos-agent" },
     { name = "pos-coordinator" },
     { name = "pos-shared" },
     { name = "pos-worker" },
@@ -700,6 +723,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "pos-agent", editable = "agent" },
     { name = "pos-coordinator", editable = "coordinator" },
     { name = "pos-shared", editable = "shared" },
     { name = "pos-worker", editable = "worker" },

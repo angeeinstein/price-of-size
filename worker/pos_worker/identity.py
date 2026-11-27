@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 KEY_FILE = "node_key.pem"
 IDENTITY_FILE = "identity.json"
+SIGNING_KEY_FILE = "coordinator_signing_key.pub"
 
 
 def _b64u(data: bytes) -> str:
@@ -23,6 +24,7 @@ def _b64u(data: bytes) -> str:
 class Identity:
     private_key: Ed25519PrivateKey
     node_id: uuid.UUID | None
+    coordinator_signing_key: str | None = None  # pinned at enrollment
 
     @property
     def public_key_b64(self) -> str:
@@ -51,15 +53,19 @@ def load_or_create(state_dir: Path) -> Identity:
         fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(pem)
-    node_id = None
+    node_id = signing_key = None
     id_path = state_dir / IDENTITY_FILE
     if id_path.exists():
-        node_id = uuid.UUID(json.loads(id_path.read_text())["node_id"])
-    return Identity(private_key=key, node_id=node_id)
+        data = json.loads(id_path.read_text())
+        node_id = uuid.UUID(data["node_id"])
+        signing_key = data.get("coordinator_signing_key")
+    return Identity(private_key=key, node_id=node_id, coordinator_signing_key=signing_key)
 
 
-def save_node_id(state_dir: Path, node_id: uuid.UUID) -> None:
+def save_enrollment(state_dir: Path, node_id: uuid.UUID, coordinator_signing_key: str) -> None:
     path = state_dir / IDENTITY_FILE
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"node_id": str(node_id)}))
+    tmp.write_text(
+        json.dumps({"node_id": str(node_id), "coordinator_signing_key": coordinator_signing_key})
+    )
     os.replace(tmp, path)

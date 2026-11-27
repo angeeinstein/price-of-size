@@ -13,7 +13,14 @@ from sqlalchemy import delete, func, select
 
 from pos_coordinator import budget, queue, runtime_settings
 from pos_coordinator.api.deps import AppSettings, CurrentAdmin, Session
-from pos_coordinator.models import AuditLog, EnrollmentCode, Node, NodeCommand, NodeToken
+from pos_coordinator.models import (
+    AuditLog,
+    EnrollmentCode,
+    Node,
+    NodeCommand,
+    NodeToken,
+    Release,
+)
 from pos_coordinator.security import hash_secret, new_enrollment_code, normalize_code
 from pos_shared.api import NodeLimits, RunState
 
@@ -74,6 +81,7 @@ def _node_view(n: Node, offline_after_s: int) -> dict[str, Any]:
         "desired_limits": n.desired_limits,
         "resources": n.resources,
         "concurrency": n.concurrency,
+        "agent_status": n.agent_status,
         "last_heartbeat_at": n.last_heartbeat_at,
         "online": online and n.revoked_at is None,
         "revoked_at": n.revoked_at,
@@ -113,7 +121,10 @@ async def update_node(
     if "run_state" in changes:
         node.desired_run_state = changes["run_state"]
     if "target_version" in changes:
-        node.desired_target_version = changes["target_version"]
+        target = changes["target_version"]
+        if target is not None and await session.get(Release, target) is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"unknown release {target}")
+        node.desired_target_version = target
     if "limits" in changes:
         node.desired_limits = changes["limits"]
     if "job_types" in changes:

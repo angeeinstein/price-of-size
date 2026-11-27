@@ -20,6 +20,8 @@ class WorkerSettings(BaseSettings):
     # ":memory:" keeps the spool in RAM (Raspberry Pi SD cards); default is state_dir/spool.db
     spool_path: str | None = None
     spool_max_results: int = 50_000
+    # Directory shared with the node agent (A/B updater); None = no agent (simple mode).
+    agent_dir: Path | None = None
 
     # Cloudflare Access service token, sent on every request when set.
     cf_access_client_id: str | None = None

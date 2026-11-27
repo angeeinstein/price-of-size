@@ -7,8 +7,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from pos_coordinator import maintenance
-from pos_coordinator.api import admin, jobs, nodes, raw
+from pos_coordinator import maintenance, signing_key
+from pos_coordinator.api import admin, jobs, nodes, raw, releases
 from pos_coordinator.api.deps import Session
 from pos_coordinator.config import Settings, get_settings
 from pos_coordinator.db import make_engine, make_sessionmaker
@@ -33,7 +33,12 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
         task = None
         if run_maintenance:
             task = asyncio.create_task(
-                maintenance.loop(app.state.sessionmaker, settings.reaper_interval_s)
+                maintenance.loop(
+                    app.state.sessionmaker,
+                    settings.reaper_interval_s,
+                    settings.agent_dir,
+                    app.state.signing_key,
+                )
             )
         try:
             yield
@@ -48,6 +53,7 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
     app.state.settings = settings
     app.state.rawstore = RawStore(settings.raw_store_path)
     app.state.partitions = PartitionCache()
+    app.state.signing_key = signing_key.load_or_create(settings.signing_key_path)
 
     @app.get("/healthz")
     async def healthz(session: Session):
@@ -58,6 +64,6 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
     async def version():
         return {"version": __version__, "api_version": API_VERSION}
 
-    for module in (nodes, jobs, raw, admin):
+    for module in (nodes, jobs, raw, releases, admin):
         app.include_router(module.router)
     return app

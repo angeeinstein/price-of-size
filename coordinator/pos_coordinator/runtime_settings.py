@@ -24,6 +24,8 @@ DEFAULTS: dict[str, Any] = {
     "html_archive_quota_gb": 100,
     "postgres_disk_budget_gb": 100,
     "coordinator.run_worker": False,
+    # Release the coordinator's own agent should run (None = stay on the current one).
+    "coordinator.target_version": None,
     "heartbeat_interval_s": 15.0,
     "job_lease_s": 300,
     "llm_models": {
@@ -41,6 +43,7 @@ VALIDATORS: dict[str, Any] = {
     "llm_budget_hard_cap_usd": lambda v: isinstance(v, int | float) and v >= 0,
     "heartbeat_interval_s": lambda v: isinstance(v, int | float) and 2 <= v <= 600,
     "job_lease_s": lambda v: isinstance(v, int) and 30 <= v <= 86400,
+    "coordinator.target_version": lambda v: v is None or isinstance(v, str),
 }
 
 

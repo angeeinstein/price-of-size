@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     db_max_overflow: int = 20
     db_pool_timeout_s: float = 30.0
     raw_store_path: Path = Path("/var/lib/pos/raw")
+    signing_key_path: Path = Path("/var/lib/pos/coordinator/signing_key.pem")
+    # Exchange directory shared with the coordinator's own agent (A/B updater).
+    agent_dir: Path | None = None
+    backup_dir: Path | None = None
 
     # Bootstrap admin token for the admin API until panel user accounts exist.
     admin_token: str | None = Field(None, min_length=32)

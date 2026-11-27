@@ -13,7 +13,9 @@ the code maps onto it and what is built so far.
 
 - `shared/pos_shared/`: ids (UUIDv7), wire schemas, API version. Used by both sides.
 - `coordinator/pos_coordinator/`: FastAPI app, models, job queue, auth, budget.
-- `worker/pos_worker/`: node agent (heartbeat, jobs, spool, cgroup-aware slots).
+- `worker/pos_worker/`: the worker (heartbeat, jobs, spool, cgroup-aware slots).
+- `agent/pos_agent/`: node agent (A/B updater) that runs the worker or coordinator in Docker.
+- `deploy/docker/`: images; `install.sh`: installer for all roles; `docs/operations.md`.
 - `migrations/`: Alembic. `alembic check` must report no drift.
 - `tests/`: pytest; DB tests need PostgreSQL + pgvector (`POS_TEST_DATABASE_URL`).
 

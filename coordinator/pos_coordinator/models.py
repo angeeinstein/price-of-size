@@ -137,6 +137,7 @@ class Node(Base):
     desired_target_version: Mapped[str | None] = mapped_column(Text)
     desired_limits: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'::jsonb"))
     desired_job_types: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+    agent_status: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     last_heartbeat_at: Mapped[datetime | None]
     enrolled_at: Mapped[datetime] = created()
     revoked_at: Mapped[datetime | None]
@@ -303,6 +304,19 @@ class Setting(Base):
     value: Mapped[Any] = mapped_column(JSONB)
     updated_at: Mapped[datetime] = created()
     updated_by: Mapped[str | None] = mapped_column(Text)
+
+
+class Release(Base):
+    """A release the coordinator has approved and signed (images pinned by digest)."""
+
+    __tablename__ = "release"
+    version: Mapped[str] = mapped_column(Text, primary_key=True)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    signature: Mapped[str] = mapped_column(Text)
+    key_id: Mapped[str] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created()
 
 
 class AuditLog(Base):
