@@ -129,6 +129,16 @@ def _reset_embedding_recheck():
 
 
 @pytest.fixture(autouse=True)
+def _reset_classifier_caches():
+    from pos_coordinator.classify import common, knn, proposals
+
+    common._nodes = knn._examples = None
+    proposals._last_run = 0.0
+    yield
+    common._nodes = knn._examples = None
+
+
+@pytest.fixture(autouse=True)
 def _reset_fetch_breaker():
     from pos_worker.fetch import breaker
 

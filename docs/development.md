@@ -174,4 +174,8 @@ pos-coordinator fx-refresh        # ECB reference rates (also fetched daily)
       retry once then flag, refusals, Message Batches with stage handlers
 - [x] Embeddings: `embed` jobs on workers (multilingual-e5-small, ONNX, pinned and
       verified), product and taxonomy vectors in pgvector, nearest categories
-- [ ] LLM proposals for mappings; LLM classification and k-NN classifier
+- [x] Classification tiers (`classify/common.py`): precedence, attempts kept, versions
+      with model, taxonomy and generation; k-NN over stratified labels (`knn.py`),
+      LLM picks from the 20 nearest categories (`by_llm.py`), LLM mapping proposals
+      with a reviewer's note (`proposals.py`); panel: classification status, k-NN
+      check, proposal review

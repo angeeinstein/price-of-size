@@ -513,6 +513,8 @@ class CategoryMapping(Base):
     confidence: Mapped[float | None] = mapped_column(Float)
     created_by: Mapped[str | None] = mapped_column(Text)
     is_current: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    # why: an LLM's one-line reason for a reviewer, or what went wrong in an attempt
+    note: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = created()
 
 
@@ -625,6 +627,15 @@ class Measurement(Base):
 
 class Classification(Base):
     __tablename__ = "classification"
+    __table_args__ = (
+        # at most one current classification per product
+        Index(
+            "uq_classification_current",
+            "product_id",
+            unique=True,
+            postgresql_where=text("is_current"),
+        ),
+    )
     id: Mapped[uuid.UUID] = pk()
     product_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("product.id"), index=True)
     taxonomy_node_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("taxonomy_node.id"))

@@ -13,6 +13,7 @@ from pos_coordinator import maintenance, rawstore, signing_key
 from pos_coordinator.api import admin, crawl, jobs, nodes, raw, releases
 from pos_coordinator.api import taxonomy as taxonomy_api
 from pos_coordinator.api.deps import Session
+from pos_coordinator.classify import by_llm, proposals  # registers their batch handlers
 from pos_coordinator.config import Settings, get_settings
 from pos_coordinator.db import make_engine, make_sessionmaker
 from pos_coordinator.derive import fx
@@ -44,18 +45,25 @@ async def fx_daily(sm) -> None:
 
 
 async def llm_loop(service, interval_s: float) -> None:
-    """Collect finished Message Batches (the stages' handlers store the answers)."""
+    """Collect finished Message Batches (the stages' handlers store the answers) and
+    queue new LLM work: mapping proposals first (one mapping classifies many
+    products), then classification of single products."""
     log = logging.getLogger("pos_coordinator.llm")
     while True:
-        try:
-            if service.available():
-                n = await service.poll_batches()
-                if n:
-                    log.info("LLM batches: %d results handled", n)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("polling LLM batches failed")
+        if service.available():
+            for name, step in (
+                ("polling LLM batches", service.poll_batches),
+                ("queueing mapping proposals", lambda: proposals.schedule(service.sm, service)),
+                ("queueing LLM classification", lambda: by_llm.schedule(service.sm, service)),
+            ):
+                try:
+                    n = await step()
+                    if any(n.values()) if isinstance(n, dict) else n:
+                        log.info("%s: %s", name, n)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("%s failed", name)
         await asyncio.sleep(interval_s)
 
 

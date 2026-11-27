@@ -99,7 +99,19 @@ export type ReleaseRow = { manifest: { version: string; images: Record<string, s
 
 export type CategoryPathRow = { source: string; path: string; products: number;
   mapping_id: string | null; taxonomy_node_id: string | null; method: string | null;
-  confidence: number | null; node_path: string | null; node_external_id: string | null };
+  confidence: number | null; node_path: string | null; node_external_id: string | null;
+  note: string | null; created_by: string | null };
+
+export type ClassificationStatus = { products: number; unclassified: number; embedded: number;
+  generation: number;
+  current: { tier: string; version: string; products: number; avg_confidence: number | null;
+    below_0_6: number; at_least_0_8: number }[];
+  attempts: { tier: string; rows: number; no_category: number }[];
+  batches: { stage: string; batches: number; requests: number }[];
+  agreement: { tier: string; compared: number; agreed: number }[] };
+
+export type KnnEval = { examples: number; evaluated: number;
+  thresholds: { threshold: number; coverage: number; accuracy: number | null }[] };
 
 export type TaxonomyHit = { id: string; external_id: string; path: string;
   local_path: string | null; is_custom: boolean };

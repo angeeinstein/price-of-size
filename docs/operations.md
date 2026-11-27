@@ -297,6 +297,41 @@ them when a mapping changes, and never overrides a classification made by hand.
 Mappings are curated data: a rebuild of the derived layer keeps them, and the
 previous mapping of a path stays as history.
 
+### Classification tiers
+
+A product has one current classification; the tiers, most trusted first, are
+manual, LLM pick, shop mapping and k-NN. A tier never replaces a more trusted one.
+Every row names its tier, classifier version and confidence. Results that do not
+become current are kept as attempts, so the same version never asks twice.
+
+* **LLM mapping proposals.** Shop category paths with at least
+  `category_mapping_min_products` products (default 3) and no mapping go to the
+  `category_mapping` model (Sonnet). Each request carries a few product titles and
+  the 20 taxonomy categories nearest to the products' embeddings. The answer
+  becomes a mapping with method `llm`, a confidence and a one-line reason.
+  Panel: Categories, "LLM proposals": *Confirm* turns it into a manual mapping;
+  *Map* changes it. The LLM never touches a manual mapping. Switch:
+  `category_mapping_proposals`.
+* **k-NN.** It learns from the products with a manual, LLM or shop-mapping label:
+  every manual and LLM label, plus at most 20 shop-mapping labels per shop and
+  category. It needs at least 50 examples before it starts. The 15 nearest
+  examples vote; a vote share of at least `classify_knn_min_confidence` (0.8)
+  classifies the product. "Check k-NN" in the panel shows accuracy and coverage
+  per threshold, measured against the LLM and manual labels.
+* **LLM picks.** Products without a classification, or with a k-NN or shop-mapping
+  one below `classify_llm_below_confidence` (0.8), go to the default model (Haiku,
+  batch). The model picks from the 20 nearest categories or answers "none".
+  Batches hold up to `classify_llm_per_round` products (1000). Switch:
+  `classify_llm`. While the k-NN classifier is active, a product waits for its
+  k-NN attempt first. Products in a shop category whose mapping is still being
+  proposed also wait.
+
+The prompts hold only what stays the same for a product (no price), so a rebuild
+asks the same questions and gets the answers from the ledger at no cost. A new
+taxonomy import, another model, or *Run again* in the panel (a new generation)
+runs the classifiers again. LLM questions that are unchanged are answered from the
+ledger; only new ones cost budget.
+
 Exchange rates: the ECB reference rates are fetched daily. An offer in another
 currency that arrives before its rate is stored with `no_fx_rate` and converted
 (and its product's price recomputed) once the rate is there;
