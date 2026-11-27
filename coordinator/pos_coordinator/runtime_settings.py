@@ -55,6 +55,12 @@ DEFAULTS: dict[str, Any] = {
     "category_mapping_proposals": True,
     "category_mapping_min_products": 3,
     "classification_generation": 0,
+    # Price validity: robust z-score beyond which a product's price per kg or m³ is a
+    # category outlier; flagged offers go to the LLM review (at most
+    # `price_review_per_round` per batch).
+    "category_outlier_z": 3.5,
+    "price_review": True,
+    "price_review_per_round": 500,
     "llm_models": {
         "default": "claude-haiku-5-5",
         "parser_generation": "claude-sonnet-5-5",
@@ -105,6 +111,11 @@ VALIDATORS: dict[str, Any] = {
     "category_mapping_proposals": lambda v: isinstance(v, bool),
     "category_mapping_min_products": _int_in(1, 1_000_000),
     "classification_generation": _int_in(0, 1_000_000),
+    "category_outlier_z": lambda v: (
+        isinstance(v, int | float) and not isinstance(v, bool) and 1 <= v <= 100
+    ),
+    "price_review": lambda v: isinstance(v, bool),
+    "price_review_per_round": _int_in(1, 5_000),
 }
 
 

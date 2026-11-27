@@ -597,6 +597,27 @@ class Offer(Base):
     validator_version: Mapped[str | None] = mapped_column(Text)
 
 
+class PriceReview(Base):
+    """The LLM's verdict on a flagged offer (validity/review.py). Derived: rebuilt with
+    the offers (the answers come back from the ledger)."""
+
+    __tablename__ = "price_review"
+    __table_args__ = (
+        CheckConstraint(
+            "verdict IN ('valid','placeholder','wrong_price_type','pack_mismatch',"
+            "'wrong_product','unclear')",
+            name="price_review_verdict",
+        ),
+    )
+    id: Mapped[uuid.UUID] = pk()
+    offer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("offer.id"), index=True)
+    verdict: Mapped[str] = mapped_column(Text)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    reason: Mapped[str | None] = mapped_column(Text)
+    validator_version: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = created()
+
+
 class Measurement(Base):
     __tablename__ = "measurement"
     __table_args__ = (

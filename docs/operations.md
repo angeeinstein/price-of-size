@@ -337,6 +337,26 @@ currency that arrives before its rate is stored with `no_fx_rate` and converted
 (and its product's price recomputed) once the rate is there;
 `pos-coordinator fx-refresh` does both at once.
 
+### Price checks
+
+Beyond the checks on each product's own offers (other shops, earlier visits), the
+coordinator compares every product's price per kilogram and per cubic metre with
+its category. It does this hourly, on a log scale, with a robust z-score (median
+and MAD). A category with fewer than 20 comparable products uses its parent's
+distribution. Products beyond `category_outlier_z` (3.5) get `category_outlier` on
+their offers.
+
+Flagged offers (far from other shops, two shops disagreeing, a jump between visits,
+a category outlier) go to the LLM review: the default model in batches, at most
+`price_review_per_round` (500) offers per batch, switch `price_review`. The model
+sees the product, the extracted price and the page's price text. It answers valid,
+placeholder, wrong price type (unit price, monthly rate, net, "from", rental),
+pack mismatch, wrong product, or unclear. A rejection with medium or high
+confidence sets `review_rejected`: the offer no longer counts for the product's
+price. Panel: Price checks lists the flags and the latest verdicts with their
+reasons. A rebuild drops reviews and outlier flags and compares prices without
+them; both come back afterwards, the reviews from the ledger.
+
 ## Embeddings
 
 Workers turn product texts (title, shop category path, size and mass) and taxonomy
