@@ -172,9 +172,14 @@ async def heartbeat(
     if body.agent is not None:
         node.agent_status = body.agent.model_dump(mode="json")
     node.last_heartbeat_at = func.now()
-    if ip is not None and ip != node.egress_ip:
-        node.egress_ip = ip
-        node.egress_group = egress_group_for(ip)
+    if ip is not None:
+        # the group follows the address and the grouping rules of this version (a node
+        # enrolled before a rule changed is regrouped by its next heartbeat)
+        group = egress_group_for(ip)
+        known = str(node.egress_ip) if node.egress_ip is not None else None  # INET
+        if ip != known or group != node.egress_group:
+            node.egress_ip = ip
+            node.egress_group = group
 
     for res in body.command_results:
         await session.execute(

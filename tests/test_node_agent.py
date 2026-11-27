@@ -498,13 +498,12 @@ def test_caddy_trusts_the_visitor_address_only_from_trusted_proxies(bind, proxie
         assert server["client_ip_headers"] == ["CF-Connecting-IP", "X-Forwarded-For"]
     else:
         assert "trusted_proxies" not in server and "client_ip_headers" not in server
-    # every request carries Caddy's own client address, overwriting the caller's
-    first = server["routes"][0]["handle"][0]
-    assert first == {
-        "handler": "headers",
-        "request": {"set": {"X-Pos-Client-Ip": ["{http.vars.client_ip}"]}},
-    }
-    assert server["routes"][0]["handle"][1]["handler"] == "reverse_proxy"
+    # every upstream request carries Caddy's own client address, overwriting the
+    # caller's, set by the proxy itself (after hop-by-hop removal: Connection cannot
+    # strip it)
+    (proxy,) = server["routes"][0]["handle"]
+    assert proxy["handler"] == "reverse_proxy"
+    assert proxy["headers"] == {"request": {"set": {"X-Pos-Client-Ip": ["{http.vars.client_ip}"]}}}
 
 
 def test_a_malformed_trusted_proxy_is_an_error():

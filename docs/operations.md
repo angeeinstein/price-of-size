@@ -106,8 +106,10 @@ browser would not send it back otherwise); everywhere else it keeps it.
 
 The visitor's address (sign-in rate limits, the audit log, a node's egress group)
 comes from Caddy: it believes `CF-Connecting-IP` only from `--trusted-proxy` (on
-loopback only: from every caller, since only this machine can call) and passes its
-result on in `X-Pos-Client-Ip`, overwriting whatever a caller sent. Without
+loopback only: from every caller, since only this machine can call) and sets its
+result on every upstream request as `X-Pos-Client-Ip`, overwriting whatever a
+caller sent; the coordinator reads nothing else (not `CF-Connecting-IP` or
+`X-Forwarded-For` themselves, which a caller could send). Without
 `--trusted-proxy`, visitors through a cloudflared on another host appear with that
 host's address. `GET /api/admin/connection` shows how the coordinator sees a
 request (address, egress group, HTTPS) to check the setup.
@@ -116,6 +118,8 @@ Callers on a local network (RFC 1918, loopback, link-local, IPv6 ULA) share one
 egress group, `lan`: they leave through the same public address, so they share one
 budget per domain. A node of the same network that comes in through the tunnel is
 grouped by its public address instead; keep the nodes of one site on one path.
+A node's group is recomputed at every heartbeat, so a change of these rules
+reaches nodes enrolled before it.
 
 ## The node agent
 

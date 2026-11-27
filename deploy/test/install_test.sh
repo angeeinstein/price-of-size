@@ -60,6 +60,10 @@ wait_for 60 "Caddy on all addresses" bash -c \
 wait_for 60 "coordinator healthy on the LAN listener" curl -fsS "http://127.0.0.1:$PORT/healthz"
 seen=$(seen_ip)
 [[ "$seen" != 203.0.113.9 ]] || fail "a forged CF-Connecting-IP from an untrusted caller was believed"
+# nor when the caller asks Caddy to drop its header as hop-by-hop
+seen=$(admin -H 'CF-Connecting-IP: 203.0.113.9' -H 'Connection: X-Pos-Client-Ip' \
+  "http://127.0.0.1:$PORT/api/admin/connection" | jq -r .client_ip)
+[[ "$seen" != 203.0.113.9 && "$seen" != null ]] || fail "Connection: X-Pos-Client-Ip got a forged address in"
 admin "http://127.0.0.1:$PORT/api/admin/connection" | jq -e '.local_network and .egress_group == "lan"' \
   >/dev/null || fail "a caller on the local network must be in the lan egress group"
 grep -qx 'LISTEN=0.0.0.0' /etc/pos/install.conf || fail "--listen not kept for re-runs"

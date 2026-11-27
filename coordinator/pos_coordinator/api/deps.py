@@ -143,18 +143,13 @@ CLIENT_IP_HEADER = "x-pos-client-ip"  # set by Caddy, overwriting what callers s
 
 def client_ip(request: Request, settings: Settings) -> str | None:
     """Public egress IP of the caller as the coordinator sees it. Behind the agent's
-    Caddy, its X-Pos-Client-Ip: Caddy believes CF-Connecting-IP only from trusted
-    proxies (the cloudflared host) and overwrites the header on every request."""
+    Caddy (trust_proxy_headers), only its X-Pos-Client-Ip: Caddy believes
+    CF-Connecting-IP / X-Forwarded-For only from trusted proxies (the cloudflared
+    host) and sets the header on every upstream request, overwriting the caller's.
+    Those headers themselves are never read here: a caller could send them."""
     candidates: list[str] = []
-    if settings.trust_proxy_headers:
-        if own := request.headers.get(CLIENT_IP_HEADER):
-            candidates.append(own.strip())
-        elif cf := request.headers.get("cf-connecting-ip"):
-            candidates.append(cf.strip())
-        if not request.headers.get(CLIENT_IP_HEADER) and (
-            xff := request.headers.get("x-forwarded-for")
-        ):
-            candidates.append(xff.split(",")[0].strip())
+    if settings.trust_proxy_headers and (own := request.headers.get(CLIENT_IP_HEADER)):
+        candidates.append(own.strip())
     if request.client:
         candidates.append(request.client.host)
     for c in candidates:

@@ -316,20 +316,22 @@ class CoordinatorService(Service):
                             "routes": [
                                 {
                                     "handle": [
-                                        # the client address as Caddy determined it,
-                                        # overwriting whatever the caller sent: the
-                                        # coordinator reads only this header
-                                        {
-                                            "handler": "headers",
-                                            "request": {
-                                                "set": {
-                                                    "X-Pos-Client-Ip": ["{http.vars.client_ip}"]
-                                                }
-                                            },
-                                        },
                                         {
                                             "handler": "reverse_proxy",
                                             "upstreams": upstreams,
+                                            # the client address as Caddy determined it,
+                                            # overwriting whatever the caller sent: the
+                                            # coordinator reads only this header. Set on
+                                            # the upstream request, after hop-by-hop
+                                            # headers (Connection: ...) are removed, so a
+                                            # caller cannot have it stripped.
+                                            "headers": {
+                                                "request": {
+                                                    "set": {
+                                                        "X-Pos-Client-Ip": ["{http.vars.client_ip}"]
+                                                    }
+                                                }
+                                            },
                                             "load_balancing": {
                                                 "selection_policy": {"policy": "first"},
                                                 "try_duration": "15s",

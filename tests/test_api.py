@@ -119,7 +119,7 @@ async def test_egress_group_from_proxy_header(app, admin, settings):
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://c",
-        headers={API_VERSION_HEADER: "1.0", "CF-Connecting-IP": "2001:db8::1234"},
+        headers={API_VERSION_HEADER: "1.0", "X-Pos-Client-Ip": "2001:db8::1234"},
     ) as c:
         _, pub = keypair()
         r = await enroll(c, admin, pub)
@@ -147,6 +147,13 @@ async def test_the_client_address_behind_caddy(app, admin, settings):
         "local_network": True,
         "https": False,
     }
+    # without Caddy's header (a caller had it stripped), CF-Connecting-IP and
+    # X-Forwarded-For are never believed: the peer's own address counts
+    r = await admin.get(
+        "/api/admin/connection",
+        headers={"CF-Connecting-IP": "203.0.113.9", "X-Forwarded-For": "198.51.100.1"},
+    )
+    assert r.json()["client_ip"] == "127.0.0.1"
     r = await admin.get(
         "/api/admin/connection",
         headers={"X-Pos-Client-Ip": "203.0.113.9", "X-Forwarded-Proto": "https"},
