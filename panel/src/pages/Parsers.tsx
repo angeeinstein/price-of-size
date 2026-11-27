@@ -34,7 +34,8 @@ function TestRun({ id }: { id: string }) {
             <div>
               <div className="text-muted">LLM tier</div>
               {r.llm ? <>
-                <div>price: {r.llm.price_text ?? "—"}</div>
+                <div>price: {r.llm.price_text ?? "—"} {r.llm.currency ?? ""}
+                  {r.llm.price_kind && !["item", "unknown"].includes(r.llm.price_kind) && <> ({r.llm.price_kind})</>}</div>
                 {r.llm.sizes?.map((s, i) => <div key={i}>{s.label}: {s.value}</div>)}
               </> : <div className="text-muted">not read by the LLM</div>}
             </div>
@@ -69,7 +70,8 @@ export function ParsersPage() {
       <p className="text-sm text-muted">
         Per-site parsers: CSS selectors the LLM wrote for a shop from pages the LLM tier had read, checked on
         further pages before they run. A page passes when the parser finds every price and size the LLM found
-        there. One version per domain is active; every version is kept.
+        there, with the same currency and the same kind of size (product or package, net or gross). One version
+        per domain is active; every version is kept.
       </p>
       <Card>
         <CardHeader title="Versions" />
@@ -87,7 +89,13 @@ export function ParsersPage() {
                       {p.validation_score !== null && !p.error && <span className="ml-1 text-xs text-muted">({Math.round(p.validation_score * 100)} %)</span>}
                     </Td>
                     <Td>{p.active ? <Badge tone="ok">active</Badge> : p.error ? <Badge tone="bad">refused</Badge> : <Badge tone="muted">inactive</Badge>}
-                      {p.error && <div className="text-xs text-muted">{p.error}</div>}</Td>
+                      {p.error && <div className="text-xs text-muted">{p.error}</div>}
+                      {!p.active && !p.error && p.qualified_prices > 0 && (
+                        <div className="text-xs text-muted">
+                          {p.qualified_prices} checked {p.qualified_prices === 1 ? "page shows" : "pages show"} a unit, monthly,
+                          net or “from” price, which a parser reads as the item price: activate by hand after a test run
+                        </div>
+                      )}</Td>
                     <Td className="text-xs text-muted">{p.created_by} · {new Date(p.created_at).toLocaleString()}</Td>
                     <Td className="whitespace-nowrap">
                       {!p.error && <Button size="sm" variant="outline" className="mr-1" onClick={() => setOpen(open === p.id ? null : p.id)}>Test</Button>}

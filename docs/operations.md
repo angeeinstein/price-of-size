@@ -374,9 +374,12 @@ and is checked on, only the pages the current one left to the LLM: the ones a
 changed template broke. Specs are untrusted input: size limits, compiled
 selectors, no code. Regular expressions are checked by their structure (no
 repetition or alternation inside repetition, no back-references) and run with a
-50 ms limit per match. A price's currency must match the LLM's on the held-out
-pages; a bare "$" or "kr" is the shop's default currency when that uses the
-symbol. Panel: Parsers lists every version with its check. *Test* runs a version on
+50 ms limit per match. On the held-out pages, a price's currency must match the
+LLM's, and a size its basis (product or package) and net or gross. A bare "$" or
+"kr" is the shop's default currency when that uses the symbol. A page whose price
+the LLM read as a unit, monthly, net or "from" price never passes (a parser reads
+item prices only). A shop with such pages among the checked ones gets no automatic
+activation: a person activates its parser after a test run. Panel: Parsers lists every version with its check. *Test* runs a version on
 the shop's latest archived pages, beside the LLM's answers. Activating or
 deactivating needs a recent sign-in. Switch: `site_parsers`.
 

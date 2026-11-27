@@ -27,6 +27,8 @@ def _row(p: Parser) -> dict[str, Any]:
         "validation_score": p.validation_score,
         "held_out": check.get("held_out"),
         "train": check.get("train"),
+        # checked pages with a unit, monthly, net or "from" price: not activated on its own
+        "qualified_prices": check.get("qualified_prices") or 0,
         "error": (p.artifact or {}).get("error"),
         "created_by": p.created_by,
         "created_at": p.created_at,

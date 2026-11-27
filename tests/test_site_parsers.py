@@ -171,6 +171,23 @@ def test_a_page_passes_only_in_the_currency_the_llm_read():
     assert site_parsers.page_passes(aud, page.encode(), answer, "en")
 
 
+def test_a_page_passes_only_with_the_meaning_the_llm_read():
+    spec = site_parser.parse(SPEC)
+    page = _html(1).encode()  # "Gewicht: 35 kg" in its table, price 1.299,00 €
+    assert site_parsers.page_passes(spec, page, _answer_for(1), "de")
+    # the LLM read the weight as the shipping weight (package, gross): the spec's
+    # unlabelled weight is not the same measurement
+    shipping = _answer_for(1)
+    shipping["sizes"] = [{"label": "Versandgewicht", "value": "35 kg"}]
+    assert not site_parsers.page_passes(spec, page, shipping, "de")
+    # a price the LLM read as a monthly (unit, net, "from") price: a spec reads item
+    # prices only
+    for kind in ("monthly", "unit_price", "net", "from_price"):
+        assert not site_parsers.page_passes(spec, page, {**_answer_for(1), "price_kind": kind},
+                                            "de")  # fmt: skip
+    assert site_parsers.page_passes(spec, page, {**_answer_for(1), "price_kind": "unknown"}, "de")
+
+
 def test_condensed_html_for_the_llm():
     t = site_parser.condensed_html(_html(1))
     assert t.startswith("<body>") and "tracking" not in t and "color:red" not in t
@@ -278,7 +295,7 @@ async def test_a_parser_is_generated_checked_activated_and_used(app, admin):
         assert wanted is None
     # the panel's view and a test run beside the LLM's answers
     (row,) = (await admin.get("/api/admin/parsers")).json()
-    assert row["active"] and row["held_out"] == [15, 15]
+    assert row["active"] and row["held_out"] == [15, 15] and row["qualified_prices"] == 0
     runs = (await admin.get(f"/api/admin/parsers/{row['id']}/test")).json()
     assert runs and all(r["passes"] in (True, None) for r in runs)
     assert any(r["found"]["price"] == "1.299,00 €" for r in runs)
@@ -301,6 +318,21 @@ async def test_a_parser_that_fails_its_check_stays_inactive(app):
         await s.execute(update(Parser).values(created_at=datetime.now(UTC) - timedelta(days=8)))
         await s.commit()
     assert await site_parsers.schedule(sm, llm, store) == {"parsers_requested": 1}
+
+
+async def test_a_shop_with_qualified_prices_waits_for_a_person(app):
+    sm, store = await _world(app)
+    async with sm() as s:
+        row = (await s.execute(select(LlmExtraction).limit(1))).scalar_one()
+        row.output = {**row.output, "price_kind": "monthly"}
+        await s.commit()
+    await _generate(sm, store, SPEC)
+    async with sm() as s:
+        (p,) = (await s.execute(select(Parser))).scalars().all()
+    # good enough by its score, but the shop shows a monthly price somewhere: a spec
+    # would read it as the item's price, so it is not activated on its own
+    assert p.validation_score >= 0.9 and not p.active
+    assert p.artifact["_check"]["qualified_prices"] == 1
 
 
 async def test_an_unsafe_answer_is_recorded_not_run(app):

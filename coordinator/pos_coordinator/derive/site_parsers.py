@@ -153,13 +153,23 @@ def _close(a: float | None, b: float | None, tol: float) -> bool:
     return abs(a - b) <= tol * max(abs(a), abs(b), 1e-12)
 
 
+def qualified_price(answer: dict[str, Any]) -> bool:
+    """The LLM read the page's price as something other than the item's price."""
+    return answer.get("price_kind") in set(llm_page.PRICE_KINDS) - {"item", "unknown"}
+
+
 def page_passes(
     spec: site_parser.SiteSpec, page: bytes, answer: dict[str, Any], locale: str | None
 ) -> bool:
-    """The spec finds every price and size the LLM tier found on the page (and the
-    price in the currency the LLM read)."""
+    """The spec finds every price and size the LLM tier found on the page, with the
+    same meaning: the price in the currency the LLM read, each size with the same
+    basis (product, package) and net or gross. A page whose price the LLM read as
+    something other than the item's price (a unit, monthly, net or "from" price)
+    never passes: a spec only reads item prices."""
     want_price, want_sizes = _expected(answer, locale)
     got = site_parser.run(spec, page)
+    if want_price is not None and qualified_price(answer):
+        return False
     if want_price is not None:
         got_price = units.parse_number(got.price_text or "", locale)
         if not _close(want_price, got_price, PRICE_TOLERANCE):
@@ -173,7 +183,8 @@ def page_passes(
         have = spectext.measurements(got.pairs, locale)
         for w in want_sizes:
             if not any(
-                all(
+                (h.basis, h.net_or_gross) == (w.basis, w.net_or_gross)
+                and all(
                     _close(getattr(w, k), getattr(h, k), SIZE_TOLERANCE)
                     for k in ("a_m", "b_m", "c_m", "mass_kg", "true_volume_m3")
                     if getattr(w, k) is not None
@@ -321,8 +332,9 @@ async def _schedule(
 
 async def score(
     session: AsyncSession, store: RawStore, spec: site_parser.SiteSpec, fetch_ids: list[uuid.UUID]
-) -> tuple[int, int]:
-    """(pages passed, pages checked) of a spec on pages the LLM tier answered."""
+) -> tuple[int, int, int]:
+    """(pages passed, pages checked, pages with a qualified price) of a spec on pages
+    the LLM tier answered."""
     from pos_coordinator.derive.stage import _load
 
     rows = (
@@ -340,7 +352,7 @@ async def score(
             )
         )
     ).all()
-    passed = checked = 0
+    passed = checked = qualified = 0
     for html_sha, blob_sha, answer in rows:
         page = await asyncio.to_thread(_html, store, html_sha)
         evidence = await asyncio.to_thread(_load, store, blob_sha) if blob_sha else None
@@ -349,8 +361,9 @@ async def score(
         snip = (evidence or {}).get("snippets") or {}
         locale = (snip.get("lang") or "")[:2].lower() or None
         checked += 1
+        qualified += qualified_price(answer)
         passed += await asyncio.to_thread(page_passes, spec, page, answer, locale)
-    return passed, checked
+    return passed, checked, qualified
 
 
 async def store_parser(
@@ -425,19 +438,21 @@ async def handle(session: AsyncSession, outcome: service.Outcome) -> None:
     if store is None or not store.available():
         log.warning("parser for %s generated; checking it waits for the raw store", domain)
         return  # not stored: the domain is asked again once the store is back
-    passed, checked = await score(session, store, spec, held)
-    train_passed, train_checked = await score(session, store, spec, train)
+    passed, checked, qualified = await score(session, store, spec, held)
+    train_passed, train_checked, train_qualified = await score(session, store, spec, train)
     value = passed / checked if checked else 0.0
     cfg = await runtime_settings.get_all(session)
     good = checked >= MIN_HELD_OUT and value >= float(cfg["parser_min_score"])
+    # a shop that shows unit, monthly, net or "from" prices: a spec would read them
+    # as item prices, so a person decides (the panel's test run shows the pages)
+    auto = bool(cfg["parser_auto_activate"]) and not (qualified or train_qualified)
     artifact = {
         **spec.model_dump(mode="json"),
         "_check": {
             "engine": site_parser.ENGINE_VERSION,
             "held_out": [passed, checked],
             "train": [train_passed, train_checked],
+            "qualified_prices": qualified + train_qualified,
         },
     }
-    await store_parser(
-        session, domain, artifact, round(value, 4), good and bool(cfg["parser_auto_activate"]), by
-    )
+    await store_parser(session, domain, artifact, round(value, 4), good and auto, by)
