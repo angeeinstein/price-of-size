@@ -171,6 +171,14 @@ class Manager:
 
     # --- service lifecycle -------------------------------------------------------------
 
+    async def _obtain(self, image: str) -> None:
+        """Pull for an update, unless a digest-pinned image is already here: the digest
+        names the exact bytes, so a rollback to the previous release (whose images
+        were kept) works while the registry is down or credentials have expired."""
+        if "@sha256:" in image and await self.docker.image_exists(image):
+            return
+        await self.docker.pull(image)
+
     async def _ensure_image(self, image: str) -> None:
         if not await self.docker.image_exists(image):
             log.info("pulling %s", image)
@@ -272,10 +280,10 @@ class Manager:
 
         try:
             phase("pulling")
-            await self.docker.pull(image)
+            await self._obtain(image)
             for extra in self.service.extra_components:
                 if extra in manifest.images:
-                    await self.docker.pull(manifest.images[extra])
+                    await self._obtain(manifest.images[extra])
 
             phase("selftest")
             await self.service.run_once(
@@ -368,7 +376,7 @@ class Manager:
         log.info("updating the agent itself to %s", manifest.version)
         st.update_state, st.update_target = "agent_update", manifest.version
         self._save(st)
-        await self.docker.pull(target)
+        await self._obtain(target)
         helper = f"{self.settings.container_name}-updater"
         await self.docker.remove(helper)
         await self.docker.create(helper, self._helper_config(target, manifest.version))

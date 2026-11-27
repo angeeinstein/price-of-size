@@ -213,12 +213,15 @@ async def test_failed_selftest_changes_nothing_and_is_not_retried_at_once(env, k
     assert docker.containers["pos-worker-a"]["State"]["Running"]
     assert ("stop", "pos-worker-a") not in docker.events
 
-    pulls = len([e for e in docker.events if e == ("pull", D2)])
+    def attempts():  # each update attempt self-tests the new image
+        return len([e for e in docker.events if e[0] == "create" and "selftest" in e[1]])
+
+    tried = attempts()
     await m.reconcile_once()
-    assert len([e for e in docker.events if e == ("pull", D2)]) == pulls  # backed off
+    assert attempts() == tried  # backed off
     clock.t += env.failed_retry_after_s + 1
     await m.reconcile_once()
-    assert len([e for e in docker.events if e == ("pull", D2)]) == pulls + 1  # retried later
+    assert attempts() == tried + 1  # retried later
 
 
 async def test_unhealthy_new_version_is_rolled_back(env, key):
@@ -455,3 +458,20 @@ async def test_config_drift_recreates_the_service(env, key):
     c = docker.containers["pos-worker-a"]
     assert c is not first and "POS_WORKER_COORDINATOR_URL=https://new.example" in c["Config"]["Env"]
     assert c["State"]["Running"]
+
+
+async def test_rollback_works_while_the_registry_is_down(env, key):
+    """Codex finding: the previous release's images are kept, and a digest names exact
+    bytes, so going back must not depend on the registry."""
+    docker = FakeDocker()
+    m, clock = make_manager(env, docker)
+    docker.on_start = healthy_worker(env, clock)
+    await m.reconcile_once()
+    offer(env, key, "0.2.0", {"worker": D2, "agent": A1})
+    assert (await m.reconcile_once()).slots["b"].version == "0.2.0"
+    docker.fail_pull.update({D1, D2})  # registry unreachable from now on
+    docker.events.clear()
+    offer(env, key, "0.1.0", {"worker": D1, "agent": A1})
+    st = await m.reconcile_once()
+    assert st.slots[st.active].version == "0.1.0" and st.update_state == "idle"
+    assert not [e for e in docker.events if e[0] == "pull"]
