@@ -43,6 +43,12 @@ MAX_DOMAINS_PER_LEASE = 50
 SLOW_START_PAGES = 10
 MAX_BATCH_PER_DOMAIN = 10  # jobs of one domain per lease call, at most
 ROBOTS_SKIP_LOOKAHEAD = 20
+INSERT_CHUNK = 5000  # rows per statement (bind parameters are limited to 65,535)
+
+
+def _chunks(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
 
 
 @dataclass(frozen=True)
@@ -136,32 +142,38 @@ async def enqueue_urls(
             }
         )
     if rows and skip_done_within is not None:
-        recent = set(
-            (
-                await session.execute(
-                    select(Job.dedup_key).where(
-                        Job.dedup_key.in_([r["dedup_key"] for r in rows]),
-                        Job.status == "done",
-                        Job.finished_at > func.now() - skip_done_within,
+        recent: set[str] = set()
+        for part in _chunks(rows, INSERT_CHUNK):
+            recent |= set(
+                (
+                    await session.execute(
+                        select(Job.dedup_key).where(
+                            Job.dedup_key.in_([r["dedup_key"] for r in part]),
+                            Job.status == "done",
+                            Job.finished_at > func.now() - skip_done_within,
+                        )
                     )
-                )
-            ).scalars()
-        )
+                ).scalars()
+            )
         report.duplicates += sum(1 for r in rows if r["dedup_key"] in recent)
         rows = [r for r in rows if r["dedup_key"] not in recent]
     if not rows:
         return report
     await ensure_domains(session, domains)
-    stmt = (
-        pg_insert(Job)
-        .values(rows)
-        .on_conflict_do_nothing(
-            index_elements=["dedup_key"],
-            index_where=text("status IN ('queued', 'leased') AND dedup_key IS NOT NULL"),
+    inserted = 0
+    # PostgreSQL takes at most 65,535 bind parameters per statement (6 per row here):
+    # a 50,000-URL sitemap is inserted in parts.
+    for part in _chunks(rows, INSERT_CHUNK):
+        stmt = (
+            pg_insert(Job)
+            .values(part)
+            .on_conflict_do_nothing(
+                index_elements=["dedup_key"],
+                index_where=text("status IN ('queued', 'leased') AND dedup_key IS NOT NULL"),
+            )
+            .returning(Job.id)
         )
-        .returning(Job.id)
-    )
-    inserted = len((await session.execute(stmt)).scalars().all())
+        inserted += len((await session.execute(stmt)).scalars().all())
     report.queued = inserted
     report.duplicates += len(rows) - inserted
     return report
@@ -171,22 +183,25 @@ async def ensure_domains(session: AsyncSession, domains: dict[str, str]) -> None
     """Create domain rows (and their robots.txt jobs) for new domains."""
     if not domains:
         return
-    await session.execute(
-        pg_insert(DomainState)
-        .values([{"domain": d} for d in domains])
-        .on_conflict_do_nothing(index_elements=["domain"])
-    )
-    # Only domains whose rules are unknown need robots.txt now; known ones are refreshed
-    # by the scheduler when robots_next_check_at comes due.
-    unknown = set(
-        (
-            await session.execute(
-                select(DomainState.domain).where(
-                    DomainState.domain.in_(list(domains)), DomainState.robots_status.is_(None)
+    names = sorted(domains)
+    unknown: set[str] = set()
+    for part in _chunks(names, INSERT_CHUNK):
+        await session.execute(
+            pg_insert(DomainState)
+            .values([{"domain": d} for d in part])
+            .on_conflict_do_nothing(index_elements=["domain"])
+        )
+        # Only domains whose rules are unknown need robots.txt now; known ones are
+        # refreshed by the scheduler when robots_next_check_at comes due.
+        unknown |= set(
+            (
+                await session.execute(
+                    select(DomainState.domain).where(
+                        DomainState.domain.in_(part), DomainState.robots_status.is_(None)
+                    )
                 )
-            )
-        ).scalars()
-    )
+            ).scalars()
+        )
     for domain, sample_url in domains.items():
         if domain in unknown:
             await ensure_robots_job(session, domain, urls.robots_url(sample_url))

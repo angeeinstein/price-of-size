@@ -336,3 +336,18 @@ def test_an_empty_group_for_us_replaces_the_star_group():
     assert robots.allowed("rules", text, "https://a.example/p/1")
     only_ua = "User-agent: *\nDisallow: /\n\nUser-agent: PriceOfSizeBot\n"
     assert robots.allowed("rules", only_ua, "https://a.example/p/1")
+
+
+async def test_huge_sitemaps_are_queued_in_parts(sessionmaker):
+    """20,000 URLs at 6 bind parameters each would exceed PostgreSQL's 65,535 limit."""
+    async with sessionmaker() as s:
+        urls_ = [f"https://big.example/p/{i}" for i in range(20_000)]
+        r = await scheduler.enqueue_urls(s, urls_, "t", skip_done_within=timedelta(hours=1))
+        assert r.queued == 20_000
+        again = await scheduler.enqueue_urls(s, urls_, "t", skip_done_within=timedelta(hours=1))
+        assert (again.queued, again.duplicates) == (0, 20_000)
+
+
+def test_an_unresolved_robots_redirect_is_not_allow_all():
+    assert robots.status_kind(301) == "unreachable"
+    assert robots.status_kind(204) == "rules"

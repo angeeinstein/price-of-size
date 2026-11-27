@@ -145,7 +145,7 @@ _GATE = _DomainGate()
 MIN_INTERVAL_S = 1.0
 
 
-async def _gated_fetch(job: api.LeasedJob, url: str, max_bytes: int):
+async def _gated_fetch(job: api.LeasedJob, url: str, max_bytes: int, **fetch_kw):
     """Wait for the rate slot, then fetch politely. None if the domain is paused."""
     domain = urlsplit(url).hostname or ""
     delay = float(job.payload.get("delay_s", 0) or 0)
@@ -161,7 +161,7 @@ async def _gated_fetch(job: api.LeasedJob, url: str, max_bytes: int):
             await _GATE.wait(domain, interval)
             client = client_for(str(job.payload.get("user_agent") or DEFAULT_UA))
             fetched_at = datetime.now(UTC)
-            res = await http.fetch(client, url, max_bytes=max_bytes)
+            res = await http.fetch(client, url, max_bytes=max_bytes, **fetch_kw)
     return fetched_at, res
 
 
@@ -254,7 +254,7 @@ async def fetch_http(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
 async def fetch_robots(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
     url = str(job.payload["url"])  # https://host/robots.txt
     domain = urlsplit(url).hostname or ""
-    got = await _gated_fetch(job, url, ROBOTS_MAX_BYTES)
+    got = await _gated_fetch(job, url, ROBOTS_MAX_BYTES, cross_host_redirects=True)
     if got is None:
         return _skipped(job, domain)
     fetched_at, res = got

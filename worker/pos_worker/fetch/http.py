@@ -236,7 +236,9 @@ def _same_host(a: str, b: str) -> bool:
     return (urlsplit(a).hostname or "").lower() == (urlsplit(b).hostname or "").lower()
 
 
-async def _get(client: httpx.AsyncClient, url: str, res: Response, max_bytes: int) -> None:
+async def _get(
+    client: httpx.AsyncClient, url: str, res: Response, max_bytes: int, cross_host: bool
+) -> None:
     for _ in range(MAX_REDIRECTS + 1):
         if urlsplit(url).scheme not in ("http", "https"):
             res.error = "bad_url"
@@ -250,7 +252,7 @@ async def _get(client: httpx.AsyncClient, url: str, res: Response, max_bytes: in
             location = r.headers.get("location")
             if r.status_code in REDIRECTS and location:
                 target = urljoin(str(r.url), location)
-                if not _same_host(target, str(r.url)):
+                if not cross_host and not _same_host(target, str(r.url)):
                     res.redirected_to = target  # the coordinator decides about that host
                     return
                 url = target
@@ -274,12 +276,15 @@ async def fetch(
     url: str,
     max_bytes: int = MAX_BODY_BYTES,
     total_timeout_s: float = TOTAL_TIMEOUT_S,
+    cross_host_redirects: bool = False,
 ) -> Response:
+    """`cross_host_redirects`: robots.txt only (RFC 9309 follows its redirects across
+    hosts, e.g. to www. or a CDN); every hop still passes the address check."""
     started = time.monotonic()
     res = Response(url=url)
     try:
         async with asyncio.timeout(total_timeout_s):
-            await _get(client, url, res, max_bytes)
+            await _get(client, url, res, max_bytes, cross_host_redirects)
     except (TimeoutError, httpx.TimeoutException):
         res.error = "timeout"
     except BadEncoding:

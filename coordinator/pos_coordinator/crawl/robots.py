@@ -23,9 +23,11 @@ def status_kind(status: int | None) -> str:
         return "unreachable"
     if 400 <= status < 500:
         return "none"
-    if status == 200:
+    if 200 <= status < 300:
         return "rules"
-    return "none"  # e.g. 3xx loops that ended elsewhere: no usable rules
+    # 1xx, or a 3xx the worker could not resolve (too many redirects, no Location):
+    # nothing says the site allows everything, so treat it as unavailable.
+    return "unreachable"
 
 
 def _token(value: str) -> str:

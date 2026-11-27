@@ -143,3 +143,17 @@ async def test_overflow_keeps_the_prefix_that_fits(lab):
             assert r.body.startswith(b"User-agent: *\nDisallow: /")
             r = await http.fetch(c, s.url("/plain"), max_bytes=1000)
             assert r.error == "too_large" and r.body == b"x" * 1000
+
+
+async def test_robots_txt_follows_redirects_to_other_hosts(lab):
+    """RFC 9309: robots.txt redirects are followed, also to www. or a CDN."""
+    async with Server() as s:
+        s.routes["/robots.txt"] = respond(
+            status=301, headers=[f"Location: http://localhost:{s.port}/real-robots.txt"]
+        )
+        s.routes["/real-robots.txt"] = respond(b"User-agent: *\nDisallow: /\n")
+        async with http.make_client("t") as c:
+            pages = await http.fetch(c, s.url("/robots.txt"))
+            assert pages.redirected_to and pages.body == b""  # pages: not followed
+            r = await http.fetch(c, s.url("/robots.txt"), cross_host_redirects=True)
+            assert r.status == 200 and r.body.startswith(b"User-agent: *")
