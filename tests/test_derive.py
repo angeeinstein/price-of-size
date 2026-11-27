@@ -201,3 +201,43 @@ async def test_rebuild_drill_reproduces_the_derived_layer(world):
     async with sm() as s:
         cur = (await s.execute(select(DeriveCursor))).scalar_one()
     assert cur.version == stage.VERSION and cur.processed == 12
+
+
+async def test_scatter_for_the_log_log_plot(world, app):
+    import httpx
+
+    from pos_coordinator.app import create_app  # noqa: F401
+    from tests.conftest import ADMIN_TOKEN
+
+    sm, store = world
+    things = [
+        ("10", "1 kg", "10 x 10 x 10 cm"),
+        ("100", "10 kg", "20 x 20 x 20 cm"),
+        ("1000", "100 kg", "50 x 50 x 40 cm"),
+    ]  # all with plausible densities
+    for i, (price, mass, dims) in enumerate(things):
+        await _fetch(
+            sm,
+            store,
+            _evidence("", price, "EUR", name=f"Thing {i}", mass=mass, dims=dims),
+            f"https://s.example/{i}",
+            "s",
+        )
+    await _fetch(
+        sm,
+        store,
+        _evidence("", "50", "EUR", name="Lead brick", mass="900 kg", dims="10 x 10 x 10 cm"),
+        "https://s.example/lead",
+        "s",
+    )
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://c",
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+    ) as c:
+        r = (await c.get("/api/panel/scatter", params={"x": "mass"})).json()
+        assert (await c.get("/api/panel/scatter", params={"x": "bogus"})).status_code == 422
+    # the implausible lead brick (900,000 kg/m³) is not plotted
+    assert r["n"] == 3 and {p["t"] for p in r["points"]} == {"Thing 0", "Thing 1", "Thing 2"}
+    assert r["fit"]["slope"] == pytest.approx(1.0)  # price ∝ mass in this toy world

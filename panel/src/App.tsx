@@ -4,6 +4,7 @@ import { ReauthDialog } from "@/components/ReauthDialog";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { AccountPage } from "@/pages/Account";
 import { DomainsPage } from "@/pages/Domains";
+import { ExplorerPage } from "@/pages/Explorer";
 import { JobsPage } from "@/pages/Jobs";
 import { LoginPage } from "@/pages/Login";
 import { NodesPage } from "@/pages/Nodes";
@@ -26,6 +27,7 @@ function Gate() {
           <Route path="/jobs" element={<JobsPage />} />
           <Route path="/domains" element={<DomainsPage />} />
           <Route path="/sources" element={<SourcesPage />} />
+          <Route path="/explorer" element={<ExplorerPage />} />
           <Route path="/releases" element={<ReleasesPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/users" element={<UsersPage />} />

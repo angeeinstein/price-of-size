@@ -376,3 +376,64 @@ async def stream(request: Request, viewer: CurrentViewer):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
+
+
+# --- analysis -------------------------------------------------------------------------
+
+SCALARS = {
+    "mass": "m.mass_kg",
+    "volume": "m.a_m * m.b_m * m.c_m",
+    "longest": "m.a_m",
+    "charlen": "cbrt(m.a_m * m.b_m * m.c_m)",
+}
+
+
+@router.get("/scatter")
+async def scatter(
+    viewer: CurrentViewer,
+    session: Session,
+    x: str = "mass",
+    limit: int = 5000,
+    source: str | None = None,
+):
+    """Price against a size scalar, one point per product: its canonical price and its
+    most trustworthy measurement (no implausibility flags; product > unknown > package)."""
+    import math
+
+    if x not in SCALARS:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, f"x must be one of {list(SCALARS)}"
+        )
+    limit = max(1, min(limit, 20000))
+    rows = (
+        await session.execute(
+            text(f"""
+        SELECT p.id, p.title, p.source, p.canonical_price_eur::float AS price, best.x
+        FROM product p
+        JOIN LATERAL (
+            SELECT {SCALARS[x]} AS x
+            FROM measurement m
+            WHERE m.product_id = p.id AND cardinality(m.flags) = 0
+              AND {SCALARS[x]} IS NOT NULL AND {SCALARS[x]} > 0
+            ORDER BY CASE m.basis WHEN 'product' THEN 0 WHEN 'unknown' THEN 1 ELSE 2 END,
+                     m.confidence DESC NULLS LAST
+            LIMIT 1
+        ) best ON true
+        WHERE p.canonical_price_eur > 0 AND (CAST(:source AS text) IS NULL OR p.source = :source)
+        ORDER BY random()
+        LIMIT :limit
+    """),
+            {"source": source, "limit": limit},
+        )
+    ).all()
+    points = [{"id": r.id, "t": r.title, "s": r.source, "p": r.price, "x": r.x} for r in rows]
+    fit = None
+    if len(points) >= 3:
+        lx = [math.log10(pt["x"]) for pt in points]
+        ly = [math.log10(pt["p"]) for pt in points]
+        mx, my = sum(lx) / len(lx), sum(ly) / len(ly)
+        sxx = sum((a - mx) ** 2 for a in lx)
+        if sxx > 0:
+            slope = sum((a - mx) * (b - my) for a, b in zip(lx, ly, strict=True)) / sxx
+            fit = {"slope": slope, "intercept": my - slope * mx}
+    return {"x": x, "n": len(points), "points": points, "fit": fit}

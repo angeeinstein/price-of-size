@@ -32,7 +32,7 @@ try {
   await page.waitForSelector("text=Nodes online");
   await shot("overview");
 
-  for (const p of ["nodes", "jobs", "domains", "sources", "releases", "settings", "users", "account"]) {
+  for (const p of ["nodes", "jobs", "domains", "sources", "explorer", "releases", "settings", "users", "account"]) {
     await page.click(`a[href="/${p}"]`);
     await page.waitForLoadState("networkidle");
     await shot(p);
