@@ -250,3 +250,50 @@ async def test_running_batches_count_against_the_budget(sessionmaker):
     assert 0 < first < 100  # only what the budget covers
     _, second = await llm.submit_batch(tasks[first:])
     assert second == 0  # the running batch's estimate already uses the rest
+
+
+class Titled(BaseModel):
+    title: str
+    default: int
+
+
+def test_fields_named_like_schema_metadata_stay():
+    s = service.strict_schema(Titled)
+    assert set(s["properties"]) == {"title", "default"}
+    assert s["required"] == ["title", "default"]
+
+
+async def test_running_batches_are_reserved_for_synchronous_calls(sessionmaker):
+    async with sessionmaker() as s:
+        await runtime_settings.put(s, "llm_budget_hard_cap_usd", 1, "test")
+        s.add(LlmBatch(remote_id="msgbatch_x", stage="x", model="claude-haiku-5-5",
+                       request_count=1, estimated_cost_usd=Decimal("0.9999")))  # fmt: skip
+        await s.commit()
+    fake = FakeClient()
+    with pytest.raises(BudgetDeferred):
+        await LlmService(sessionmaker, lambda: fake).run(_task(priority=Priority.high))
+    assert fake.calls == []
+
+
+async def test_a_retry_is_checked_against_the_budget_again(sessionmaker):
+    async with sessionmaker() as s:
+        await runtime_settings.put(s, "llm_budget_hard_cap_usd", 0.0015, "test")
+        await s.commit()
+    # the first, invalid answer costs more than the whole budget
+    fake = FakeClient(
+        [_msg("nope", tokens=(20_000, 10)), _msg('{"category": "x", "confidence": 1}')]
+    )
+    with pytest.raises(BudgetDeferred):
+        await LlmService(sessionmaker, lambda: fake).run(
+            _task(priority=Priority.high, max_tokens=100)
+        )
+    assert len(fake.calls) == 1  # no second paid attempt
+    assert [r.output["status"] for r in await _ledger(sessionmaker)] == ["invalid"]
+
+
+async def test_an_answer_from_a_fallback_model_is_reused(sessionmaker):
+    fake = FakeClient([_msg('{"category": "x", "confidence": 0.5}', model="claude-sonnet-5")])
+    llm = LlmService(sessionmaker, lambda: fake)
+    await llm.run(_task(model_role="category_mapping"))
+    again = await llm.run(_task(model_role="category_mapping"))
+    assert again.cached and again.data.category == "x" and len(fake.calls) == 1

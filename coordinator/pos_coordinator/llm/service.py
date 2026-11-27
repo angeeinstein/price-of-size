@@ -105,7 +105,14 @@ def strict_schema(model: type[BaseModel]) -> dict[str, Any]:
         if isinstance(node, dict):
             if "$ref" in node:
                 return fix(defs[node["$ref"].rsplit("/", 1)[-1]])
-            out = {k: fix(v) for k, v in node.items() if k not in ("title", "default")}
+            out = {}
+            for k, v in node.items():
+                if k in ("title", "default"):
+                    continue  # schema metadata
+                if k == "properties" and isinstance(v, dict):
+                    out[k] = {name: fix(sub) for name, sub in v.items()}  # field names stay
+                else:
+                    out[k] = fix(v)
             if out.get("type") == "object" and "properties" in out:
                 out["additionalProperties"] = False
                 out["required"] = list(out["properties"])
@@ -247,28 +254,47 @@ class LlmService:
             s.add(row)
             await s.commit()
 
-    async def _cached(self, h: str, model: str) -> dict[str, Any] | None:
+    async def _cached(self, h: str) -> dict[str, Any] | None:
+        """The last valid answer to the same input. The hash includes the requested
+        model; the row's model is the one that answered (a fallback model may)."""
         async with self.sm() as s:
             out = (
                 await s.execute(
                     select(LlmCall.output)
-                    .where(
-                        LlmCall.input_hash == h,
-                        LlmCall.model == model,
-                        LlmCall.output["status"].astext == "ok",
-                    )
+                    .where(LlmCall.input_hash == h, LlmCall.output["status"].astext == "ok")
                     .order_by(LlmCall.created_at.desc())
                     .limit(1)
                 )
             ).scalar_one_or_none()
         return out
 
+    async def _budget(self) -> tuple[budget.BudgetStatus, Decimal]:
+        """The budget status and what batches still running have reserved (they are
+        not in the ledger until their results come back)."""
+        async with self.sm() as s:
+            status = await budget.status(s)
+            pending = (
+                await s.execute(
+                    select(func.coalesce(func.sum(LlmBatch.estimated_cost_usd), 0)).where(
+                        LlmBatch.status == "submitted"
+                    )
+                )
+            ).scalar_one()
+        return status, Decimal(pending)
+
+    async def _admit(self, task: Task, model: str) -> None:
+        status, reserved = await self._budget()
+        if not status.allows(task.priority):
+            raise BudgetDeferred(f"budget {status.state}: {task.priority} work deferred")
+        if status.remaining_usd - reserved < estimate_cost(model, task, batch=False):
+            raise BudgetDeferred("the remaining budget does not cover this call")
+
     # --- one call --------------------------------------------------------------------
 
     async def run(self, task: Task) -> Outcome:
         model = await self.model_for(task.model_role)
         h = input_hash(model, task)
-        hit = await self._cached(h, model)
+        hit = await self._cached(h)
         if hit is not None:
             try:
                 return Outcome(
@@ -276,16 +302,12 @@ class LlmService:
                 )
             except ValidationError:
                 pass  # the schema changed since: ask again
-        async with self.sm() as s:
-            status = await budget.status(s)
-        if not status.allows(task.priority):
-            raise BudgetDeferred(f"budget {status.state}: {task.priority} work deferred")
-        if status.remaining_usd < estimate_cost(model, task, batch=False):
-            raise BudgetDeferred("the remaining budget does not cover this call")
         client = self.client
         total = Decimal(0)
         detail = None
         for attempt in (1, 2):
+            # checked before every paid attempt: the first one may have used the rest
+            await self._admit(task, model)
             params = _params(model, task)
             if model in FALLBACK_MODELS:
                 msg = await client.beta.messages.create(
@@ -338,16 +360,7 @@ class LlmService:
         if any(t.stage != stage for t in tasks) or stage not in HANDLERS:
             raise ValueError(f"one registered stage per batch (got {stage!r})")
         model = await self.model_for(tasks[0].model_role)
-        async with self.sm() as s:
-            status = await budget.status(s)
-            # batches still running are not in the ledger yet: count their estimate
-            pending = (
-                await s.execute(
-                    select(func.coalesce(func.sum(LlmBatch.estimated_cost_usd), 0)).where(
-                        LlmBatch.status == "submitted"
-                    )
-                )
-            ).scalar_one()
+        status, pending = await self._budget()
         if not status.allows(tasks[0].priority):
             raise BudgetDeferred(f"budget {status.state}: batch deferred")
         # spend at most today's allowance (the remaining budget for high priority)
@@ -355,13 +368,13 @@ class LlmService:
             status.remaining_usd
             if tasks[0].priority == Priority.high
             else min(status.remaining_usd, status.daily_allowance_usd - status.spent_today_usd)
-        ) - Decimal(pending)
+        ) - pending
         chosen: list[tuple[str, Task]] = []
         spent = Decimal(0)
         handled = 0
         for task in tasks[:MAX_BATCH_REQUESTS]:
             h = input_hash(model, task)
-            hit = await self._cached(h, model)
+            hit = await self._cached(h)
             if hit is not None:
                 try:
                     data = task.schema.model_validate(hit["data"])
