@@ -88,3 +88,52 @@ async def test_historic_fetch_months_get_their_partition_on_demand(app, admin, t
         assert await _partition_of(s, fetch.id) == "raw_fetch_2019_03"
         assert (await s.execute(select(func.count()).select_from(RawFetch))).scalar_one() == 1
     await worker.client.aclose()
+
+
+async def test_result_submission_needs_only_one_pooled_connection(settings, admin, tmp_path):
+    """Codex finding: concurrent submissions for new months must not each wait for a
+    second connection while holding one (pool exhaustion)."""
+    import asyncio
+
+    import httpx
+
+    from pos_coordinator.app import create_app
+    from pos_shared.api import FetchRecord, JobOutcome, JobResult
+    from tests.helpers import make_agent
+
+    tight = settings.model_copy(
+        update={"db_pool_size": 1, "db_max_overflow": 0, "db_pool_timeout_s": 5.0}
+    )
+    app = create_app(tight, run_maintenance=False)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://coordinator",
+            headers={"Authorization": admin.headers["Authorization"]},
+        ) as admin2,
+    ):
+        workers = [await make_agent(app, admin2, tmp_path / f"w{i}", f"w{i}") for i in range(3)]
+        await admin2.post("/api/admin/jobs", json={"jobs": [{"type": "noop"}] * 3})
+        batches = []
+        for i, w in enumerate(workers):
+            (job,) = await w.client.lease(["noop"], 1)
+            fetch = FetchRecord(
+                id=uuid7(),
+                url=f"https://x.invalid/{i}",
+                mode="dataset",
+                fetched_at=datetime(2015, i + 1, 1, tzinfo=UTC),
+            )
+            r = JobResult(
+                job_id=job.id, attempt=job.attempt, outcome=JobOutcome.done, fetches=[fetch]
+            )
+            batches.append((w, r))
+        acks = await asyncio.wait_for(
+            asyncio.gather(
+                *(w.client.push_results([r.model_dump(mode="json")]) for w, r in batches)
+            ),
+            timeout=30,
+        )
+        assert all(len(a.accepted) == 1 for a in acks)
+        for w in workers:
+            await w.client.aclose()

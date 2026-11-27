@@ -10,7 +10,7 @@ their month's partition is created.
 from datetime import date, datetime
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 MONTHS_AHEAD = 3
 
@@ -50,12 +50,17 @@ class PartitionCache:
     def __init__(self) -> None:
         self.known: set[date] = set()
 
-    async def ensure_months(self, sm: async_sessionmaker[AsyncSession], months: set[date]) -> None:
+    async def ensure_months(self, session: AsyncSession, months: set[date]) -> None:
+        """Create missing partitions in their own transaction on the caller's session.
+
+        The caller's open transaction is committed first, so one request never
+        needs two pooled connections at once.
+        """
         missing = months - self.known
         if not missing:
             return
-        async with sm() as session:
-            for m in sorted(missing):
-                await ensure(session, m, 1)
-            await session.commit()
+        await session.commit()
+        for m in sorted(missing):
+            await ensure(session, m, 1)
+        await session.commit()
         self.known |= missing

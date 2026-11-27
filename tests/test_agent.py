@@ -194,3 +194,31 @@ async def test_leases_renewed_independently_of_heartbeat(app, admin, tmp_path, s
     await asyncio.sleep(0)
     assert task.cancelled() or task.cancelling()
     await agent.client.aclose()
+
+
+async def test_stale_renewal_response_does_not_cancel_a_newer_attempt(app, admin, tmp_path):
+    """Codex finding: the response to a renewal of attempt N arrives after the job
+    was leased again as attempt N+1; only attempt N may be considered lost."""
+    from pos_shared import api
+    from pos_worker.agent import ActiveJob
+
+    agent = await make_agent(app, admin, tmp_path / "a", "a")
+    await admin.post(
+        "/api/admin/jobs", json={"jobs": [{"type": "sleep", "payload": {"seconds": 60}}]}
+    )
+    assert await agent.lease_once() == 1
+    (old,) = agent.active.values()
+    newer_job = old.job.model_copy(update={"attempt": old.job.attempt + 1})
+    newer = ActiveJob(job=newer_job, task=asyncio.create_task(asyncio.sleep(60)), renew_at=1e18)
+
+    async def slow_extend(leases):
+        agent.active[old.job.id] = newer  # finished and re-leased while the call was in flight
+        return api.ExtendResponse(extended=[], lost=[old.job.id], lease_seconds=300)
+
+    agent.client.extend = slow_extend
+    await agent.renew_leases_once(now=old.renew_at + 1)
+    assert agent.active[old.job.id] is newer
+    assert not newer.task.cancelled()
+    newer.task.cancel()
+    old.task.cancel()
+    await agent.client.aclose()

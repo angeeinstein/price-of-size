@@ -22,7 +22,12 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        engine = make_engine(settings.database_url)
+        engine = make_engine(
+            settings.database_url,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout_s,
+        )
         app.state.engine = engine
         app.state.sessionmaker = make_sessionmaker(engine)
         task = None

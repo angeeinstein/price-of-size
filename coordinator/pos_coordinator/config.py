@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="POS_", env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+psycopg://pos:pos@localhost:5432/pos"
+    # Every request uses at most one pooled connection; size for nodes x concurrency.
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+    db_pool_timeout_s: float = 30.0
     raw_store_path: Path = Path("/var/lib/pos/raw")
 
     # Bootstrap admin token for the admin API until panel user accounts exist.

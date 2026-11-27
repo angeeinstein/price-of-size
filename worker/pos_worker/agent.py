@@ -331,16 +331,19 @@ class Agent:
         )
         renewed = set(resp.extended)
         for a in due:
-            if a.job.id in renewed:
+            if a.job.id in renewed and self.active.get(a.job.id) is a:
                 a.renew_at = started + _renew_after(resp.lease_seconds)
+        sent_attempts = {a.job.id: a.job.attempt for a in due}
         for job_id in resp.lost:
-            entry = self.active.pop(job_id, None)
-            if entry is not None:
-                log.warning(
-                    "lost lease on job %s (attempt %s); cancelling", job_id, entry.job.attempt
-                )
-                entry.task.cancel()
-                self._capacity_freed.set()
+            entry = self.active.get(job_id)
+            # The response is about the attempt we asked for; a newer attempt of the
+            # same job leased meanwhile is a different, valid execution.
+            if entry is None or entry.job.attempt != sent_attempts.get(job_id):
+                continue
+            del self.active[job_id]
+            log.warning("lost lease on job %s (attempt %s); cancelling", job_id, entry.job.attempt)
+            entry.task.cancel()
+            self._capacity_freed.set()
         return len(renewed)
 
     async def _lease_renewal_loop(self) -> None:
