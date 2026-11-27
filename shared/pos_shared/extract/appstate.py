@@ -16,6 +16,7 @@ import re
 from typing import Any
 
 from pos_shared import units
+from pos_shared.extract import spectext
 
 PACKAGE_PATH = re.compile(r"package|packaging|shipping|carton|parcel|box|verpackung|paket", re.I)
 # Blocks of other products than the page's own.
@@ -202,6 +203,19 @@ def _merged(items: list[dict]) -> dict:
     return out
 
 
+def _context(path: str) -> str:
+    """Path segments the spec-text tier must see in the label: a "weight" under
+    "maximumLoad" is a carrying capacity, not the product's mass."""
+    words = []
+    for t in _TOKEN.findall(path):
+        if t.startswith("["):
+            continue
+        human = re.sub(r"([a-z])([A-Z])", r"\1 \2", t).replace("_", " ").replace("-", " ")
+        if spectext.LOAD_LABEL.search(human):
+            words.append(human.lower())
+    return " ".join(words)
+
+
 def _emit(node: dict, prefix: str, out: list[tuple[str, str]], package: bool) -> None:
     for k, v in node.items():
         label = LABELS.get(_key(k))
@@ -220,8 +234,13 @@ def pairs(
     out: list[tuple[str, str]] = []
     boxes: dict[str, list[dict]] = {}
     for item in main_product(state, main):
-        root = package_root(item.get("path", ""))
-        if root is None:
+        path = item.get("path", "")
+        root = package_root(path)
+        context = _context(path)
+        if context:
+            # e.g. "maximum load weight": the spec-text tier reads it as a capacity
+            _emit(item["node"], f"{context} {'package ' if root else ''}", out, package=bool(root))
+        elif root is None:
             _emit(item["node"], "", out, package=False)
         else:
             boxes.setdefault(root, []).append(item)

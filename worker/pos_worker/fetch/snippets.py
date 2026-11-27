@@ -14,6 +14,8 @@ from typing import Any
 
 from lxml import etree, html
 
+from pos_shared.extract.appstate import PACKAGE_PATH
+
 SNIPPETS_VERSION = "2"
 
 MAX_ITEMS = 60  # per kind
@@ -223,6 +225,13 @@ def _owner_ids(obj: dict) -> dict[str, str]:
     return {}
 
 
+def _inside_package(path: str, owner) -> bool:
+    """A box with its own item number belongs to the product around it, not to itself
+    (a product with SKU A shipped in two numbered boxes is one product)."""
+    below = path[len(owner["path"]) :] if owner else path
+    return any(PACKAGE_PATH.search(seg) for seg in re.split(r"[.\[\]]+", below) if seg)
+
+
 def _state_nodes(obj, path: str, found: list, depth: int = 0, owner=None) -> None:
     if depth > 40 or len(found) >= MAX_STATE_NODES:
         return
@@ -231,7 +240,7 @@ def _state_nodes(obj, path: str, found: list, depth: int = 0, owner=None) -> Non
         if _is_media(obj, keys):
             return  # an image or file descriptor: its width and height are pixels
         ids = _owner_ids(obj)
-        if ids:
+        if ids and not _inside_package(path, owner):
             owner = {"path": path, "ids": ids}
         if len(keys & SIZE_KEYS) >= 2 or ({"weight", "netweight", "grossweight"} & keys):
             node = _compact(obj)

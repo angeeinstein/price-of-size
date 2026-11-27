@@ -204,3 +204,29 @@ def test_several_products_without_a_match_give_nothing():
     state = {"hits": [{"package": _pkg(10)}, {"package": _pkg(2)}]}
     _, ex = _extract(state)
     assert not [m for m in ex.measurements if m.basis == "package"]
+
+
+def test_a_load_rating_is_not_the_product_mass():
+    state = {"product": {"maximumLoad": {"weight": "100 kg", "info": "x"}, "netWeight": "10 kg"}}
+    _, ex = _extract(state)
+    assert [m.mass_kg for m in ex.measurements if m.mass_kg] == [pytest.approx(10)]
+
+
+def test_numbered_boxes_belong_to_their_product():
+    state = {
+        "product": {
+            "sku": "A",
+            "weight": "8 kg",
+            "packages": [
+                {"itemNumber": "A-1", "weight": "10 kg", "height": "100 cm"},
+                {"itemNumber": "A-2", "weight": "2 kg", "height": "50 cm"},
+            ],
+        },
+        "relatedProducts": [{"sku": "B", "package": _pkg(3)}],
+    }
+    html = _page(state).replace('"name": "Regal', '"sku": "A", "name": "Regal', 1)
+    snip = snippets.capture(html, "https://shop.example/p/9")
+    assert {n["owner"]["path"] for n in snip["app_state"]} == {"product", "relatedProducts[0]"}
+    ex = extract_evidence({"status": 200, "verdict": {"kind": "ok"}, "snippets": snip})
+    pkg = next(m for m in ex.measurements if m.basis == "package")
+    assert pkg.mass_kg == pytest.approx(12)
