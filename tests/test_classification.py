@@ -594,3 +594,27 @@ async def test_a_shop_mapping_change_never_undoes_a_classifier_meanwhile(session
     assert cur.tier == "llm"
     async with sessionmaker() as s:
         assert (await s.get(Product, a)).category_id == aircraft
+
+
+async def test_llm_work_waits_for_every_category_vector(sessionmaker):
+    from sqlalchemy import delete
+
+    from pos_coordinator.models import TaxonomyEmbedding
+
+    await _taxonomy(sessionmaker)
+    await _products(sessionmaker, ["Regal Eiche", "Regal Buche", "Wandregal"],
+                    path=["Möbel", "Regale"])  # fmt: skip
+    await _embed_all(sessionmaker)
+    async with sessionmaker() as s:  # one category's vector is still being computed
+        node = (await s.execute(select(TaxonomyEmbedding.node_id).limit(1))).scalar_one()
+        await s.execute(delete(TaxonomyEmbedding).where(TaxonomyEmbedding.node_id == node))
+        await s.commit()
+    fake = FakeClient()
+    llm = LlmService(sessionmaker, lambda: fake)
+    assert await by_llm.schedule(sessionmaker, llm) == {"llm_classify_queued": 0}
+    assert await proposals.schedule(sessionmaker, llm, force=True) == {
+        "mapping_proposals_queued": 0
+    }
+    await _embed_all(sessionmaker)
+    common._nodes = None
+    assert await by_llm.schedule(sessionmaker, llm) == {"llm_classify_queued": 3}

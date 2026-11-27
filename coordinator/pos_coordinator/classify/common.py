@@ -345,6 +345,15 @@ def stack(vectors: list[Any]) -> np.ndarray:
     return np.vstack([np.asarray(v, dtype=np.float32) for v in vectors])
 
 
+async def taxonomy_ready(session: AsyncSession) -> bool:
+    """Every taxonomy node has its current vector. Shortlists from a partial matrix
+    would stay wrong: an answer is never asked again under the same version."""
+    from pos_coordinator.classify import embeddings
+
+    has_nodes = (await session.execute(select(func.count()).select_from(TaxonomyNode))).scalar()
+    return bool(has_nodes) and not await embeddings._node_items(session, 1)
+
+
 def unit(v: np.ndarray) -> np.ndarray:
     v = np.asarray(v, dtype=np.float32)
     n = np.linalg.norm(v)

@@ -150,9 +150,9 @@ async def _schedule(sm: async_sessionmaker[AsyncSession], llm: Any) -> dict[str,
             return out
         if await by_llm.running_batches(s, STAGE) >= MAX_RUNNING_BATCHES:
             return out
+        if not await common.taxonomy_ready(s):
+            return out  # wait until every category has its vector
         nodes = await common.node_matrix(s)
-        if not nodes.ids:
-            return out
         model = await llm.model_for("category_mapping")
         v = await version(s, model)
         busy = await by_llm.in_flight(s, STAGE, "path_key")

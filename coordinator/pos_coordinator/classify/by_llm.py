@@ -146,9 +146,9 @@ async def _schedule(sm: async_sessionmaker[AsyncSession], llm: Any) -> dict[str,
         cfg = await runtime_settings.get_all(s)
         if not cfg["classify_llm"] or await running_batches(s, STAGE) >= MAX_RUNNING_BATCHES:
             return out
+        if not await common.taxonomy_ready(s):
+            return out  # wait until every category has its vector
         nodes = await common.node_matrix(s)
-        if not nodes.ids:
-            return out
         model = await llm.model_for("default")
         v = await version(s, model)
         ex = await knn.examples(s)
