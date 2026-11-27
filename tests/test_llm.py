@@ -525,3 +525,21 @@ def test_the_estimate_covers_a_cache_write():
                 model_role="category_mapping")  # fmt: skip
     worst = pricing.cost_usd("claude-sonnet-5-5", 1, 100, cache_write_tokens=100_000)
     assert service.estimate_cost("claude-sonnet-5-5", task, batch=False) >= worst
+
+
+class TreeNode(BaseModel):
+    name: str
+    children: list["TreeNode"]
+
+
+def test_a_recursive_schema_is_refused_not_expanded_forever():
+    with pytest.raises(ValueError, match="recursive"):
+        service.strict_schema(TreeNode)
+
+    # the same model twice side by side is not recursion
+    class Pair(BaseModel):
+        a: Pick
+        b: Pick
+
+    s = service.strict_schema(Pair)
+    assert s["properties"]["a"] == s["properties"]["b"]

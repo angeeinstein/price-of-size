@@ -110,28 +110,35 @@ def register(stage: str, schema: type[BaseModel]):
 
 def strict_schema(model: type[BaseModel]) -> dict[str, Any]:
     """The pydantic model as a JSON schema for structured outputs: references inlined,
-    every object closed (additionalProperties false) with all properties required."""
+    every object closed (additionalProperties false) with all properties required.
+    A recursive model raises ValueError (structured outputs do not take one)."""
     raw = model.model_json_schema()
     defs = raw.pop("$defs", {})
 
-    def fix(node: Any) -> Any:
+    def fix(node: Any, expanding: tuple[str, ...] = ()) -> Any:
         if isinstance(node, dict):
             if "$ref" in node:
-                return fix(defs[node["$ref"].rsplit("/", 1)[-1]])
+                name = node["$ref"].rsplit("/", 1)[-1]
+                if name in expanding:
+                    # structured outputs take no recursive schemas: refuse it here, not
+                    # with an endless expansion
+                    raise ValueError(f"recursive answer schema ({name}) is not supported")
+                return fix(defs[name], (*expanding, name))
             out = {}
             for k, v in node.items():
                 if k in ("title", "default"):
                     continue  # schema metadata
                 if k == "properties" and isinstance(v, dict):
-                    out[k] = {name: fix(sub) for name, sub in v.items()}  # field names stay
+                    # field names stay
+                    out[k] = {name: fix(sub, expanding) for name, sub in v.items()}
                 else:
-                    out[k] = fix(v)
+                    out[k] = fix(v, expanding)
             if out.get("type") == "object" and "properties" in out:
                 out["additionalProperties"] = False
                 out["required"] = list(out["properties"])
             return out
         if isinstance(node, list):
-            return [fix(x) for x in node]
+            return [fix(x, expanding) for x in node]
         return node
 
     return fix(raw)
