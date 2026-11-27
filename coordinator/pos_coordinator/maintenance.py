@@ -125,6 +125,15 @@ async def run_once(
             await session.commit()
     except Exception:
         log.exception("retrying blocked domains failed")
+    try:
+        async with sm() as session:
+            from pos_coordinator.classify import shopmap
+
+            res = await shopmap.classify(session)
+            out["classified"] = res["classified"] + res["withdrawn"]
+            await session.commit()
+    except Exception:
+        log.exception("classification by shop mappings failed")
     if any(out.values()):
         log.info("maintenance: %s", out)
     return out

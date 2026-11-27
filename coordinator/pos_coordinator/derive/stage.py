@@ -579,18 +579,37 @@ DERIVED_TABLES = (Measurement, Classification, Embedding, Offer, Product)
 async def snapshot(session: AsyncSession) -> dict[str, Any]:
     out = {}
     for model in DERIVED_TABLES:
-        out[model.__tablename__] = (
-            await session.execute(select(func.count()).select_from(model))
-        ).scalar_one()
+        q = select(func.count()).select_from(model)
+        if model is Classification:
+            q = q.where(Classification.is_current)  # history rows are not rebuilt
+        out[model.__tablename__] = (await session.execute(q)).scalar_one()
     digest = hashlib.sha256()
     for row in (
         await session.execute(
-            select(Product.match_key, Product.canonical_price_eur).order_by(Product.match_key)
+            select(Product.match_key, Product.canonical_price_eur, Product.category_id).order_by(
+                Product.match_key
+            )
         )
     ).all():
         digest.update(repr(tuple(row)).encode())
     out["products_digest"] = digest.hexdigest()[:16]
     return out
+
+
+async def classify_until_settled(sm: async_sessionmaker[AsyncSession]) -> int:
+    """Classification by shop mappings over all products (in batches); part of the
+    rebuild, since categories belong to the derived layer while mappings survive it."""
+    from pos_coordinator.classify import shopmap
+
+    total = 0
+    while True:
+        async with sm() as session:
+            r = await shopmap.classify(session)
+            await session.commit()
+        n = r["classified"] + r["withdrawn"]
+        total += n
+        if n == 0:
+            return total
 
 
 async def rebuild(
@@ -612,6 +631,7 @@ async def rebuild(
         cur.started_at = cur.updated_at = func.now()
         await session.commit()
     report = await run_until_caught_up(sm, store, settle=settle)
+    classified = await classify_until_settled(sm)
     async with sm() as session:
         after = await snapshot(session)
     return {
@@ -619,6 +639,7 @@ async def rebuild(
         "after": after,
         "seconds": round(time.monotonic() - started, 2),
         "fetches": report.fetches,
+        "classified": classified,
         "version": VERSION,
         "identical": before == after,
     }

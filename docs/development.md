@@ -168,4 +168,6 @@ pos-coordinator fx-refresh        # ECB reference rates (also fetched daily)
       price jumps between visits (factor 10), recomputed as offers arrive
 - [x] Rebuild drill reproduces the derived layer from raw
 - [ ] Tier 2 (microdata/RDFa), tier 4 (LLM extraction within budget)
-- [ ] Classification and embeddings; per-category size scalar
+- [x] Target taxonomy: Google Product Taxonomy (en, de) + extension (`classify/taxonomy.py`)
+- [x] Classification tier 1: shop category mappings (`classify/shopmap.py`, panel: Categories)
+- [ ] LLM proposals for mappings; embeddings and classifier; per-category size scalar

@@ -140,6 +140,30 @@ async def _create_user(args) -> int:
     return 0
 
 
+async def _taxonomy_import(args) -> int:
+    import json as _json
+
+    from pos_coordinator.classify import taxonomy
+    from pos_coordinator.config import get_settings
+    from pos_coordinator.db import make_engine, make_sessionmaker
+
+    if args.en:
+        texts = {"en": args.en.read_text(encoding="utf-8")}
+        if args.de:
+            texts["de"] = args.de.read_text(encoding="utf-8")
+    else:
+        texts = await taxonomy.download()
+    engine = make_engine(get_settings().database_url)
+    try:
+        async with make_sessionmaker(engine)() as s:
+            result = await taxonomy.import_google(s, texts)
+            await s.commit()
+        print(_json.dumps(result))
+        return 0
+    finally:
+        await engine.dispose()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="pos-coordinator")
     sub = parser.add_subparsers(dest="cmd")
@@ -160,6 +184,12 @@ def main() -> None:
         "rebuild-derived", help="rebuild drill: drop derived rows, derive again from raw, compare"
     )
     sub.add_parser("fx-refresh", help="load ECB euro reference rates now")
+    ti = sub.add_parser(
+        "taxonomy-import",
+        help="import the Google Product Taxonomy (downloaded, or from files) and its extension",
+    )
+    ti.add_argument("--en", type=Path, help="taxonomy-with-ids.en-US.txt (default: download)")
+    ti.add_argument("--de", type=Path, help="taxonomy-with-ids.de-DE.txt")
     sub.add_parser(
         "raw-store-adopt",
         help="after moving the raw store: make the database accept the store mounted now",
@@ -183,6 +213,8 @@ def main() -> None:
         sys.exit(asyncio.run(_derived_cmd(args.cmd)))
     if args.cmd == "create-user":
         sys.exit(asyncio.run(_create_user(args)))
+    if args.cmd == "taxonomy-import":
+        sys.exit(asyncio.run(_taxonomy_import(args)))
     if args.cmd == "backup":
         from pos_coordinator.backup import run_backup
         from pos_coordinator.config import get_settings

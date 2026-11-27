@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import {
-  Activity, Boxes, ChartScatter, Globe, KeyRound, LayoutDashboard, ListChecks, LogOut, Moon, Package,
+  Activity, Boxes, ChartScatter, FolderTree, Globe, KeyRound, LayoutDashboard, ListChecks, LogOut, Moon, Package,
   Settings, Sun, Users,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
@@ -16,6 +16,7 @@ const NAV = [
   { to: "/jobs", label: "Jobs", icon: ListChecks },
   { to: "/domains", label: "Domains", icon: Globe },
   { to: "/sources", label: "Sources", icon: Activity },
+  { to: "/categories", label: "Categories", icon: FolderTree },
   { to: "/explorer", label: "Explorer", icon: ChartScatter },
   { to: "/releases", label: "Releases", icon: Package },
   { to: "/settings", label: "Settings", icon: Settings },

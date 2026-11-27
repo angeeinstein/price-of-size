@@ -442,7 +442,13 @@ class AuditLog(Base):
 
 
 class TaxonomyNode(Base):
+    """A category of the target taxonomy (see classify/taxonomy.py). `path` holds the
+    English names; `names` other locales ({"de": {"name", "path"}})."""
+
     __tablename__ = "taxonomy_node"
+    __table_args__ = (
+        UniqueConstraint("taxonomy", "external_id", name="uq_taxonomy_node_external"),
+    )
     id: Mapped[uuid.UUID] = pk()
     taxonomy: Mapped[str] = mapped_column(Text, server_default="google")
     external_id: Mapped[str | None] = mapped_column(Text)
@@ -451,6 +457,38 @@ class TaxonomyNode(Base):
     path: Mapped[str] = mapped_column(Text, index=True)
     depth: Mapped[int] = mapped_column(SmallInteger)
     is_custom: Mapped[bool] = mapped_column(Boolean, server_default="false")
+    names: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'::jsonb"))
+    version: Mapped[str | None] = mapped_column(Text)  # of the taxonomy that last wrote it
+
+
+class CategoryMapping(Base):
+    """A shop's category path (breadcrumbs) -> a taxonomy node, made once per shop and
+    path. Curated, not derived: it survives a rebuild of the derived layer. A changed
+    mapping is a new row; the old one stays with is_current = false. A null node means
+    the path was looked at and has no fitting category ("unmappable")."""
+
+    __tablename__ = "category_mapping"
+    __table_args__ = (
+        CheckConstraint(
+            "method IN ('manual','llm','rule','import')", name="category_mapping_method"
+        ),
+        Index(
+            "uq_category_mapping_current",
+            "source",
+            "category_path",
+            unique=True,
+            postgresql_where=text("is_current"),
+        ),
+    )
+    id: Mapped[uuid.UUID] = pk()
+    source: Mapped[str] = mapped_column(Text)
+    category_path: Mapped[str] = mapped_column(Text)  # segments joined with " > "
+    taxonomy_node_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("taxonomy_node.id"))
+    method: Mapped[str] = mapped_column(Text)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    created_by: Mapped[str | None] = mapped_column(Text)
+    is_current: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    created_at: Mapped[datetime] = created()
 
 
 class FxRate(Base):

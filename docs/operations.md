@@ -275,6 +275,28 @@ curl -X POST https://pos.example.org/api/admin/sources/wikidata/discover -H "Aut
   value (`no_fx_rate`, `no_currency`) until an inflation stage exists.
 * `endpoint` points the source at a mirror or a self-hosted query service.
 
+### Categories: taxonomy and shop mappings
+
+Products are classified into the Google Product Taxonomy (about 5,600 categories,
+English and German names) plus a small extension for what shops do not sell
+(buildings and structures, land, bulk materials, fluids, spacecraft, rail
+vehicles; ids `pos-...`). Import it once, and again when Google publishes a new
+version (idempotent; categories Google dropped are kept):
+
+```bash
+pos-coordinator taxonomy-import                 # downloads the en-US and de-DE files
+pos-coordinator taxonomy-import --en taxonomy-with-ids.en-US.txt --de taxonomy-with-ids.de-DE.txt
+```
+
+The first tier of classification is the shops' own categories: each shop's
+breadcrumb path is mapped once (panel: Categories, most frequent paths first;
+or `PUT /api/admin/category-mappings` with `source`, `path` and `node_id` or
+`external_id`; without either the path is marked as having no fitting category).
+The maintenance loop then classifies every product under that path, re-classifies
+them when a mapping changes, and never overrides a classification made by hand.
+Mappings are curated data: a rebuild of the derived layer keeps them, and the
+previous mapping of a path stays as history.
+
 Exchange rates: the ECB reference rates are fetched daily. An offer in another
 currency that arrives before its rate is stored with `no_fx_rate` and converted
 (and its product's price recomputed) once the rate is there;
