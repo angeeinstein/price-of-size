@@ -17,7 +17,7 @@ jobs:
           POSTGRES_DB: pos_test
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U pos" --health-interval 5s --health-timeout 5s --health-retries 10
+          --health-cmd "pg_isready -U pos -d pos_test" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       POS_TEST_DATABASE_URL: postgresql+psycopg://pos:pos@localhost:5432/pos_test
     steps:
@@ -50,7 +50,7 @@ jobs:
           POSTGRES_DB: pos_panel
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U pos" --health-interval 5s --health-timeout 5s --health-retries 10
+          --health-cmd "pg_isready -U pos -d pos_panel" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       POS_DATABASE_URL: postgresql+psycopg://pos:pos@localhost:5432/pos_panel
       POS_COOKIE_SECURE: "false"
@@ -77,7 +77,8 @@ jobs:
         run: |
           uv run pos-coordinator migrate
           echo "ci-panel-passphrase-1" | uv run pos-coordinator create-user admin --password-stdin
-          nohup uv run pos-coordinator serve --port 8000 > coordinator.log 2>&1 &
+          nohup .venv/bin/pos-coordinator serve --port 8000 > coordinator.log 2>&1 &
+          echo $! > coordinator.pid
           for i in $(seq 1 30); do curl -fs localhost:8000/healthz && break; sleep 1; done
       - name: Browser smoke test
         run: npm run e2e
@@ -86,6 +87,9 @@ jobs:
           BASE_URL: http://localhost:8000
           PANEL_PASSWORD: ci-panel-passphrase-1
           SHOTS_DIR: ${{ runner.temp }}
+      - name: Stop the coordinator
+        if: always()
+        run: kill "$(cat coordinator.pid)" 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -115,7 +119,7 @@ jobs:
           POSTGRES_DB: pos_e2e
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U pos" --health-interval 5s --health-timeout 5s --health-retries 10
+          --health-cmd "pg_isready -U pos -d pos_e2e" --health-interval 5s --health-timeout 5s --health-retries 10
       registry:
         image: registry:2
         ports: ["5000:5000"]
