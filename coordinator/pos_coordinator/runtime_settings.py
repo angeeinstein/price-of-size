@@ -32,6 +32,8 @@ DEFAULTS: dict[str, Any] = {
     "coordinator.target_version": None,
     "heartbeat_interval_s": 15.0,
     "job_lease_s": 300,
+    "job_retention_days": 14,  # finished job rows (results and raw evidence stay)
+    "failed_job_retention_days": 60,
     "llm_models": {
         "default": "claude-haiku-5-5",
         "parser_generation": "claude-sonnet-5-5",
@@ -47,6 +49,8 @@ VALIDATORS: dict[str, Any] = {
     "llm_budget_hard_cap_usd": lambda v: isinstance(v, int | float) and v >= 0,
     "heartbeat_interval_s": lambda v: isinstance(v, int | float) and 2 <= v <= 600,
     "job_lease_s": lambda v: isinstance(v, int) and 30 <= v <= 86400,
+    "job_retention_days": lambda v: isinstance(v, int) and 1 <= v <= 3650,
+    "failed_job_retention_days": lambda v: isinstance(v, int) and 1 <= v <= 3650,
     "coordinator.target_version": lambda v: v is None or isinstance(v, str),
     "max_total_rate_per_domain": lambda v: (
         v is None or (isinstance(v, int | float) and 0 < v <= 50)
