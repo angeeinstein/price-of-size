@@ -24,7 +24,7 @@ from pos_coordinator.security import (
     parse_public_key,
     verify_signature,
 )
-from pos_shared import api
+from pos_shared import api, signing
 from pos_shared.version import API_VERSION
 
 router = APIRouter(prefix="/api/v1/nodes", dependencies=[Depends(check_api_version)])
@@ -56,7 +56,7 @@ async def enroll(
         # A retry after a lost response: the same code with the same key gets the
         # node it already created, so a node never ends up stranded.
         if existing is not None and code.used_by_node_id == existing.id:
-            return api.EnrollResponse(node_id=existing.id, coordinator_api_version=API_VERSION)
+            return _enroll_response(request, existing.id)
         raise rejected
     if code.expires_at <= datetime.now(UTC):
         raise rejected
@@ -78,7 +78,15 @@ async def enroll(
     code.used_at = func.now()
     code.used_by_node_id = node.id
     await session.commit()
-    return api.EnrollResponse(node_id=node.id, coordinator_api_version=API_VERSION)
+    return _enroll_response(request, node.id)
+
+
+def _enroll_response(request: Request, node_id) -> api.EnrollResponse:
+    return api.EnrollResponse(
+        node_id=node_id,
+        coordinator_api_version=API_VERSION,
+        signing_public_key=signing.public_key_b64(request.app.state.signing_key),
+    )
 
 
 @router.post("/challenge", response_model=api.ChallengeResponse)
@@ -128,6 +136,13 @@ async def token(body: api.TokenRequest, session: Session, settings: AppSettings)
     return api.TokenResponse(access_token=tok, expires_at=expires)
 
 
+@router.get("/signing-key")
+async def signing_key(request: Request, node: CurrentNode):
+    """For nodes enrolled before keys were handed out at enrollment: the coordinator's
+    signing key over the node's authenticated channel."""
+    return {"public_key": signing.public_key_b64(request.app.state.signing_key)}
+
+
 def desired_state(node: Node) -> api.DesiredState:
     return api.DesiredState(
         run_state=api.RunState(node.desired_run_state),
@@ -154,6 +169,8 @@ async def heartbeat(
         "active_jobs": body.active_jobs,
         "spooled_results": body.spooled_results,
     }
+    if body.agent is not None:
+        node.agent_status = body.agent.model_dump(mode="json")
     node.last_heartbeat_at = func.now()
     if ip is not None and ip != node.egress_ip:
         node.egress_ip = ip

@@ -1,7 +1,15 @@
 """Wire schemas for the worker <-> coordinator API (`/api/v1`).
 
 Everything a node sends is validated strictly (extra fields rejected), because
-authentication proves who sent data, not that it is well formed.
+authentication proves who sent data, not that it is well formed (`Strict`).
+
+Everything the coordinator sends is read leniently (`Reply`: unknown fields are
+ignored). Within one API major version the coordinator only adds to the API
+(see `pos_shared.version`), and nodes are updated after the coordinator, so an
+older node must keep working with a newer coordinator's replies; otherwise an
+added field would cut it off and keep it from ever updating. New reply fields
+therefore need defaults on the node side, and a node that depends on one
+raises its API minor version.
 """
 
 from datetime import datetime
@@ -9,11 +17,19 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Strict(BaseModel):
+    """Sent by nodes: validated strictly by the coordinator."""
+
     model_config = ConfigDict(extra="forbid")
+
+
+class Reply(BaseModel):
+    """Sent by the coordinator: unknown (newer) fields are ignored by nodes."""
+
+    model_config = ConfigDict(extra="ignore")
 
 
 # --- enrollment and auth -------------------------------------------------
@@ -27,16 +43,21 @@ class EnrollRequest(Strict):
     capabilities: list[str] = Field(default_factory=list, max_length=50)
 
 
-class EnrollResponse(Strict):
+class EnrollResponse(Reply):
     node_id: UUID
     coordinator_api_version: str
+    signing_public_key: str | None = Field(
+        None,
+        description="Coordinator's Ed25519 signing key (base64url); nodes pin it. Since API 1.1;"
+        " a node without it fetches it from /api/v1/nodes/signing-key",
+    )
 
 
 class ChallengeRequest(Strict):
     node_id: UUID
 
 
-class ChallengeResponse(Strict):
+class ChallengeResponse(Reply):
     nonce: str
     expires_at: datetime
 
@@ -47,9 +68,44 @@ class TokenRequest(Strict):
     signature: str = Field(description="Ed25519 signature over the nonce bytes, base64url")
 
 
-class TokenResponse(Strict):
+class TokenResponse(Reply):
     access_token: str
     expires_at: datetime
+
+
+# --- releases --------------------------------------------------------------
+
+VERSION_PATTERN = r"^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$"
+# A digest-pinned image reference: name[:tag]@sha256:<64 hex>
+IMAGE_REF_PATTERN = r"^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$"
+
+
+class ReleaseManifest(Reply):
+    """What a release consists of, by immutable image digest."""
+
+    version: str = Field(pattern=VERSION_PATTERN)
+    images: dict[str, str] = Field(
+        description="component (worker, agent, coordinator) -> digest-pinned image reference"
+    )
+    created_at: datetime
+
+    @field_validator("images")
+    @classmethod
+    def _digest_pinned(cls, v: dict[str, str]) -> dict[str, str]:
+        import re
+
+        for component, ref in v.items():
+            if not re.fullmatch(r"[a-z_]{1,30}", component):
+                raise ValueError(f"bad component name {component!r}")
+            if not re.fullmatch(IMAGE_REF_PATTERN, ref):
+                raise ValueError(f"image for {component} must be pinned by digest: {ref!r}")
+        return v
+
+
+class SignedManifest(Reply):
+    manifest: ReleaseManifest
+    signature: str
+    key_id: str
 
 
 # --- heartbeat and control channel ---------------------------------------
@@ -81,9 +137,22 @@ class CommandResult(Strict):
     output: Any = None
 
 
+class AgentStatus(Strict):
+    """What the node agent (A/B updater) last reported through the shared volume."""
+
+    agent_version: str | None = Field(None, max_length=50)
+    active_slot: str | None = Field(None, max_length=5)
+    running_version: str | None = Field(None, max_length=50)
+    update_state: str | None = Field(None, max_length=30)  # idle | updating | failed | ...
+    update_target: str | None = Field(None, max_length=50)
+    update_error: str | None = Field(None, max_length=2000)
+    updated_at: datetime | None = None
+
+
 class Heartbeat(Strict):
     version: str
     state: RunState
+    agent: AgentStatus | None = None
     resources: Resources = Field(default_factory=Resources)
     concurrency: Concurrency = Field(default_factory=Concurrency)
     active_jobs: int = 0
@@ -91,12 +160,12 @@ class Heartbeat(Strict):
     command_results: list[CommandResult] = Field(default_factory=list, max_length=100)
 
 
-class NodeLimits(Strict):
+class NodeLimits(Reply):
     max_http_slots: int | None = None
     max_browser_slots: int | None = None
 
 
-class DesiredState(Strict):
+class DesiredState(Reply):
     run_state: RunState = RunState.running
     target_version: str | None = None
     limits: NodeLimits = Field(default_factory=NodeLimits)
@@ -105,13 +174,13 @@ class DesiredState(Strict):
     )
 
 
-class Command(Strict):
+class Command(Reply):
     id: UUID
     type: str
     args: dict[str, Any] = Field(default_factory=dict)
 
 
-class HeartbeatResponse(Strict):
+class HeartbeatResponse(Reply):
     desired: DesiredState
     commands: list[Command] = Field(default_factory=list)
     coordinator_api_version: str
@@ -127,7 +196,7 @@ class LeaseRequest(Strict):
     max_jobs: int = Field(ge=1, le=500)
 
 
-class LeasedJob(Strict):
+class LeasedJob(Reply):
     id: UUID
     type: str
     payload: dict[str, Any]
@@ -136,7 +205,7 @@ class LeasedJob(Strict):
     lease_seconds: int = Field(description="Lease duration; renew well before it runs out")
 
 
-class LeaseResponse(Strict):
+class LeaseResponse(Reply):
     jobs: list[LeasedJob]
 
 
@@ -149,7 +218,15 @@ class ExtendRequest(Strict):
     leases: list[LeaseRef] = Field(max_length=500)
 
 
-class ExtendResponse(Strict):
+class ReleaseRequest(Strict):
+    leases: list[LeaseRef] = Field(max_length=2000)
+
+
+class ReleaseResponse(Reply):
+    released: list[UUID]
+
+
+class ExtendResponse(Reply):
     extended: list[UUID]
     lost: list[UUID] = Field(description="Jobs whose lease this node no longer holds")
     lease_seconds: int
@@ -192,7 +269,7 @@ class ResultBatch(Strict):
     results: list[JobResult] = Field(min_length=1, max_length=1000)
 
 
-class ResultAck(Strict):
+class ResultAck(Reply):
     accepted: list[UUID]
     rejected: dict[str, str] = Field(
         default_factory=dict, description="job_id -> reason; rejected results must not be resent"

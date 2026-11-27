@@ -17,12 +17,12 @@ jobs:
           POSTGRES_DB: pos_test
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U pos" --health-interval 5s --health-timeout 5s --health-retries 10
+          --health-cmd "pg_isready -U pos -d pos_test" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       POS_TEST_DATABASE_URL: postgresql+psycopg://pos:pos@localhost:5432/pos_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
       - run: uv sync --locked
@@ -36,3 +36,113 @@ jobs:
         env:
           POS_DATABASE_URL: postgresql+psycopg://pos:pos@localhost:5432/pos_test
       - run: uv run pytest -q
+
+  panel:
+    # Typecheck and build the control panel, then drive it in a real browser against a
+    # real coordinator (login, every page, a CSRF-protected change, dark mode).
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: pos
+          POSTGRES_PASSWORD: pos
+          POSTGRES_DB: pos_panel
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pos -d pos_panel" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      POS_DATABASE_URL: postgresql+psycopg://pos:pos@localhost:5432/pos_panel
+      POS_COOKIE_SECURE: "false"
+      POS_RAW_STORE_PATH: /tmp/pos-raw
+      POS_SIGNING_KEY_PATH: /tmp/pos-key.pem
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: panel/package-lock.json
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: npm ci --no-audit --no-fund
+        working-directory: panel
+      - run: npm run build
+        working-directory: panel
+      - run: npx playwright install --with-deps chromium
+        working-directory: panel
+      - run: uv sync --locked
+      - name: Coordinator with a panel user
+        run: |
+          uv run pos-coordinator migrate
+          echo "ci-panel-passphrase-1" | uv run pos-coordinator create-user admin --password-stdin
+          nohup .venv/bin/pos-coordinator serve --port 8000 > coordinator.log 2>&1 &
+          echo $! > coordinator.pid
+          for i in $(seq 1 30); do curl -fs localhost:8000/healthz && break; sleep 1; done
+      - name: Browser smoke test
+        run: npm run e2e
+        working-directory: panel
+        env:
+          BASE_URL: http://localhost:8000
+          PANEL_PASSWORD: ci-panel-passphrase-1
+          SHOTS_DIR: ${{ runner.temp }}
+      - name: Stop the coordinator
+        if: always()
+        run: kill "$(cat coordinator.pid)" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: panel-screenshots
+          path: ${{ runner.temp }}/*.png
+          if-no-files-found: ignore
+      - if: failure()
+        run: cat coordinator.log
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: shellcheck -S warning install.sh deploy/test/*.sh
+
+  docker:
+    # Real Docker: images build, the node agent bootstraps, updates, rolls back and
+    # updates itself; then install.sh goes through its whole lifecycle.
+    runs-on: ubuntu-latest
+    needs: [python, shell]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: pos
+          POSTGRES_PASSWORD: pos
+          POSTGRES_DB: pos_e2e
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pos -d pos_e2e" --health-interval 5s --health-timeout 5s --health-retries 10
+      registry:
+        image: registry:2
+        ports: ["5000:5000"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - name: Node agent end-to-end
+        run: uv run python deploy/test/e2e_agent.py --db-url 'postgresql+psycopg://pos:pos@{host}:5432/pos_e2e'
+      - name: install.sh lifecycle
+        run: |
+          PGPASSWORD=pos psql -h localhost -U pos -d pos_e2e -c 'CREATE DATABASE pos_inst'
+          digest() { docker inspect --format '{{index .RepoDigests 0}}' "$1"; }
+          jq -n --arg c "$(digest localhost:5000/pos-coordinator:0.1.0)" \
+                --arg w "$(digest localhost:5000/pos-worker:0.1.0)" \
+                --arg a "$(digest localhost:5000/pos-agent:0.1.0)" \
+                --arg caddy "$(digest caddy:2.8-alpine)" \
+            '{version: "0.1.0", images: {coordinator: $c, worker: $w, agent: $a, caddy: $caddy}}' > release.json
+          sudo RELEASE_FILE="$PWD/release.json" REGISTRY_SERVER=localhost:5000 \
+               DB_URL='postgresql+psycopg://pos:pos@{gw}:5432/pos_inst' deploy/test/install_test.sh
+      - name: Logs on failure
+        if: failure()
+        run: |
+          for c in $(docker ps -aq); do echo "== $(docker inspect -f '{{.Name}}' $c)"; docker logs --tail 80 $c 2>&1; done

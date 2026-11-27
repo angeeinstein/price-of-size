@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from pos_shared import api
-from pos_shared.version import API_VERSION, API_VERSION_HEADER, __version__
+from pos_shared.version import API_VERSION, API_VERSION_HEADER, __version__, is_compatible
 from pos_worker.config import WorkerSettings
 from pos_worker.identity import Identity
 
@@ -123,6 +123,25 @@ class CoordinatorClient:
             return r
         raise AssertionError("unreachable")
 
+    async def check_auth(self) -> None:
+        """Authenticate and check versions without changing any node state."""
+        r = await self._http.get("/api/v1/version")
+        self._raise(r)
+        theirs = r.json()["api_version"]
+        if not is_compatible(API_VERSION, theirs):
+            raise IncompatibleCoordinator(f"coordinator speaks {theirs}, we speak {API_VERSION}")
+        self._token = None
+        await self._ensure_token()
+
+    async def get_signing_key(self) -> str:
+        r = await self._call("GET", "/api/v1/nodes/signing-key")
+        return r.json()["public_key"]
+
+    async def get_release(self, version: str) -> dict:
+        """The signed manifest as received: its signature covers these exact values."""
+        r = await self._call("GET", f"/api/v1/releases/{version}")
+        return r.json()
+
     async def heartbeat(self, hb: api.Heartbeat) -> api.HeartbeatResponse:
         r = await self._call("POST", "/api/v1/nodes/heartbeat", json=hb.model_dump(mode="json"))
         return api.HeartbeatResponse.model_validate(r.json())
@@ -136,6 +155,11 @@ class CoordinatorClient:
         body = api.ExtendRequest(leases=leases)
         r = await self._call("POST", "/api/v1/jobs/extend", json=body.model_dump(mode="json"))
         return api.ExtendResponse.model_validate(r.json())
+
+    async def release(self, leases: list[api.LeaseRef]) -> api.ReleaseResponse:
+        body = api.ReleaseRequest(leases=leases)
+        r = await self._call("POST", "/api/v1/jobs/release", json=body.model_dump(mode="json"))
+        return api.ReleaseResponse.model_validate(r.json())
 
     async def push_results(self, results: list[dict[str, Any]]) -> api.ResultAck:
         r = await self._call("POST", "/api/v1/jobs/results", json={"results": results})

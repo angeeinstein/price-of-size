@@ -4,8 +4,8 @@ from pathlib import Path
 
 import httpx
 
-from pos_worker.agent import Agent
 from pos_worker.config import WorkerSettings
+from pos_worker.runtime import Worker
 
 
 async def new_enrollment_code(admin: httpx.AsyncClient, **kw) -> str:
@@ -14,7 +14,7 @@ async def new_enrollment_code(admin: httpx.AsyncClient, **kw) -> str:
     return r.json()["code"]
 
 
-async def make_agent(app, admin: httpx.AsyncClient, state_dir: Path, name: str, **kw) -> Agent:
+async def make_agent(app, admin: httpx.AsyncClient, state_dir: Path, name: str, **kw) -> Worker:
     code = await new_enrollment_code(admin, label=name)
     settings = WorkerSettings(
         coordinator_url="http://coordinator",
@@ -26,6 +26,6 @@ async def make_agent(app, admin: httpx.AsyncClient, state_dir: Path, name: str, 
         resource_poll_s=3600,
         **kw,
     )
-    agent = Agent(settings, transport=httpx.ASGITransport(app=app))
+    agent = Worker(settings, transport=httpx.ASGITransport(app=app))
     await agent.ensure_enrolled()
     return agent

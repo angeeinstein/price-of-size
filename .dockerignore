@@ -1,0 +1,13 @@
+.git
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+node_modules
+panel/node_modules
+panel/dist
+data
+tests
+docs
+panel/e2e

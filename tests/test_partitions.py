@@ -137,3 +137,34 @@ async def test_result_submission_needs_only_one_pooled_connection(settings, admi
         assert all(len(a.accepted) == 1 for a in acks)
         for w in workers:
             await w.client.aclose()
+
+
+async def test_prune_finished_jobs_and_expired_auth_rows(sessionmaker):
+    from datetime import timedelta as td
+
+    from pos_coordinator.models import NodeToken
+
+    async with sessionmaker() as s:
+        n = Node(name="n", public_key=uuid.uuid4().bytes * 2)
+        s.add(n)
+        await s.flush()
+        old, recent, failed_old, queued = await queue.enqueue(
+            s, [queue.NewJob("noop", {}) for _ in range(4)]
+        )
+        long_ago = func.now() - td(days=30)
+        await s.execute(update(Job).where(Job.id.in_([old, recent])).values(status="done"))
+        await s.execute(update(Job).where(Job.id == old).values(finished_at=long_ago))
+        await s.execute(update(Job).where(Job.id == recent).values(finished_at=func.now()))
+        await s.execute(
+            update(Job).where(Job.id == failed_old).values(status="failed", finished_at=long_ago)
+        )
+        s.add(
+            NodeToken(
+                token_hash=b"x" * 32, node_id=n.id, expires_at=datetime(2020, 1, 1, tzinfo=UTC)
+            )
+        )
+        await s.commit()
+        assert await maintenance.prune(s) == 2  # the old done job and the expired token
+        await s.commit()
+        left = set((await s.execute(select(Job.id))).scalars())
+    assert left == {recent, failed_old, queued}  # failed jobs are kept 60 days

@@ -81,6 +81,7 @@ def settings(db, tmp_path) -> Settings:
     return Settings(
         database_url=db,
         raw_store_path=tmp_path / "raw",
+        signing_key_path=tmp_path / "signing_key.pem",
         admin_token=ADMIN_TOKEN,
     )
 
@@ -116,3 +117,12 @@ async def admin(app):
 @pytest.fixture
 def sessionmaker(app):
     return app.state.sessionmaker
+
+
+@pytest.fixture(autouse=True)
+def _reset_fetch_breaker():
+    from pos_worker.fetch import breaker
+
+    breaker.reset()
+    yield
+    breaker.reset()
