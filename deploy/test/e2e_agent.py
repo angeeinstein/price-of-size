@@ -99,7 +99,9 @@ def build_version(version: str, reported: str, dockerfile_filter: str | None, bu
 
 
 def caddy_ref() -> str:
-    sh("docker", "pull", "-q", "caddy:2.8-alpine")
+    # pull only if missing: Docker Hub rate-limits anonymous pulls
+    if not sh("docker", "images", "-q", "caddy:2.8-alpine", check=False):
+        sh("docker", "pull", "-q", "caddy:2.8-alpine")
     return sh("docker", "inspect", "--format", "{{index .RepoDigests 0}}", "caddy:2.8-alpine")
 
 

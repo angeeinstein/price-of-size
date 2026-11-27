@@ -24,6 +24,7 @@ REPO="${POS_REPO:-angeeinstein/price-of-size}"
 ETC=/etc/pos
 CONF="$ETC/install.conf"
 NET=pos-net
+LOCAL_COORDINATOR=http://pos-caddy:80  # Caddy as seen from inside the coordinator network
 DOCKER_LOG_OPTS=(--log-opt max-size=10m --log-opt max-file=3)
 
 # --- options -----------------------------------------------------------------------
@@ -41,7 +42,7 @@ Options:
   --version X.Y.Z        release to install (default: latest)
   --mode agent|simple    node only. agent (default): updates steered by the coordinator.
                          simple: a single worker container, updated with --update by hand.
-  --coordinator URL      node: coordinator URL
+  --coordinator URL      node: coordinator URL, or "local" if the coordinator runs on this machine
   --enroll CODE          node: one-time enrollment code from the control panel
   --name NAME            node: display name (default: hostname)
   --cf-client-id ID      Cloudflare Access service token (optional)
@@ -373,8 +374,15 @@ install_node() {
     ask_secret CF_ID "Cloudflare Access client id"
     [[ -n "$CF_ID" ]] && ask_secret CF_SECRET "Cloudflare Access client secret"
   fi
+  # "local": the coordinator runs on this machine. The worker then joins its Docker
+  # network and talks to Caddy directly, since Caddy publishes on loopback only.
   local on_net=false url=$COORDINATOR_URL
-  if [[ "$ROLE" == all-in-one ]]; then on_net=true; url=http://pos-caddy:80; fi
+  if [[ "$ROLE" == all-in-one || "$url" == local || "$url" == "$LOCAL_COORDINATOR" ]]; then
+    docker network inspect "$NET" >/dev/null 2>&1 \
+      || die "--coordinator local needs a coordinator on this machine (no $NET network)"
+    on_net=true
+    url=$LOCAL_COORDINATOR
+  fi
   write_env "$env_file" \
     "POS_WORKER_COORDINATOR_URL=$url" \
     "POS_WORKER_ENROLLMENT_CODE=$ENROLL_CODE" \
@@ -779,7 +787,7 @@ main() {
           -H "Authorization: Bearer $COORD_ADMIN_TOKEN" -H 'content-type: application/json' \
           -d '{"label":"all-in-one"}' | jq -r .code)
       fi
-      COORDINATOR_URL=http://pos-caddy:80
+      COORDINATOR_URL=local
       install_node ;;
   esac
   save_conf

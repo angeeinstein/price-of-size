@@ -35,6 +35,9 @@ sudo bash install.sh --role coordinator --non-interactive \
 sudo bash install.sh --role node --non-interactive --coordinator https://pos.example.org --enroll ABCD-EFGH-JKLM-NPQR
 ```
 
+A node on the coordinator's own machine uses `--coordinator local`: the worker
+joins the coordinator's Docker network instead of going out through the tunnel.
+
 `install.sh` installs a **pinned release**: it downloads `release.json` of the
 GitHub release (`--version`, default latest), which lists every image by
 digest, and refuses anything that is not digest-pinned. Running it again

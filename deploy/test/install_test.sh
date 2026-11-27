@@ -41,7 +41,7 @@ step "node role (agent mode)"
 CODE=$(admin -X POST -H 'content-type: application/json' -d '{"label":"t"}' \
   "http://127.0.0.1:$PORT/api/admin/enrollment-codes" | jq -r .code)
 $I --role node --non-interactive --release-file "$RELEASE_FILE" \
-  --coordinator "http://$GW:$PORT" --enroll "$CODE" --name install-test
+  --coordinator local --enroll "$CODE" --name install-test
 wait_for 90 "node online" node_online
 admin -X POST -H 'content-type: application/json' \
   -d '{"jobs":[{"type":"echo"},{"type":"dummy_fetch","payload":{"url":"https://t.invalid/"}}]}' \
@@ -51,11 +51,11 @@ wait_for 60 "jobs done" jobs_done
 
 step "re-running is a no-op for a healthy node"
 before=$(docker inspect -f '{{.State.StartedAt}}' pos-worker-a)
-$I --role node --non-interactive --release-file "$RELEASE_FILE" --coordinator "http://$GW:$PORT"
+$I --role node --non-interactive --release-file "$RELEASE_FILE" --coordinator local
 [[ "$(docker inspect -f '{{.State.StartedAt}}' pos-worker-a)" == "$before" ]] || fail "worker was restarted"
 
 step "a config change reaches the running worker"
-$I --role node --non-interactive --release-file "$RELEASE_FILE" --coordinator "http://$GW:$PORT" \
+$I --role node --non-interactive --release-file "$RELEASE_FILE" --coordinator local \
   --name renamed-node
 wait_for 60 "worker recreated with the new name" bash -c \
   "docker inspect -f '{{.Config.Env}}' pos-worker-a pos-worker-b 2>/dev/null | grep -q POS_WORKER_NAME=renamed-node"
@@ -64,14 +64,14 @@ wait_for 90 "node online after the config change" node_online
 if [[ -n "${OLD_RELEASE_FILE:-}" ]]; then
   step "an older release.json never downgrades a running agent"
   agent_before=$(docker inspect -f '{{.Config.Image}}' pos-agent-worker)
-  $I --role node --non-interactive --release-file "$OLD_RELEASE_FILE" --coordinator "http://$GW:$PORT" \
+  $I --role node --non-interactive --release-file "$OLD_RELEASE_FILE" --coordinator local \
     --name renamed-node
   [[ "$(docker inspect -f '{{.Config.Image}}' pos-agent-worker)" == "$agent_before" ]] \
     || fail "the agent was downgraded"
 fi
 
 step "simple mode and back"
-$I --role node --mode simple --non-interactive --release-file "$RELEASE_FILE" --coordinator "http://$GW:$PORT"
+$I --role node --mode simple --non-interactive --release-file "$RELEASE_FILE" --coordinator local
 docker inspect pos-agent-worker >/dev/null 2>&1 && fail "agent still present in simple mode"
 docker inspect pos-worker-a >/dev/null 2>&1 && fail "agent-managed worker still present in simple mode"
 wait_for 60 "simple-mode worker online" node_online
@@ -80,7 +80,7 @@ step "uninstall keeps data; reinstall needs no new enrollment code"
 $I --uninstall --role node >/dev/null
 curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null || fail "node uninstall touched the coordinator"
 docker volume inspect pos-worker-state >/dev/null || fail "worker identity volume was deleted"
-$I --role node --mode agent --non-interactive --release-file "$RELEASE_FILE" --coordinator "http://$GW:$PORT"
+$I --role node --mode agent --non-interactive --release-file "$RELEASE_FILE" --coordinator local
 wait_for 90 "node online again with the same identity" node_online
 [[ "$(admin "http://127.0.0.1:$PORT/api/admin/nodes" | jq length)" == 1 ]] || fail "re-enrolled as a new node"
 

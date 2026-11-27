@@ -21,8 +21,8 @@ jobs:
     env:
       POS_TEST_DATABASE_URL: postgresql+psycopg://pos:pos@localhost:5432/pos_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
       - run: uv sync --locked
@@ -40,7 +40,7 @@ jobs:
   shell:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: shellcheck -S warning install.sh deploy/test/*.sh
 
   docker:
@@ -62,8 +62,8 @@ jobs:
         image: registry:2
         ports: ["5000:5000"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
       - run: uv sync --locked
