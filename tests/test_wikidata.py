@@ -245,3 +245,54 @@ async def test_wikidata_source_end_to_end(app, admin, sessionmaker, shop, tmp_pa
             await s.execute(select(Measurement).where(Measurement.product_id == tanker.id))
         ).scalar_one()
         assert (m.a_m, m.mass_kg, m.method) == (330, 60_000_000, "wikidata")
+
+
+def test_an_item_without_a_usable_cost_still_has_its_row():
+    """The query keeps one row per selected item (pagination counts them): a cost
+    statement with "unknown value" comes back as an empty cost list."""
+    (r,) = _records(_row("Q9", [""], lengths="12"))
+    assert r.extraction.offers == [] and r.extraction.measurements[0].a_m == 12
+    q = wikidata.build_query("Q11446", True, 10, 0)
+    costs_block = q[q.index("AS %items") : q.index("AS %costs")]
+    assert "OPTIONAL {\n      VALUES" in costs_block
+
+
+async def test_fx_backfill_uses_the_date_a_cost_refers_to(app, sessionmaker):
+    """A cost from 1869 must never get today's exchange rate in a later backfill."""
+    from datetime import UTC, datetime
+
+    from pos_coordinator.models import Product
+
+    async with sessionmaker() as s:
+        p = Product(match_key="url:https://www.wikidata.org/wiki/Q1", source="wd")
+        s.add(p)
+        await s.flush()
+        now = datetime.now(UTC)
+        for as_of in ("1869-01-01", "2020-01-01"):
+            s.add(
+                Offer(
+                    product_id=p.id,
+                    source="wd",
+                    url=p.match_key[4:],
+                    observed_on=now,
+                    price=Decimal("1000"),
+                    currency="GBP",
+                    flags=["no_fx_rate"],
+                    fields={"price": {"as_of": as_of, "kind": "item"}},
+                    parser_version="4",
+                    validator_version="2",
+                )
+            )
+        await fx.store(
+            s,
+            [
+                {"day": now.date(), "currency": "GBP", "rate_per_eur": Decimal("0.85")},
+                {"day": date(2019, 12, 31), "currency": "GBP", "rate_per_eur": Decimal("0.8508")},
+            ],
+        )
+        await s.commit()
+    assert await stage.backfill_fx(app.state.sessionmaker) == 1
+    async with sessionmaker() as s:
+        offers = {o.fields["price"]["as_of"]: o for o in (await s.execute(select(Offer))).scalars()}
+    assert offers["1869-01-01"].price_eur is None and "no_fx_rate" in offers["1869-01-01"].flags
+    assert offers["2020-01-01"].fx_rate == Decimal("0.8508")

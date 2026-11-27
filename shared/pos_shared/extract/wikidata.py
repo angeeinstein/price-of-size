@@ -51,7 +51,10 @@ def build_query(class_id: str, subclasses: bool, limit: int, offset: int) -> str
     (few) and check their class, not the other way round (listing every ship first
     times out); then aggregate each property per item in its own named subquery
     (Blazegraph's WITH ... INCLUDE, evaluated first), so the values of different
-    properties are never multiplied with each other in one join."""
+    properties are never multiplied with each other in one join. Every block has one
+    row per item of the page (a cost statement without a value, "unknown value", gives
+    an empty cost), so a page returns as many rows as it selected items: a short page
+    really is the last one."""
     if not QID.match(class_id):
         raise ValueError(f"not a Wikidata item id: {class_id!r}")
     path = "wdt:P31/wdt:P279*" if subclasses else "wdt:P31"
@@ -70,13 +73,15 @@ def build_query(class_id: str, subclasses: bool, limit: int, offset: int) -> str
         f"""WITH {{
   SELECT ?item (GROUP_CONCAT(DISTINCT ?costv; separator="{_SEP}") AS ?costs) WHERE {{
     {first}
-    VALUES (?prop ?pp ?pv) {{ {cost_props} }}
-    ?item ?pp ?cst . ?cst ?pv ?cv .
-    ?cv wikibase:quantityAmount ?ca ; wikibase:quantityUnit ?cu .
-    OPTIONAL {{ ?cst pq:P585 ?cd }}
-    OPTIONAL {{ ?cu wdt:P498 ?iso }}
-    BIND(CONCAT(?prop, "{_FIELD}", STR(?ca), "{_FIELD}", STRAFTER(STR(?cu), "entity/"),
-                "{_FIELD}", COALESCE(?iso, ""), "{_FIELD}", COALESCE(STR(?cd), "")) AS ?costv)
+    OPTIONAL {{
+      VALUES (?prop ?pp ?pv) {{ {cost_props} }}
+      ?item ?pp ?cst . ?cst ?pv ?cv .
+      ?cv wikibase:quantityAmount ?ca ; wikibase:quantityUnit ?cu .
+      OPTIONAL {{ ?cst pq:P585 ?cd }}
+      OPTIONAL {{ ?cu wdt:P498 ?iso }}
+      BIND(CONCAT(?prop, "{_FIELD}", STR(?ca), "{_FIELD}", STRAFTER(STR(?cu), "entity/"),
+                  "{_FIELD}", COALESCE(?iso, ""), "{_FIELD}", COALESCE(STR(?cd), "")) AS ?costv)
+    }}
   }} GROUP BY ?item
 }} AS %costs""",
     ]
