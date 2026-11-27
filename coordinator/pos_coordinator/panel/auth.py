@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 import pyotp
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pos_coordinator.models import AppUser, LoginAttempt, UserSession
@@ -119,9 +119,18 @@ async def authenticate(
     session: AsyncSession, username: str, password: str, totp: str | None, ip: str | None
 ) -> AppUser:
     username = normalize_username(username)
+    # Attempts for one username, and from one address, run one after another (until the
+    # caller commits): the failure limits are checked against every earlier attempt,
+    # also against those that arrived at the same moment, and a TOTP code is consumed
+    # once. Always username before address, so two attempts never wait on each other.
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"login-user:{username}"}
+    )
+    if ip:
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"login-ip:{ip}"}
+        )
     await check_rate_limit(session, username, ip)
-    # The row lock serialises logins of one user until the caller commits: a TOTP code
-    # (its counter) can be consumed once, also by two requests arriving together.
     user = (
         await session.execute(
             select(AppUser)

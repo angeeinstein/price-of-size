@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pyotp
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from pos_coordinator.app import create_app
 from pos_coordinator.models import AppUser, UserSession
@@ -277,3 +277,41 @@ async def test_one_totp_code_cannot_log_in_twice_at_once(app, sessionmaker):
 
     results = await _asyncio.gather(attempt(), attempt())
     assert sorted(results) == [False, True]
+
+
+async def test_concurrent_guesses_cannot_pass_the_failure_limit(app, sessionmaker):
+    """Codex finding: a burst of wrong passwords arriving together must still stop at
+    the per-account limit."""
+    import asyncio as _asyncio
+
+    from pos_coordinator.models import AppUser, LoginAttempt
+    from pos_coordinator.panel import auth as panel_auth
+
+    async with sessionmaker() as s:
+        s.add(
+            AppUser(
+                username="burst",
+                password_hash=panel_auth.hash_password("a-long-passphrase-1"),
+                role="viewer",
+            )
+        )
+        await s.commit()
+
+    async def guess(i):
+        async with sessionmaker() as s:
+            try:
+                await panel_auth.authenticate(s, "burst", f"wrong-guess-{i}", None, "198.51.100.7")
+            except panel_auth.RateLimited:
+                return "limited"
+            except panel_auth.AuthError:
+                return "wrong"
+            return "in"
+
+    results = await _asyncio.gather(*(guess(i) for i in range(12)))
+    assert results.count("wrong") == panel_auth.MAX_FAILS_PER_USER
+    assert results.count("limited") == 12 - panel_auth.MAX_FAILS_PER_USER
+    async with sessionmaker() as s:
+        failures = (
+            await s.execute(select(func.count()).where(LoginAttempt.username == "burst"))
+        ).scalar_one()
+    assert failures == panel_auth.MAX_FAILS_PER_USER
