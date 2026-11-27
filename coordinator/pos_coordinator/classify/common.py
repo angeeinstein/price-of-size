@@ -93,6 +93,25 @@ async def assign(
     return True
 
 
+async def withdraw(session: AsyncSession, product_id: uuid.UUID, tier: str) -> bool:
+    """End the product's current classification if `tier` made it (its classifier now
+    says otherwise); one from another tier stays. Returns whether one was ended."""
+    await session.execute(select(Product.id).where(Product.id == product_id).with_for_update())
+    cur = (
+        await session.execute(
+            select(Classification)
+            .where(Classification.product_id == product_id, Classification.is_current)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if cur is None or cur.tier != tier:
+        return False
+    cur.is_current = False
+    await session.execute(update(Product).where(Product.id == product_id).values(category_id=None))
+    await session.flush()
+    return True
+
+
 async def attempt(
     session: AsyncSession,
     product_id: uuid.UUID,

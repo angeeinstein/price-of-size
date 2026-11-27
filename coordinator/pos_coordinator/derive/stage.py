@@ -576,36 +576,34 @@ async def loop(sm: async_sessionmaker[AsyncSession], store: RawStore, interval_s
 DERIVED_TABLES = (Measurement, Classification, Embedding, Offer, Product)
 
 
-# Classification tiers the rebuild itself redoes; the others (k-NN, LLM) need the
-# embeddings first and come back afterwards (the LLM's answers from the ledger).
-SYNC_TIERS = ("shop_mapping",)
-
-
 async def snapshot(session: AsyncSession) -> dict[str, Any]:
+    from pos_coordinator.classify import shopmap
+
     out = {}
     for model in DERIVED_TABLES:
         q = select(func.count()).select_from(model)
         if model is Classification:
-            # history rows are not rebuilt; tiers that come back later are counted apart
-            q = q.where(Classification.is_current, Classification.tier.in_(SYNC_TIERS))
+            q = q.where(Classification.is_current)  # history rows are not rebuilt
         out[model.__tablename__] = (await session.execute(q)).scalar_one()
-    out["classification_async"] = (
-        await session.execute(
-            select(func.count()).where(
-                Classification.is_current, Classification.tier.not_in(SYNC_TIERS)
-            )
-        )
+    # What the rebuild itself reproduces is the category each product's shop mapping
+    # gives it, whichever tier holds the product now (an LLM pick, say, which comes
+    # back only later): taken from the mappings, the same way on both sides.
+    mapped = text(f"""
+        SELECT p.id AS product_id, m.taxonomy_node_id
+        FROM product p
+        JOIN category_mapping m
+          ON m.is_current AND m.source = p.source AND m.category_path = {shopmap.PATH_SQL}
+        WHERE m.taxonomy_node_id IS NOT NULL
+    """).columns(product_id=Product.id.type, taxonomy_node_id=Classification.taxonomy_node_id.type)
+    mapped_sq = mapped.subquery()
+    out["mapped_products"] = (
+        await session.execute(select(func.count()).select_from(mapped_sq))
     ).scalar_one()
-    sync_cls = (
-        select(Classification.product_id, Classification.taxonomy_node_id)
-        .where(Classification.is_current, Classification.tier.in_(SYNC_TIERS))
-        .subquery()
-    )
     digest = hashlib.sha256()
     for row in (
         await session.execute(
-            select(Product.match_key, Product.canonical_price_eur, sync_cls.c.taxonomy_node_id)
-            .outerjoin(sync_cls, sync_cls.c.product_id == Product.id)
+            select(Product.match_key, Product.canonical_price_eur, mapped_sq.c.taxonomy_node_id)
+            .outerjoin(mapped_sq, mapped_sq.c.product_id == Product.id)
             .order_by(Product.match_key)
         )
     ).all():
@@ -614,7 +612,9 @@ async def snapshot(session: AsyncSession) -> dict[str, Any]:
     return out
 
 
-ASYNC_DERIVED = {"embedding", "classification_async"}
+# Reported, not compared: computed later by workers (embeddings) or by the k-NN and
+# LLM tiers, which may hold products the rebuild first gives their shop mapping.
+ASYNC_DERIVED = {"embedding", "classification"}
 
 
 def _comparable(snap: dict[str, Any]) -> dict[str, Any]:

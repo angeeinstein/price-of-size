@@ -202,16 +202,15 @@ async def classify(session: AsyncSession, limit: int = PER_ROUND) -> dict[str, i
     queries = common.stack([r[1] for r in rows])
     votes = await asyncio.to_thread(vote, ex, queries)
     for (pid, _), result in zip(rows, votes, strict=True):
-        if result is None:
-            await common.attempt(session, pid, None, TIER, None, v)
-            out["knn_unsure"] += 1
-            continue
-        node, share = result
-        conf = round(share, 4)
-        if share >= threshold:
+        node, share = result if result is not None else (None, 0.0)
+        conf = round(share, 4) if result is not None else None
+        if node is not None and share >= threshold:
             await common.assign(session, pid, node, TIER, conf, v)
             out["knn_classified"] += 1
         else:
+            # unsure now: an earlier, surer k-NN guess no longer stands (the product
+            # goes to the LLM tier); another tier's classification stays
+            await common.withdraw(session, pid, TIER)
             await common.attempt(session, pid, node, TIER, conf, v)
             out["knn_unsure"] += 1
     return out

@@ -55,6 +55,17 @@ def path_string(segments: list[Any] | str) -> str:
     return SEP.join(p for p in parts if p)[:MAX_PATH_CHARS]
 
 
+async def lock_path(session: AsyncSession, source: str, path: str) -> None:
+    """Serialise changes to one (source, path) until the transaction ends: a person's
+    mapping and an LLM proposal arriving at the same time never overwrite each other
+    unseen."""
+    from pos_coordinator.classify.common import lock_key
+
+    await session.execute(
+        select(func.pg_advisory_xact_lock(lock_key(f"mapping\x1f{source}\x1f{path}")))
+    )
+
+
 async def set_mapping(
     session: AsyncSession,
     source: str,
@@ -74,6 +85,7 @@ async def set_mapping(
         raise ValueError("source and path are required")
     if node_id is not None and await session.get(TaxonomyNode, node_id) is None:
         raise ValueError("unknown taxonomy node")
+    await lock_path(session, source, path)
     await session.execute(
         update(CategoryMapping)
         .where(

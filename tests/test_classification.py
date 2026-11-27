@@ -409,16 +409,27 @@ async def test_classification_endpoints(sessionmaker, admin, monkeypatch):
 
 
 async def test_the_rebuild_compares_only_what_it_rebuilds(sessionmaker):
+    from sqlalchemy import delete
+
     await _taxonomy(sessionmaker)
+    shelf = await _node(sessionmaker, "Furniture > Shelving")
     aircraft = await _node(sessionmaker, "Vehicles & Parts > Vehicles > Aircraft")
-    (a,) = await _products(sessionmaker, ["Jet"])
+    a, b = await _products(sessionmaker, ["Regal", "Jet"], path=["Möbel", "Regale"])
     async with sessionmaker() as s:
+        await shopmap.set_mapping(s, "shop", "Möbel > Regale", shelf)
+        await shopmap.classify(s)
+        # the LLM's pick (say, from the labelling sample) replaces the mapping's for one
+        await common.assign(s, b, aircraft, "llm", 0.9, "v")
+        await s.commit()
         before = await stage.snapshot(s)
-        await common.assign(s, a, aircraft, "llm", 0.9, "v")
+        # what a rebuild does with the classifications: drop them, map again
+        await s.execute(delete(Classification))
+        await shopmap.classify(s)
         await s.commit()
         after = await stage.snapshot(s)
-    assert after["classification_async"] == 1 and after["classification"] == 0
+    assert before["mapped_products"] == after["mapped_products"] == 2
     assert stage._comparable(before) == stage._comparable(after)
+    assert (await _current(sessionmaker, b)).tier == "shop_mapping"  # until the LLM's is back
 
 
 async def test_one_current_classification_per_product(sessionmaker):
@@ -492,3 +503,63 @@ async def test_a_weak_shop_mapping_goes_to_the_llm_while_knn_is_active(sessionma
     async with sessionmaker() as s:
         row = (await s.execute(select(LlmBatch))).scalar_one()
     assert row.requests["0"]["meta"]["product_id"] == str(a)
+
+
+async def test_a_knn_guess_that_turns_unsure_is_withdrawn(sessionmaker, monkeypatch):
+    await _labelled_world(sessionmaker, monkeypatch)
+    (sure,) = await _products(sessionmaker, ["Regal Eiche Buche"], prefix="q")
+    await _embed_all(sessionmaker)
+    async with sessionmaker() as s:
+        await knn.classify(s)
+        await s.commit()
+    assert (await _current(sessionmaker, sure)).tier == "knn"
+    await _set(sessionmaker, "classify_knn_min_confidence", 0.95)
+    await _set(sessionmaker, "classification_generation", 1)
+    async with sessionmaker() as s:
+        assert (await knn.classify(s))["knn_unsure"] == 1
+        await s.commit()
+    assert await _current(sessionmaker, sure) is None
+    async with sessionmaker() as s:
+        assert (await s.get(Product, sure)).category_id is None
+
+
+async def test_a_proposal_never_overwrites_a_mapping_made_meanwhile(sessionmaker):
+    import asyncio
+
+    from pos_coordinator.llm.service import Outcome
+
+    await _taxonomy(sessionmaker)
+    shelf = await _node(sessionmaker, "Furniture > Shelving")
+    aircraft = await _node(sessionmaker, "Vehicles & Parts > Vehicles > Aircraft")
+    outcome = Outcome(
+        "ok",
+        proposals.Proposal(choice=1, confidence="high", reason="r"),
+        "claude-sonnet-5-5",
+        proposals.STAGE,
+        meta={
+            "source": "shop",
+            "path": "Möbel > Regale",
+            "candidates": [str(aircraft)],
+            "version": "v",
+        },  # fmt: skip
+    )
+    async with sessionmaker() as person:  # a person maps the path; not committed yet
+        await shopmap.set_mapping(person, "shop", "Möbel > Regale", shelf, "manual")
+
+        async def deliver():
+            async with sessionmaker() as s:
+                await proposals.handle(s, outcome)
+                await s.commit()
+
+        task = asyncio.create_task(deliver())
+        await asyncio.sleep(0.3)
+        assert not task.done()  # waits for the person's transaction
+        await person.commit()
+    await task
+    async with sessionmaker() as s:
+        (m,) = (
+            (await s.execute(select(CategoryMapping).where(CategoryMapping.is_current)))
+            .scalars()
+            .all()
+        )
+    assert m.method == "manual" and m.taxonomy_node_id == shelf

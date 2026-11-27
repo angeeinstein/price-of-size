@@ -233,6 +233,8 @@ async def handle(session: AsyncSession, outcome: service.Outcome) -> None:
         return
     if outcome.status == "error":
         return  # expired or failed in the batch: proposed again later
+    # under the path's lock (held to commit): a person's mapping made meanwhile is seen
+    await shopmap.lock_path(session, source, shopmap.path_string(path))
     current = (
         await session.execute(
             select(CategoryMapping).where(
