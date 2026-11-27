@@ -313,12 +313,20 @@ def _merged(items: list[dict]) -> dict[str, str]:
     return out
 
 
-def _context(path: str) -> str:
+# Wrappers of a whole response, not a carrying capacity ("payload.product...").
+_WRAPPERS = {"payload", "data", "props", "state"}
+
+
+def _context(item: dict) -> str:
     """Path segments the spec-text tier must see in the label: a "weight" under
-    "maximumLoad" is a carrying capacity, not the product's mass."""
+    "maximumLoad" is a carrying capacity, not the product's mass. Only the segments
+    holding the node (below its product, the last two) count: the names of response
+    wrappers above the product ("payload") say nothing about the value."""
+    path = item.get("path", "")
+    below = [t for t in _TOKEN.findall(path[len(_owner(item)) :]) if not t.startswith("[")]
     words = []
-    for t in _TOKEN.findall(path):
-        if t.startswith("["):
+    for t in below[-2:]:
+        if t.lower() in _WRAPPERS:
             continue
         human = re.sub(r"([a-z])([A-Z])", r"\1 \2", t).replace("_", " ").replace("-", " ")
         if spectext.LOAD_LABEL.search(human):
@@ -348,7 +356,7 @@ def pairs(
         root = package_root(path)
         if root is not None and truncated:
             continue
-        context = _context(path)
+        context = _context(item)
         if context:
             # e.g. "maximum load weight": the spec-text tier reads it as a capacity
             prefix = f"{context} {'package ' if root else ''}"

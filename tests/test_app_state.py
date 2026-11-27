@@ -339,3 +339,15 @@ def test_a_product_repeated_in_component_props_is_counted_once():
     ex = extract_evidence({"status": 200, "verdict": {"kind": "ok"}, "snippets": snip})
     pkg = next(m for m in ex.measurements if m.basis == "package")
     assert pkg.mass_kg == pytest.approx(10) and pkg.a_m == pytest.approx(1.0)
+
+
+def test_a_payload_wrapper_is_not_a_load_rating():
+    state = {"payload": {"product": {"sku": "A", "weight": "10 kg", "package": _pkg(12)}}}
+    _, ex = _extract(state)
+    by = {m.basis: m for m in ex.measurements if m.mass_kg}
+    assert by["package"].mass_kg == pytest.approx(12) and by["package"].a_m == pytest.approx(1)
+    assert by["unknown"].mass_kg == pytest.approx(10)
+    # a load rating below the product still is one
+    state["payload"]["product"]["maxPayload"] = {"weight": "100 kg", "note": "x"}
+    _, ex = _extract(state)
+    assert sorted(m.mass_kg for m in ex.measurements if m.mass_kg) == pytest.approx([10, 12])
