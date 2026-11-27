@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import functools
 import logging
 from contextlib import asynccontextmanager
 
@@ -16,6 +17,7 @@ from pos_coordinator.config import Settings, get_settings
 from pos_coordinator.db import make_engine, make_sessionmaker
 from pos_coordinator.derive import fx
 from pos_coordinator.derive import stage as derive_stage
+from pos_coordinator.llm.service import LlmService, default_client
 from pos_coordinator.panel import api as panel_api
 from pos_coordinator.panel import static as panel_static
 from pos_coordinator.partitions import PartitionCache
@@ -41,6 +43,22 @@ async def fx_daily(sm) -> None:
             await asyncio.sleep(3600)
 
 
+async def llm_loop(service, interval_s: float) -> None:
+    """Collect finished Message Batches (the stages' handlers store the answers)."""
+    log = logging.getLogger("pos_coordinator.llm")
+    while True:
+        try:
+            if service.available():
+                n = await service.poll_batches()
+                if n:
+                    log.info("LLM batches: %d results handled", n)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("polling LLM batches failed")
+        await asyncio.sleep(interval_s)
+
+
 def create_app(settings: Settings | None = None, *, run_maintenance: bool = True) -> FastAPI:
     settings = settings or get_settings()
 
@@ -54,6 +72,9 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
         )
         app.state.engine = engine
         app.state.sessionmaker = make_sessionmaker(engine)
+        app.state.llm = LlmService(
+            app.state.sessionmaker, functools.partial(default_client, settings)
+        )
         await rawstore.bind_to_database(app.state.sessionmaker, app.state.rawstore)
         tasks: list[asyncio.Task] = []
         if run_maintenance:
@@ -75,6 +96,7 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
                 )
             )
             tasks.append(asyncio.create_task(fx_daily(app.state.sessionmaker)))
+            tasks.append(asyncio.create_task(llm_loop(app.state.llm, settings.llm_poll_interval_s)))
         try:
             yield
         finally:

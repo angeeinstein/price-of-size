@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 
@@ -23,6 +23,8 @@ from pos_coordinator.models import (
     AuditLog,
     EnrollmentCode,
     Job,
+    LlmBatch,
+    LlmCall,
     Node,
     NodeCommand,
     NodeToken,
@@ -323,3 +325,51 @@ async def put_setting(key: str, body: dict[str, Any], admin: SensitiveAdmin, ses
 async def get_budget(admin: CurrentViewer, session: Session):
     s = await budget.status(session)
     return {**s.__dict__, "ahead_of_pace": s.ahead_of_pace}
+
+
+@router.get("/llm")
+async def llm_status(admin: CurrentViewer, session: Session, request: Request):
+    """Whether the LLM service can run (an API key is set), what it spent per stage
+    and model this month, and the batches still running."""
+    s = await budget.status(session)
+    month = datetime.combine(s.month_start, datetime.min.time(), UTC)
+    rows = (
+        await session.execute(
+            select(
+                LlmCall.stage,
+                LlmCall.model,
+                func.count(),
+                func.sum(LlmCall.cost_usd),
+                func.count().filter(LlmCall.output["status"].astext.not_in(("ok", "pending"))),
+            )
+            .where(LlmCall.created_at >= month)
+            .group_by(LlmCall.stage, LlmCall.model)
+            .order_by(LlmCall.stage, LlmCall.model)
+        )
+    ).all()
+    batches = (
+        await session.execute(
+            select(LlmBatch)
+            .where(LlmBatch.status.in_(("submitting", "submitted")))
+            .order_by(LlmBatch.created_at)
+        )
+    ).scalars()
+    return {
+        "available": request.app.state.llm.available(),
+        "budget": {**s.__dict__, "ahead_of_pace": s.ahead_of_pace},
+        "month": [
+            {"stage": r[0], "model": r[1], "calls": r[2], "cost_usd": r[3], "not_ok": r[4]}
+            for r in rows
+        ],
+        "pending_batches": [
+            {
+                "stage": b.stage,
+                "model": b.model,
+                "status": b.status,
+                "requests": b.request_count,
+                "estimated_cost_usd": b.estimated_cost_usd,
+                "created_at": b.created_at,
+            }
+            for b in batches
+        ],
+    }

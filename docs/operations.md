@@ -302,6 +302,39 @@ currency that arrives before its rate is stored with `no_fx_rate` and converted
 (and its product's price recomputed) once the rate is there;
 `pos-coordinator fx-refresh` does both at once.
 
+## LLM (Claude API)
+
+Only the coordinator calls the Claude API. Without a key the LLM stages stay idle;
+everything else runs. Add the key to the coordinator's environment file and restart
+it (the installer keeps the line on re-installs):
+
+```bash
+echo 'POS_ANTHROPIC_API_KEY=sk-ant-...' | sudo tee -a /etc/pos/coordinator.env
+sudo chmod 600 /etc/pos/coordinator.env
+```
+
+* **Budget:** `llm_budget_hard_cap_usd` (default $10 a month), optional
+  `llm_budget_soft_target_usd`, warning at `llm_budget_warn_fraction`. Spending is
+  paced over the month (daily allowance = remaining budget / remaining days); low
+  priority work waits when today is ahead of pace, everything waits at the cap. Set a
+  spending limit on the API account as well: it is the second safety net.
+  Each call reserves its estimate (prompt length plus the full `max_tokens`) in the
+  ledger before it is made, and a batch reserves its estimate before it is submitted,
+  so concurrent work never spends the same money twice; the actual cost replaces the
+  estimate. A call whose outcome is unknown (timeout, lost connection) keeps its
+  estimate, as does a batch submission that was interrupted.
+* **Models** per role in the `llm_models` setting: Haiku 5.5 for bulk work
+  (classification, reviews), Sonnet 5.5 where errors multiply (category mappings,
+  parsers). Bulk work goes through the Message Batches API at half price; the
+  coordinator collects finished batches every `POS_LLM_POLL_INTERVAL_S` (60 s).
+* **Ledger:** every call is in `llm_call` (tokens, cost, model, stage, source; costs
+  rounded up, an unknown model priced like the most expensive one). The same input is
+  answered from the ledger instead of a second call. Answers must match a JSON schema;
+  an invalid one is retried once, then kept as `invalid`. A refusal is kept as
+  `refused`; Sonnet and Opus calls fall back to another model on the API's side first.
+* `GET /api/admin/llm`: whether a key is set, the budget, spend per stage and model
+  this month, and batches still running.
+
 ## Backups
 
 * **Database role:** `pos-db-backup.timer` dumps the database nightly

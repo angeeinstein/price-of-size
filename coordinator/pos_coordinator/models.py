@@ -354,6 +354,31 @@ class LlmCall(Base):
     created_at: Mapped[datetime] = created()
 
 
+class LlmBatch(Base):
+    """A Message Batch submitted to the Claude API, until its results are collected.
+    `requests` maps each custom_id to its input hash and the stage's metadata. The row
+    is written (status submitting, no remote id yet) before the request, so its
+    estimate is reserved in the budget from the start."""
+
+    __tablename__ = "llm_batch"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('submitting','submitted','ended','failed')", name="llm_batch_status"
+        ),
+        Index("ix_llm_batch_status", "status"),
+    )
+    id: Mapped[uuid.UUID] = pk()
+    remote_id: Mapped[str | None] = mapped_column(Text, unique=True)
+    stage: Mapped[str] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default="submitted")
+    request_count: Mapped[int] = mapped_column(Integer)
+    estimated_cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6))
+    requests: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = created()
+    ended_at: Mapped[datetime | None]
+
+
 class Setting(Base):
     """Runtime switches, editable in the control panel. Defaults live in code."""
 
