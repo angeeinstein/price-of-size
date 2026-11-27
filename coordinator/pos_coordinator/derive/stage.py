@@ -468,6 +468,9 @@ async def backfill_fx(sm: async_sessionmaker[AsyncSession], batch: int = 1000) -
     total, after = 0, None
     while True:
         async with sm() as session:
+            # The derive cursor's lock: never alongside a derive batch, which may be
+            # adding offers to the same products (canonical prices from partial data).
+            await _cursor(session)
             q = (
                 select(Offer)
                 .where(Offer.flags.contains(["no_fx_rate"]))

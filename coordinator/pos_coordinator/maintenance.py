@@ -107,6 +107,14 @@ async def run_once(
             await session.commit()
     except Exception:
         log.exception("pruning failed")
+    try:
+        async with sm() as session:
+            from pos_coordinator.crawl import discovery
+
+            out["robots_retried"] = await discovery.retry_pending_robots(session)
+            await session.commit()
+    except Exception:
+        log.exception("robots retry for pending discovery failed")
     if any(out.values()):
         log.info("maintenance: %s", out)
     return out

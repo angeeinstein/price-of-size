@@ -390,3 +390,29 @@ async def test_disabled_robots_enforcement_crawls_despite_unreachable_robots(ses
         off = await _cfg(s, respect_robots_txt=False)
         got = await scheduler.lease_fetch(s, n, ["fetch_http"], 5, off)
         assert [h.job.payload["url"] for h in got] == ["https://down.example/p/1"]
+
+
+async def test_pending_discovery_survives_a_robots_job_that_ran_out(sessionmaker):
+    from pos_coordinator.models import Source
+
+    async with sessionmaker() as s:
+        src = Source(name="shop", type="scraper", config={"domains": ["gone.example"]})
+        s.add(src)
+        await s.flush()
+        await discovery.discover(s, src)
+        # the robots job fails for good (outage), robots.txt stays unknown
+        await s.execute(
+            update(Job).where(Job.type == "fetch_robots").values(status="failed", attempts=10)
+        )
+        assert await discovery.retry_pending_robots(s) == 1  # due: a new one
+        assert await discovery.retry_pending_robots(s) == 0  # one active is enough
+        await s.execute(update(Job).where(Job.type == "fetch_robots").values(status="failed"))
+        await discovery.discover(s, src)  # a click on Discover also brings one back
+        active = (
+            await s.execute(
+                select(func.count()).where(
+                    Job.type == "fetch_robots", Job.status.in_(("queued", "leased"))
+                )
+            )
+        ).scalar_one()
+        assert active == 1

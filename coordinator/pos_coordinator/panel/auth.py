@@ -120,8 +120,15 @@ async def authenticate(
 ) -> AppUser:
     username = normalize_username(username)
     await check_rate_limit(session, username, ip)
+    # The row lock serialises logins of one user until the caller commits: a TOTP code
+    # (its counter) can be consumed once, also by two requests arriving together.
     user = (
-        await session.execute(select(AppUser).where(AppUser.username == username))
+        await session.execute(
+            select(AppUser)
+            .where(AppUser.username == username)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
     if not verify_password(user, password) or user is None or user.disabled_at is not None:
         session.add(LoginAttempt(username=username, ip=ip, ok=False, reason="credentials"))

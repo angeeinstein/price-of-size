@@ -241,3 +241,39 @@ async def test_panel_is_served_with_security_headers(settings, tmp_path):
     assert "root:" not in escape.text
     assert "frame-ancestors 'none'" in root.headers["content-security-policy"]
     assert root.headers["x-frame-options"] == "DENY"
+
+
+async def test_one_totp_code_cannot_log_in_twice_at_once(app, sessionmaker):
+    """Codex finding: two concurrent logins with the same code; only one may pass."""
+    import asyncio as _asyncio
+
+    import pyotp
+
+    from pos_coordinator.models import AppUser
+    from pos_coordinator.panel import auth as panel_auth
+
+    secret = pyotp.random_base32()
+    async with sessionmaker() as s:
+        s.add(
+            AppUser(
+                username="twice",
+                password_hash=panel_auth.hash_password("a-long-passphrase-1"),
+                role="admin",
+                totp_secret=secret,
+            )
+        )
+        await s.commit()
+    code = pyotp.TOTP(secret).now()
+
+    async def attempt():
+        async with sessionmaker() as s:
+            try:
+                await panel_auth.authenticate(s, "twice", "a-long-passphrase-1", code, None)
+                await _asyncio.sleep(0.2)  # hold the transaction open, as a login does
+                await s.commit()
+                return True
+            except panel_auth.AuthError:
+                return False
+
+    results = await _asyncio.gather(attempt(), attempt())
+    assert sorted(results) == [False, True]

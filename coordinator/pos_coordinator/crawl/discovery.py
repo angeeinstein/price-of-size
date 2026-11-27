@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 
 import zstandard
 from sqlalchemy import exc as sa_exc
-from sqlalchemy import select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pos_coordinator.crawl import scheduler, urls
@@ -105,6 +105,10 @@ async def discover(session: AsyncSession, source: Source) -> dict[str, int]:
             continue
         if ds.robots_status in (None, "unreachable"):
             ds.pending_discovery = sorted({*(ds.pending_discovery or []), source.name})
+            # also after an earlier robots job ran out of attempts (dedup: at most one)
+            await scheduler.ensure_robots_job(
+                session, domain, _base_url(cfg, domain) + "robots.txt"
+            )
             waiting += 1
             continue
         sitemap_urls += _domain_sitemaps(ds, domain, allowed, cfg)
@@ -228,3 +232,38 @@ def _normalized(url: Any) -> str | None:
         return urls.normalize(url) if isinstance(url, str) else None
     except urls.BadUrl:
         return None
+
+
+async def retry_pending_robots(session: AsyncSession) -> int:
+    """Domains whose discovery waits for robots.txt, and whose robots.txt job is gone
+    (ran out of attempts during an outage): queue another when it is due. Without this
+    such a domain, with no other jobs queued, would never be leased again."""
+    due = (
+        (
+            await session.execute(
+                select(DomainState).where(
+                    DomainState.pending_discovery.is_not(None),
+                    or_(
+                        DomainState.robots_next_check_at.is_(None),
+                        DomainState.robots_next_check_at <= func.now(),
+                    ),
+                    ~exists().where(
+                        Job.domain == DomainState.domain,
+                        Job.type == "fetch_robots",
+                        Job.status.in_(("queued", "leased")),
+                    ),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for ds in due:
+        source = (
+            await session.execute(
+                select(Source).where(Source.name.in_(ds.pending_discovery or [])).limit(1)
+            )
+        ).scalar_one_or_none()
+        base = _base_url((source.config or {}) if source else {}, ds.domain)
+        await scheduler.ensure_robots_job(session, ds.domain, base + "robots.txt")
+    return len(due)
