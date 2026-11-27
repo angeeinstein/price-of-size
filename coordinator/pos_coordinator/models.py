@@ -93,6 +93,9 @@ class DomainState(Base):
     block_status: Mapped[str] = mapped_column(Text, server_default="ok")
     block_reason: Mapped[str | None] = mapped_column(Text)
     blocked_at: Mapped[datetime | None]
+    # Last unblock (by hand or automatic retry): leases carry it, so a worker drops a
+    # local refusal pause from before it (see pos_worker.fetch.breaker).
+    unblocked_at: Mapped[datetime | None]
     robots_txt: Mapped[str | None] = mapped_column(Text)
     robots_fetched_at: Mapped[datetime | None]
     # rules | none (4xx: allow all) | unreachable (5xx/network: disallow until refetched)

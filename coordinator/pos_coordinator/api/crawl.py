@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
+from pos_coordinator import runtime_settings
 from pos_coordinator.api.deps import CurrentAdmin, CurrentViewer, SensitiveAdmin, Session
 from pos_coordinator.crawl import discovery, scheduler
 from pos_coordinator.models import (
@@ -109,6 +110,8 @@ class DomainUpdate(BaseModel):
     rate_rps: float | None = Field(None, gt=0, le=50, description="per-domain rate cap")
     clear_rate_override: bool = False
     fetch_mode: str | None = Field(None, pattern="^(http|browser)$")
+    # Per-domain block policy (see the block_* runtime settings); null clears one.
+    block: dict[str, int | None] | None = None
 
 
 @router.patch("/domains/{domain}")
@@ -119,6 +122,7 @@ async def update_domain(domain: str, body: DomainUpdate, admin: SensitiveAdmin, 
     changes = body.model_dump(exclude_defaults=True)
     if body.unblock and d.block_status == "blocked":
         d.block_status, d.block_reason, d.blocked_at = "ok", None, None
+        d.unblocked_at = func.now()
         session.add(DomainEvent(domain=domain, kind="unblocked", reason=f"admin:{admin.name}"))
         for g in (
             await session.execute(
@@ -131,6 +135,19 @@ async def update_domain(domain: str, body: DomainUpdate, admin: SensitiveAdmin, 
         overrides["rate_rps"] = body.rate_rps
     if body.clear_rate_override:
         overrides.pop("rate_rps", None)
+    for key, value in (body.block or {}).items():
+        if key not in runtime_settings.BLOCK_KEYS:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, f"unknown block setting {key}"
+            )
+        if value is None:
+            overrides.pop(key, None)
+        elif key == "block_retry_after_h" and value == 0:
+            overrides[key] = None  # this domain: never retried automatically
+        elif not runtime_settings.VALIDATORS[key](value):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"invalid {key}: {value}")
+        else:
+            overrides[key] = value
     d.overrides = overrides
     if body.fetch_mode:
         d.fetch_mode = body.fetch_mode

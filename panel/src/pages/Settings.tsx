@@ -18,6 +18,10 @@ const HELP: Record<string, string> = {
   llm_budget_soft_target_usd: "Optional lower monthly target for pacing",
   html_archive_quota_gb: "HTML archive size before switching to sample-only",
   user_agent: "How the crawler identifies itself to shops",
+  block_challenge_run: "Challenge pages (CAPTCHA, bot wall) in a row before a domain is blocked",
+  block_suspect_pause_s: "Pause after the first challenge page, in seconds",
+  block_forbidden_run: "HTTP 403 answers in a row that count as a block",
+  block_retry_after_h: "Try a blocked domain again after this many hours (null: only when unblocked by hand)",
 };
 
 function Row({ k, value }: { k: string; value: unknown }) {

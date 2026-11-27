@@ -128,7 +128,7 @@ def _apply_one(session, job: Job, ds: DomainState, eg: DomainEgressState, out, n
     else:
         ds.pages_fetched = (ds.pages_fetched or 0) + 1
         ds.last_fetch_at = now
-    _apply_rate(session, ds, eg, out, now, cfg)
+    _apply_rate(session, ds, eg, out, now, cfg, job)
     ds.updated_at = func.now()
     eg.updated_at = func.now()
 
@@ -200,6 +200,7 @@ def _apply_rate(
     out: dict,
     now: datetime,
     cfg: CrawlConfig,
+    job: Job | None = None,
 ) -> None:
     state = ratecontrol.RateState(
         rate_rps=eg.rate_rps,
@@ -224,6 +225,7 @@ def _apply_rate(
         out.get("elapsed_ms"),
         out.get("retry_after_s"),
         top,
+        cfg.block_policy(ds.overrides),
     )
     eg.rate_rps = state.rate_rps
     eg.clean_streak = state.clean_streak
@@ -248,7 +250,12 @@ def _apply_rate(
                     egress_group=eg.egress_group,
                     kind="blocked",
                     reason=d.reason,
-                    details={"http_status": out.get("status"), "url": out.get("final_url")},
+                    details={
+                        "http_status": out.get("status"),
+                        "url": out.get("final_url"),
+                        # what an automatic retry fetches: events outlive job rows
+                        "probe": _probe_spec(job),
+                    },
                 )
             )
     elif d.event:
@@ -263,3 +270,122 @@ def _apply_rate(
                 details={"cooldown_s": d.cooldown_s, "http_status": out.get("status")},
             )
         )
+
+
+async def retry_blocked(session: AsyncSession, settings: dict[str, Any]) -> int:
+    """Blocked domains whose `block_retry_after_h` (setting or domain override) has
+    passed are tried again. Their refusal counters stay: if the next answer is a
+    refusal again, the domain is blocked again at once; a clean answer resets them."""
+    cfg_default = settings.get("block_retry_after_h")
+    now = (await session.execute(select(func.now()))).scalar_one()
+    retried = 0
+    rows = (
+        await session.execute(
+            select(DomainState)
+            .where(DomainState.block_status == "blocked", DomainState.blocked_at.is_not(None))
+            .with_for_update(skip_locked=True)
+        )
+    ).scalars()
+    for ds in rows:
+        hours = (ds.overrides or {}).get("block_retry_after_h", cfg_default)
+        if hours is None or ds.blocked_at > now - timedelta(hours=float(hours)):
+            continue
+        reason = ds.block_reason
+        ds.block_status, ds.block_reason, ds.blocked_at = "ok", None, None
+        ds.unblocked_at = now
+        for g in (
+            await session.execute(
+                select(DomainEgressState).where(DomainEgressState.domain == ds.domain)
+            )
+        ).scalars():
+            g.cooldown_until = None
+        probe = await _ensure_probe(session, ds.domain)
+        session.add(
+            DomainEvent(
+                domain=ds.domain,
+                kind="unblocked",
+                reason="auto_retry",
+                details={"after_h": hours, "block_reason": reason, "probe_url": probe},
+            )
+        )
+        retried += 1
+    return retried
+
+
+# Keys the scheduler adds to a job's payload at lease time: not part of the job.
+_LEASE_KEYS = {
+    "delay_s",
+    "interval_s",
+    "user_agent",
+    "refusal_pause_s",
+    "keep_html",
+    "unblocked_at",
+}
+
+
+def _probe_spec(job: Job | None) -> dict | None:
+    """The job a blocked domain is retried with, as a plain dict."""
+    payload = (job.payload or {}) if job is not None else {}
+    if job is None or job.type == "fetch_robots" or not isinstance(payload.get("url"), str):
+        return None
+    return {
+        "type": job.type,
+        "priority": job.priority,
+        "payload": {k: v for k, v in payload.items() if k not in _LEASE_KEYS},
+    }
+
+
+async def _ensure_probe(session: AsyncSession, domain: str) -> str | None:
+    """A retried domain needs a job to try: its refusals may have used up the attempts
+    of every job it had. If none is queued, the latest fetch of the domain is queued
+    again (a new job, the old one stays as it ended); if pruning removed those jobs
+    (a retry after months), the job recorded with the block. Returns the probe's URL."""
+    page_types = [t for t in FETCH_TYPES if t != "fetch_robots"]
+    waiting = (
+        await session.execute(
+            select(Job.id)
+            .where(
+                Job.domain == domain,
+                Job.type.in_(page_types),
+                Job.status.in_(("queued", "leased")),
+            )
+            .limit(1)
+        )
+    ).first()
+    if waiting:
+        return None
+    last = (
+        await session.execute(
+            select(Job)
+            .where(Job.domain == domain, Job.type.in_(page_types))
+            .order_by(Job.created_at.desc(), Job.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    spec = _probe_spec(last)
+    if spec is None:
+        recorded = (
+            await session.execute(
+                select(DomainEvent.details)
+                .where(DomainEvent.domain == domain, DomainEvent.kind == "blocked")
+                .order_by(DomainEvent.at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        spec = (recorded or {}).get("probe")
+    if not isinstance(spec, dict) or spec.get("type") not in page_types:
+        return None
+    payload = spec.get("payload") if isinstance(spec.get("payload"), dict) else {}
+    url = payload.get("url")
+    if not isinstance(url, str):
+        return None
+    extra = {k: v for k, v in payload.items() if k not in _LEASE_KEYS | {"url", "source"}}
+    report = await scheduler.enqueue_urls(
+        session,
+        [url],
+        payload.get("source"),
+        int(spec.get("priority") or 0),
+        job_type=spec["type"],
+        extra_payload=extra,
+    )
+    return url if report.queued else None

@@ -174,12 +174,25 @@ URLs are normalised (tracking parameters dropped) and queued once. Per domain:
   by 10 % up to `max_rate_rps`; 429/503/timeouts/rising latency halve it and
   pause the domain (Retry-After honoured, cooldown doubling up to 6 h).
 * New domains get one request at a time until 10 pages answered (slow start).
-* A challenge page (CAPTCHA, bot wall) pauses a domain for an hour
-  (`block_suspected`); a second one in a row, or five 403s in a row, blocks it.
-  CAPTCHA widgets on ordinary pages (a newsletter form) do not count. The HTTP
-  fetch runs no JavaScript, so it does not get past a challenge page (such as a
-  Cloudflare "Enable JavaScript and cookies to continue" check) by waiting or
-  retrying; such domains stay blocked until unblocked in the panel or API.
+* A challenge page (CAPTCHA, bot wall) pauses a domain (`block_suspected`); more
+  of them in a row, or a run of 403s, block it. CAPTCHA widgets on ordinary pages
+  (a newsletter form) do not count. The HTTP fetch runs no JavaScript, so it does
+  not get past a challenge page (such as a Cloudflare "Enable JavaScript and
+  cookies to continue" check) by waiting or retrying.
+* The block policy is a set of runtime settings (panel: Settings), each also
+  settable per domain (panel: Domains, or `PATCH /api/admin/domains/<domain>`
+  with `{"block": {"block_challenge_run": 4}}`; `null` clears an override):
+
+  | Setting | Default | Meaning |
+  | --- | --- | --- |
+  | `block_challenge_run` | 2 | challenge pages in a row before a block |
+  | `block_suspect_pause_s` | 3600 | pause after the first one (workers hold back as long) |
+  | `block_forbidden_run` | 5 | 403s in a row that count as a block |
+  | `block_retry_after_h` | null | retry a blocked domain after this many hours; null: only when unblocked by hand (per domain, 0 means never) |
+
+  A retried domain keeps its refusal count: if the next answer is a challenge
+  again it is blocked again at once (`unblocked` / `auto_retry` and `blocked`
+  events), a clean answer resets it.
 * robots.txt is the site's wish, not a per-IP budget: its `Crawl-delay` (and a
   per-domain `rate_rps` override) hold across all nodes and egress groups.
 * Workers fetch public addresses only: a sitemap or redirect pointing into the
@@ -190,7 +203,8 @@ URLs are normalised (tracking parameters dropped) and queued once. Per domain:
   path. robots.txt itself follows its redirects, as RFC 9309 asks. For a lab shop on a private address, set
   `POS_WORKER_ALLOW_PRIVATE_TARGETS=1` on that node. `GET /api/admin/domains?blocked=true`, history in
   `GET /api/admin/domains/<domain>/events`, unblock or cap a domain with
-  `PATCH /api/admin/domains/<domain>` (`{"unblock": true}`, `{"rate_rps": 0.1}`).
+  `PATCH /api/admin/domains/<domain>` (`{"unblock": true}`, `{"rate_rps": 0.1}`,
+  `{"block": {...}}`).
 * The crawler identifies itself with `user_agent` (default `PriceOfSizeBot/0.1`).
 
 ### Sources and discovery

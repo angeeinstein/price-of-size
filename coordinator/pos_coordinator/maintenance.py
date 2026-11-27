@@ -115,6 +115,16 @@ async def run_once(
             await session.commit()
     except Exception:
         log.exception("robots retry for pending discovery failed")
+    try:
+        async with sm() as session:
+            from pos_coordinator import runtime_settings
+            from pos_coordinator.crawl import feedback
+
+            settings = await runtime_settings.get_all(session)
+            out["blocked_retried"] = await feedback.retry_blocked(session, settings)
+            await session.commit()
+    except Exception:
+        log.exception("retrying blocked domains failed")
     if any(out.values()):
         log.info("maintenance: %s", out)
     return out

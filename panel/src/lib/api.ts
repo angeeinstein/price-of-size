@@ -83,7 +83,7 @@ export type NodeRow = {
 export type DomainRow = {
   domain: string; block_status: string; block_reason: string | null; fetch_mode: string;
   robots_status: string | null; robots_crawl_delay_s: number | null; pages_fetched: number;
-  last_fetch_at: string | null; overrides: { rate_rps?: number }; queued_jobs: number;
+  last_fetch_at: string | null; overrides: { rate_rps?: number; [block: `block_${string}`]: number | null | undefined }; queued_jobs: number;
   egress_groups: { egress_group: string; rate_rps: number; cooldown_until: string | null;
     throttle_count: number; latency_ewma_ms: number | null }[];
 };

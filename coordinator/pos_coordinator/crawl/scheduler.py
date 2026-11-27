@@ -18,7 +18,7 @@ fail without being fetched.
 
 import logging
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -26,6 +26,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pos_coordinator import runtime_settings
 from pos_coordinator.crawl import ratecontrol, robots, urls
 from pos_coordinator.models import DomainEgressState, DomainState, Job, Node
 from pos_shared.ids import uuid7
@@ -63,6 +64,7 @@ class CrawlConfig:
     keep_html_first_pages: int
     keep_html_sample: float
     html_quota_ok: bool
+    block: dict[str, Any] = field(default_factory=dict)  # block_* settings
 
     @classmethod
     def from_settings(cls, cfg: dict[str, Any], html_quota_ok: bool) -> "CrawlConfig":
@@ -77,6 +79,21 @@ class CrawlConfig:
             keep_html_first_pages=int(cfg["html_keep_first_pages"]),
             keep_html_sample=float(cfg["html_keep_sample_fraction"]),
             html_quota_ok=html_quota_ok,
+            block={
+                k: cfg.get(k, runtime_settings.DEFAULTS[k]) for k in runtime_settings.BLOCK_KEYS
+            },
+        )
+
+    def block_setting(self, overrides: dict[str, Any] | None, key: str) -> Any:
+        """A block_* setting, a domain's own override first."""
+        o = overrides or {}
+        return o[key] if key in o else self.block.get(key, runtime_settings.DEFAULTS[key])
+
+    def block_policy(self, overrides: dict[str, Any] | None) -> ratecontrol.BlockPolicy:
+        return ratecontrol.BlockPolicy(
+            challenge_run=int(self.block_setting(overrides, "block_challenge_run")),
+            suspect_pause_s=float(self.block_setting(overrides, "block_suspect_pause_s")),
+            forbidden_run=int(self.block_setting(overrides, "block_forbidden_run")),
         )
 
 
@@ -483,7 +500,13 @@ async def _lease_domain(
             # the worker keeps its own requests to the domain at least this far apart
             "interval_s": round(max(interval * (1 - JITTER), global_gap), 3),
             "user_agent": cfg.user_agent,
+            # how long the worker holds back its other jobs for the domain after a
+            # challenge page: the coordinator's own first pause (block_suspect_pause_s)
+            "refusal_pause_s": cfg.block_policy(ds.overrides).suspect_pause_s,
         }
+        if ds.unblocked_at is not None:
+            # a refusal pause the worker took before this unblock no longer holds
+            extra["unblocked_at"] = ds.unblocked_at.timestamp()
         if job.type == "fetch_http":
             extra["keep_html"] = _keep_html(ds, cfg)
         out.append(Handout(job=job, delay_s=delay, extra=extra))

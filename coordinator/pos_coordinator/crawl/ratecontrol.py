@@ -23,11 +23,17 @@ BASELINE_ALPHA = 0.02  # slow EWMA: the domain's normal latency
 LATENCY_FACTOR = 3.0  # "rising response times": fast EWMA above 3x baseline...
 LATENCY_MIN_MS = 2000.0  # ...and above 2 s
 ERROR_RUN = 3  # consecutive 5xx/other errors count as a throttle signal
-FORBIDDEN_RUN = 5  # consecutive 403s turn into a block
-# A challenge page once may be a fluke (or a page we misread); the domain is paused
-# then, and blocked only if the next answer is a refusal again.
-BLOCK_RUN = 2
-SUSPECT_PAUSE_S = 3600.0
+
+
+@dataclass(frozen=True)
+class BlockPolicy:
+    """When refusals turn into a block (runtime settings `block_*`, per-domain
+    overrides). A challenge page once may be a fluke (or a page we misread): the domain
+    is paused then, and blocked only after `challenge_run` refusals in a row."""
+
+    challenge_run: int = 2
+    suspect_pause_s: float = 3600.0
+    forbidden_run: int = 5  # consecutive 403s turn into a block
 
 
 @dataclass
@@ -83,21 +89,22 @@ def observe(
     elapsed_ms: int | None,
     retry_after_s: float | None,
     top_rps: float,
+    policy: BlockPolicy = BlockPolicy(),  # noqa: B008 - frozen, shared default
 ) -> Decision:
     """Update the state with one fetch outcome and say what to do."""
     s.rate_rps = min(s.rate_rps, top_rps)
     if verdict == "blocked":
         s.clean_streak = 0
         s.consecutive_blocks += 1
-        if s.consecutive_blocks >= BLOCK_RUN:
+        if s.consecutive_blocks >= policy.challenge_run:
             return Decision(s.rate_rps, MAX_COOLDOWN_S, "blocked", reason)
         s.rate_rps = clamp(s.rate_rps * DECREASE_FACTOR, top_rps)
-        return Decision(s.rate_rps, SUSPECT_PAUSE_S, "block_suspected", reason)
+        return Decision(s.rate_rps, policy.suspect_pause_s, "block_suspected", reason)
     s.consecutive_blocks = 0
 
     if reason == "http_403":
         s.consecutive_403 += 1
-        if s.consecutive_403 >= FORBIDDEN_RUN:
+        if s.consecutive_403 >= policy.forbidden_run:
             return Decision(s.rate_rps, MAX_COOLDOWN_S, "blocked", "repeated_http_403")
     else:
         s.consecutive_403 = 0
