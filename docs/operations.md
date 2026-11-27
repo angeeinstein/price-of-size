@@ -362,10 +362,12 @@ shop. The parser is declarative: CSS selectors, optionally with an attribute and
 short regular expression, for title, price, breadcrumbs and size lines. The model
 sees 5 of the pages as compact HTML, with what the LLM tier found on each. The
 parser is then run on up to 15 further pages. A page passes when the parser finds
-every price and size the LLM found there. With a score of at least
+every price and size the LLM found there, and no price or size the LLM did not
+find. With a score of at least
 `parser_min_score` (0.8) it becomes the shop's active parser, unless
 `parser_auto_activate` is off. From then on the derive stage reads that shop's
-pages with it, without the LLM.
+pages with it, without the LLM (except a page the LLM already found is no product
+page, such as a category).
 
 Pages the parser cannot fill still go to the LLM tier. When enough of them have
 gathered, a new version is generated. A version that fails its check is kept,

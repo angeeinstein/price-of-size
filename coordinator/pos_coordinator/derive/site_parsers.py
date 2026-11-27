@@ -133,6 +133,19 @@ async def merge(
     hit = parsers.get(domain_of(f.final_url or f.url) or "")
     if hit is None:
         return
+    # a page the LLM tier found is no product page (a category, a search) stays one:
+    # a listing's first card is no offer of the page
+    answered = (
+        await session.execute(
+            select(LlmExtraction.output).where(
+                LlmExtraction.fetch_id == f.id,
+                LlmExtraction.prompt_version == llm_tier.PROMPT,
+                LlmExtraction.status == "ok",
+            )
+        )
+    ).scalar_one_or_none()
+    if isinstance(answered, dict) and answered.get("is_product_page") is False:
+        return
     page = await asyncio.to_thread(_html, store, f.html_sha256)
     if page is None:
         return
@@ -168,10 +181,10 @@ def qualified_price(answer: dict[str, Any]) -> bool:
 def page_passes(
     spec: site_parser.SiteSpec, page: bytes, answer: dict[str, Any], locale: str | None
 ) -> bool:
-    """The spec finds every price and size the LLM tier found on the page, with the
-    same meaning: the price in the currency the LLM read, unavailable and not new
-    where the LLM read so, each size with the same basis (product, package) and net
-    or gross.
+    """The spec finds every price and size the LLM tier found on the page, and none
+    it did not find, with the same meaning: the price in the currency the LLM read,
+    unavailable and not new where the LLM read so, each size with the same basis
+    (product, package) and net or gross.
     A page whose price the LLM read as something other than the item's price (a
     unit, monthly, net or "from" price) never passes: a spec only reads item
     prices."""
@@ -197,20 +210,26 @@ def page_passes(
             site_parser.currency_of(got, spec) != want_currency
         ):
             return False
-    if want_sizes:
-        have = spectext.measurements(got.pairs, locale)
-        for w in want_sizes:
-            if not any(
-                (h.basis, h.net_or_gross) == (w.basis, w.net_or_gross)
-                and all(
-                    _close(getattr(w, k), getattr(h, k), SIZE_TOLERANCE)
-                    for k in ("a_m", "b_m", "c_m", "mass_kg", "true_volume_m3")
-                    if getattr(w, k) is not None
-                )
-                for h in have
-            ):
-                return False
+    elif units.parse_number(got.price_text or "", locale) is not None:
+        return False  # a price where the LLM found none (a delivery charge, an RRP)
+    # the sizes both ways: each one the LLM found among the spec's, and no spec size
+    # the LLM did not find (it would be stored as the product's)
+    have = spectext.measurements(got.pairs, locale)
+    if not all(any(_same_size(w, h) for h in have) for w in want_sizes):
+        return False
+    if not all(any(_same_size(h, w) for w in want_sizes) for h in have):
+        return False
     return want_price is not None or bool(want_sizes)
+
+
+def _same_size(a: Any, b: Any) -> bool:
+    """`b` has every value `a` has (within SIZE_TOLERANCE), with the same basis and
+    net or gross."""
+    return (a.basis, a.net_or_gross) == (b.basis, b.net_or_gross) and all(
+        _close(getattr(a, k), getattr(b, k), SIZE_TOLERANCE)
+        for k in ("a_m", "b_m", "c_m", "mass_kg", "true_volume_m3")
+        if getattr(a, k) is not None
+    )
 
 
 # --- generation ----------------------------------------------------------------------------

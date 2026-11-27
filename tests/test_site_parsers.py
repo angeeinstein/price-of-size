@@ -302,6 +302,23 @@ async def test_activating_a_version_loaded_before_another_was_activated(app):
     assert active == [1]
 
 
+def test_a_page_passes_only_without_values_the_llm_did_not_find():
+    spec = site_parser.parse(SPEC)
+    page = _html(1).encode()
+    # no price on the page for the LLM: the spec's price (whatever it is) is wrong
+    no_price = {**_answer_for(1), "price_text": None}
+    assert not site_parsers.page_passes(spec, page, no_price, "de")
+    sizes_only = site_parser.parse({**SPEC, "price": None})
+    assert site_parsers.page_passes(sizes_only, page, no_price, "de")
+    # a size the LLM did not find would be stored as the product's
+    weight_only = {**_answer_for(1), "sizes": [{"label": "Gewicht", "value": "35 kg"}]}
+    assert not site_parsers.page_passes(spec, page, weight_only, "de")
+    no_sizes = {**_answer_for(1), "sizes": []}
+    assert not site_parsers.page_passes(spec, page, no_sizes, "de")
+    price_only = site_parser.parse({**SPEC, "size_rows": []})
+    assert site_parsers.page_passes(price_only, page, no_sizes, "de")
+
+
 def test_condensed_html_for_the_llm():
     t = site_parser.condensed_html(_html(1))
     assert t.startswith("<body>") and "tracking" not in t and "color:red" not in t
@@ -417,6 +434,22 @@ async def test_a_parser_is_generated_checked_activated_and_used(app, admin):
     assert r.status_code == 200 and not r.json()["active"]
     r = await admin.post(f"/api/admin/parsers/{row['id']}/activate")
     assert r.json()["active"]
+
+
+async def test_a_page_the_llm_found_is_no_product_page_gets_no_parser_offer(app):
+    sm, store = await _world(app)
+    await _generate(sm, store, SPEC)
+    site_parsers.forget()
+    listing = await _page(sm, store, 88)  # product-like markup, but a category page
+    async with sm() as s:
+        f = (await s.execute(select(RawFetch).where(RawFetch.id == listing))).scalar_one()
+        s.add(LlmExtraction(fetch_id=f.id, fetched_at=f.fetched_at,
+                            prompt_version=site_parsers.llm_tier.PROMPT, status="ok",
+                            output={"is_product_page": False}, model="m"))  # fmt: skip
+        await s.commit()
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    async with sm() as s:
+        assert (await s.execute(select(Offer).where(Offer.fetch_id == listing))).all() == []
 
 
 async def test_the_test_run_shows_pages_redirected_to_the_shop(app, admin):

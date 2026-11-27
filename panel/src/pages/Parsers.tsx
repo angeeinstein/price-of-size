@@ -76,7 +76,7 @@ export function ParsersPage() {
       <p className="text-sm text-muted">
         Per-site parsers: CSS selectors the LLM wrote for a shop from pages the LLM tier had read, checked on
         further pages before they run. A page passes when the parser finds every price and size the LLM found
-        there, with the same currency, availability and condition and the same kind of size (product or package,
+        there and nothing else, with the same currency, availability and condition and the same kind of size (product or package,
         net or gross). One version
         per domain is active; every version is kept.
       </p>
