@@ -151,7 +151,9 @@ async def _schedule(
                 select(Offer, RawFetch.blob_sha256)
                 .outerjoin(RawFetch, RawFetch.id == Offer.fetch_id)
                 .where(
-                    Offer.flags.overlap(REVIEW_FLAGS),
+                    # a rejected offer has lost its check flags (it no longer takes
+                    # part in the checks): a new review version asks about it again
+                    Offer.flags.overlap([*REVIEW_FLAGS, FLAG]),
                     Offer.price.is_not(None),
                     Offer.id.not_in(reviewed),
                     Offer.id.not_in(busy) if busy else true(),

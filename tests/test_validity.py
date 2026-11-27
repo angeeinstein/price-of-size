@@ -321,3 +321,25 @@ async def test_the_outlier_pass_never_undoes_a_review_meanwhile(app):
     assert (await task)["cleared"] == 1
     flags = (await _offer(sm, odd.id)).flags
     assert review.FLAG in flags and outliers.FLAG not in flags
+
+
+async def test_a_new_review_version_asks_about_rejected_offers_again(app, monkeypatch):
+    sm, store, odd = await _shelves(app)
+    async with sm() as s:
+        await outliers.run(s)
+        await s.commit()
+    fake = FakeClient()
+    llm = LlmService(sm, lambda: fake)
+    await review.schedule(sm, llm, store)
+    (bid,) = fake.batches
+    answer = {"verdict": "placeholder", "confidence": "high", "reason": "Filler."}
+    fake.batches[bid]["status"] = "ended"
+    fake.batches[bid]["results"] = [_answer("0", json.dumps(answer))]
+    await llm.poll_batches()
+    async with sm() as s:  # the checks drop the rejected offer: only the rejection is left
+        await outliers.run(s)
+        await s.commit()
+    assert (await _offer(sm, odd.id)).flags == [review.FLAG]
+    assert await review.schedule(sm, llm, store) == {"price_reviews_queued": 0}
+    monkeypatch.setattr(review, "PROMPT", "price-review-2")
+    assert await review.schedule(sm, llm, store) == {"price_reviews_queued": 1}
