@@ -15,6 +15,19 @@ The tests use `POS_TEST_DATABASE_URL`
 (default `postgresql+psycopg://pos:pos@localhost:5432/pos_test`) and **wipe that
 database**. DB tests are skipped if it is unreachable.
 
+## Control panel
+
+React + TypeScript + Vite + Tailwind in `panel/`. During development:
+
+```bash
+cd panel && npm ci && npm run dev     # proxies /api to the coordinator on :8000
+```
+
+For local HTTP set `POS_COOKIE_SECURE=false` on the coordinator (session cookies
+are `Secure` by default). `npm run build` writes `panel/dist`, which the
+coordinator serves; `npm run e2e` drives the panel in Chromium (see
+`panel/e2e/smoke.mjs`; CI runs it against a real coordinator).
+
 ## Docker tests
 
 `deploy/test/e2e_agent.py` builds three versions of the images, pushes them to
@@ -107,7 +120,9 @@ Done in this step:
 
 Next steps:
 
-- [ ] Control panel skeleton (React + Vite + Tailwind + shadcn/ui), user accounts, live updates
+- [x] Control panel: accounts (Argon2id, TOTP), sessions + CSRF, roles, re-auth, audit;
+      overview (live via SSE), nodes, jobs, domains, sources, releases, settings, users
+- [ ] Panel: data explorer, QA/gold labelling, costs, AI parser chat, passkeys
 - [x] Polite fetching: per-(domain, egress group) rate slots, AIMD back-off, robots.txt,
       blocks, raw evidence capture, HTML retention (Phase 2 groundwork)
 - [x] Discovery: sitemaps (from robots.txt or explicit), indexes, gzip, per-source URL patterns

@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     trust_proxy_headers: bool = False
     # Session cookies only over HTTPS (Cloudflare). Off only for local development.
     cookie_secure: bool = True
+    panel_dist: Path | None = None  # built control panel; auto-detected if unset
 
     access_token_ttl_s: int = 15 * 60
     challenge_ttl_s: int = 60

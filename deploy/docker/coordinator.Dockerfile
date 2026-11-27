@@ -2,6 +2,15 @@
 # Build from the repository root:
 #   docker build -f deploy/docker/coordinator.Dockerfile -t pos-coordinator .
 ARG PYTHON_IMAGE=python:3.12-slim-trixie
+ARG NODE_IMAGE=node:22-trixie-slim
+
+# The control panel (React), built once and served by the coordinator.
+FROM ${NODE_IMAGE} AS panel
+WORKDIR /panel
+COPY panel/package.json panel/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY panel/ ./
+RUN npm run build
 
 FROM ${PYTHON_IMAGE} AS build
 COPY --from=ghcr.io/astral-sh/uv:0.11.32 /uv /bin/uv
@@ -30,6 +39,7 @@ RUN groupadd --gid 10001 pos && useradd --uid 10001 --gid pos --no-create-home -
     && install -d -o pos -g pos /var/lib/pos /var/lib/pos/coordinator /var/lib/pos/raw \
        /var/lib/pos-exchange /backups
 COPY --from=build /app/.venv /app/.venv
+COPY --from=panel /panel/dist /app/panel
 COPY alembic.ini /app/alembic.ini
 COPY migrations /app/migrations
 ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1 POS_ALEMBIC_INI=/app/alembic.ini

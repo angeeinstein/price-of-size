@@ -182,3 +182,22 @@ async def test_enrollment_retry_after_lost_response_returns_the_same_node(http, 
     _, other = keypair()
     r = await http.post("/api/v1/nodes/enroll", json={**body, "public_key": other})
     assert r.status_code == 403
+
+
+async def test_job_list_retry_cancel_and_audit(admin):
+    await admin.post("/api/admin/jobs", json={"jobs": [{"type": "noop"}, {"type": "echo"}]})
+    jobs = (await admin.get("/api/admin/jobs", params={"status": "queued"})).json()
+    assert {j["type"] for j in jobs} == {"noop", "echo"}
+    noop = next(j for j in jobs if j["type"] == "noop")
+    assert (
+        await admin.post(f"/api/admin/jobs/{noop['id']}", json={"action": "retry"})
+    ).status_code == 409
+    assert (
+        await admin.post(f"/api/admin/jobs/{noop['id']}", json={"action": "cancel"})
+    ).status_code == 200
+    r = await admin.post(f"/api/admin/jobs/{noop['id']}", json={"action": "retry"})
+    assert r.status_code == 200
+    again = (await admin.get("/api/admin/jobs", params={"type": "noop"})).json()
+    assert again[0]["status"] == "queued" and again[0]["attempts"] == 0
+    actions = [a["action"] for a in (await admin.get("/api/admin/audit")).json()]
+    assert "job.retry" in actions and "job.cancel" in actions

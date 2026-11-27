@@ -221,3 +221,23 @@ async def test_cli_create_user(settings, monkeypatch, capsys):
         u = (await s.execute(select(AppUser))).scalar_one()
     assert u.username == "carol" and u.role == "admin"
     assert time.time()  # keep the import used
+
+
+async def test_panel_is_served_with_security_headers(settings, tmp_path):
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<html>panel</html>")
+    (dist / "assets" / "app.js").write_text("console.log(1)")
+    app = create_app(settings.model_copy(update={"panel_dist": dist}), run_maintenance=False)
+    async with app.router.lifespan_context(app), browser(app) as c:
+        root = await c.get("/")
+        deep = await c.get("/nodes/some/client/route")
+        asset = await c.get("/assets/app.js")
+        api_404 = await c.get("/api/does-not-exist")
+        escape = await c.get("/..%2f..%2fetc/passwd")
+    assert root.text == deep.text == "<html>panel</html>"
+    assert asset.text == "console.log(1)"
+    assert api_404.status_code == 404 and "panel" not in api_404.text
+    assert "root:" not in escape.text
+    assert "frame-ancestors 'none'" in root.headers["content-security-policy"]
+    assert root.headers["x-frame-options"] == "DENY"

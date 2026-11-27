@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 
@@ -22,6 +22,7 @@ from pos_coordinator.api.deps import (
 from pos_coordinator.models import (
     AuditLog,
     EnrollmentCode,
+    Job,
     Node,
     NodeCommand,
     NodeToken,
@@ -212,6 +213,82 @@ async def enqueue_jobs(body: EnqueueRequest, admin: CurrentAdmin, session: Sessi
     _audit(session, admin, "jobs.enqueue", None, count=len(ids))
     await session.commit()
     return {"ids": ids}
+
+
+JOB_STATUS_PATTERN = "^(queued|leased|done|failed|cancelled)$"
+
+
+@router.get("/jobs")
+async def list_jobs(
+    viewer: CurrentViewer,
+    session: Session,
+    status_: str | None = Query(
+        None, alias="status", pattern="^(queued|leased|done|failed|cancelled)$"
+    ),
+    type_: str | None = Query(None, alias="type", max_length=40),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    q = select(Job).order_by(Job.updated_at.desc()).limit(limit)
+    if status_:
+        q = q.where(Job.status == status_)
+    if type_:
+        q = q.where(Job.type == type_)
+    return [
+        {
+            "id": j.id,
+            "type": j.type,
+            "status": j.status,
+            "attempts": j.attempts,
+            "max_attempts": j.max_attempts,
+            "domain": j.domain,
+            "url": (j.payload or {}).get("url"),
+            "last_error": (j.last_error or "")[-2000:] or None,
+            "updated_at": j.updated_at,
+            "not_before": j.not_before,
+        }
+        for j in (await session.execute(q)).scalars()
+    ]
+
+
+class JobAction(BaseModel):
+    action: str = Field(pattern="^(retry|cancel)$")
+
+
+@router.post("/jobs/{job_id}")
+async def job_action(job_id: UUID, body: JobAction, admin: CurrentAdmin, session: Session):
+    job = await session.get(Job, job_id, with_for_update=True)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such job")
+    if body.action == "retry":
+        if job.status not in ("failed", "cancelled"):
+            raise HTTPException(status.HTTP_409_CONFLICT, f"job is {job.status}")
+        job.status, job.attempts, job.not_before = "queued", 0, func.now()
+        job.finished_at = None
+    else:
+        if job.status not in ("queued", "failed"):
+            raise HTTPException(status.HTTP_409_CONFLICT, f"job is {job.status}")
+        job.status, job.finished_at = "cancelled", func.now()
+    job.updated_at = func.now()
+    _audit(session, admin, f"job.{body.action}", str(job_id))
+    await session.commit()
+    return {"id": job_id, "action": body.action}
+
+
+@router.get("/audit")
+async def audit_log(viewer: CurrentViewer, session: Session, limit: int = Query(200, le=1000)):
+    rows = (
+        await session.execute(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit))
+    ).scalars()
+    return [
+        {
+            "at": a.created_at,
+            "actor": a.actor,
+            "action": a.action,
+            "target": a.target,
+            "details": a.details,
+        }
+        for a in rows
+    ]
 
 
 @router.get("/jobs/stats")

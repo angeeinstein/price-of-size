@@ -52,6 +52,21 @@ Private images: pass `--registry-user`, `--registry-token` (and
 `/etc/pos/registry.env` (0600) and handed to the agent, which pulls signed
 updates with them; re-runs and `--update` keep them unless new ones are given.
 
+### The control panel and the first admin
+
+The coordinator serves the control panel at its URL. Create the first admin on
+the coordinator host:
+
+```bash
+docker exec -it pos-coordinator-a pos-coordinator create-user admin --role admin
+```
+
+Then sign in, set up two-factor sign-in (Account page) and add further users
+(Users page). Admins change things, viewers only look. Sensitive actions
+(releases, node targets, revocation, settings, users) ask for the password again
+if the last sign-in is older than 10 minutes. Every admin action is in the audit
+log. The bootstrap `POS_ADMIN_TOKEN` keeps working for scripts.
+
 ### Without the agent ("simple mode")
 
 For machines where you do not want a container with access to the Docker
