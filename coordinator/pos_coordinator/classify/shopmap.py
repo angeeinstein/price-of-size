@@ -158,8 +158,8 @@ async def category_paths(
 
 async def classify(session: AsyncSession, limit: int = 5000) -> dict[str, int]:
     """Bring shop-mapping classifications in line with the current mappings (node and
-    confidence: a confirmed LLM mapping is more certain); at most `limit` products
-    per call (the maintenance loop calls again)."""
+    confidence: a confirmed LLM mapping is more certain) and with the products' current
+    paths; at most `limit` products per call (the maintenance loop calls again)."""
     rows = (
         await session.execute(
             text(f"""
@@ -188,7 +188,28 @@ async def classify(session: AsyncSession, limit: int = 5000) -> dict[str, int]:
             {"tier": TIER, "lower": LOWER_TIERS, "limit": limit},
         )
     ).all()
+    # a classification by a path the product no longer has (its breadcrumbs came from
+    # an earlier fetch since, e.g. through an LLM answer) and that has no mapping: the
+    # query above never meets it again, and a rebuild would not assign it
+    orphans = (
+        await session.execute(
+            text(f"""
+                SELECT p.id AS product_id
+                FROM classification c
+                JOIN product p ON p.id = c.product_id
+                WHERE c.is_current AND c.tier = :tier
+                  AND NOT EXISTS (
+                    SELECT 1 FROM category_mapping m
+                    WHERE m.is_current AND m.source = p.source AND m.category_path = {PATH_SQL})
+                ORDER BY p.id
+                LIMIT :limit
+            """),
+            {"tier": TIER, "limit": max(limit - len(rows), 0)},
+        )
+    ).all()
     out = {"classified": 0, "withdrawn": 0}
+    for r in orphans:
+        out["withdrawn"] += await common.withdraw(session, r.product_id, TIER)
     for r in rows:
         # under the product's lock, against its classification as it is now (another
         # classifier may have written it since the query): a more trusted tier stays

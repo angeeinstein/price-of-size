@@ -171,7 +171,10 @@ pos-coordinator fx-refresh        # ECB reference rates (also fetched daily)
       within the category (parent's distribution for small ones), hourly
 - [x] LLM review of flagged offers (`validity/review.py`, table `price_review`): a
       rejection takes the offer out of the canonical price; panel: Price checks
-- [ ] Tier 2 (microdata/RDFa), tier 4 (LLM extraction within budget)
+- [ ] Tier 2 (microdata/RDFa)
+- [x] Tier 4: LLM extraction of pages without price or sizes (`derive/llm_tier.py`,
+      `pos_shared/extract/llm_page.py`): the LLM copies price and size lines, the
+      usual parsers read them; answers kept per fetch (`llm_extraction`) across rebuilds
 - [x] Target taxonomy: Google Product Taxonomy (en, de) + extension (`classify/taxonomy.py`)
 - [x] Classification tier 1: shop category mappings (`classify/shopmap.py`, panel: Categories)
 - [x] LLM service (`llm/`): budget per priority, ledger, cache by input, strict JSON,

@@ -527,6 +527,47 @@ class FxRate(Base):
     rate_per_eur: Mapped[Decimal] = mapped_column(Numeric(18, 8))
 
 
+class LlmExtraction(Base):
+    """Tier-4 extraction of one raw fetch (derive/llm_tier.py): "wanted" when the other
+    tiers left a gap, then the LLM's answer. Not derived: like the ledger it is kept
+    across rebuilds, so a rebuild reads the answers instead of asking again."""
+
+    __tablename__ = "llm_extraction"
+    __table_args__ = (
+        UniqueConstraint("fetch_id", "prompt_version", name="uq_llm_extraction_fetch"),
+        CheckConstraint(
+            "status IN ('wanted','ok','invalid','refused')", name="llm_extraction_status"
+        ),
+        Index(
+            "ix_llm_extraction_wanted",
+            "tried_at",
+            "created_at",
+            postgresql_where=text("status = 'wanted'"),
+        ),
+        Index(
+            "ix_llm_extraction_unapplied",
+            "tried_at",
+            "answered_at",
+            postgresql_where=text("status = 'ok' AND applied_at IS NULL"),
+        ),
+    )
+    id: Mapped[uuid.UUID] = pk()
+    fetch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    fetched_at: Mapped[datetime] = mapped_column(TS)  # the raw fetch's partition key
+    prompt_version: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default="wanted")
+    missing: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default="{}")
+    model: Mapped[str | None] = mapped_column(Text)
+    output: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = created()
+    answered_at: Mapped[datetime | None]
+    # when the answer reached the derived layer (the fetch derived again with it)
+    applied_at: Mapped[datetime | None]
+    # the last time it had to wait (the fetch's evidence missing when the request was
+    # to be sent or the answer applied): tried again later, after the others
+    tried_at: Mapped[datetime | None]
+
+
 class DeriveCursor(Base):
     """How far a derive stage got through the raw layer (per stage version)."""
 
