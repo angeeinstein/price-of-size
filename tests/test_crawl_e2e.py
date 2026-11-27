@@ -288,20 +288,14 @@ async def test_discovery_through_sitemaps(app, admin, sessionmaker, shop, tmp_pa
         },
     )
     assert r.status_code == 200, r.text
-    # The first discovery finds no sitemaps yet (robots.txt unknown): it fetches the seed,
-    # which also fetches robots.txt; discovering again then uses robots' Sitemap line.
+    # robots.txt is not known yet: discovery fetches it first (and the seed), then queues
+    # the sitemap it advertises by itself, without a second click.
     assert (await admin.post("/api/admin/sources/fake-shop/discover")).json() == {
         "sitemaps": 0,
         "seeds": 1,
+        "waiting_for_robots": 1,
     }
     worker = await make_agent(app, admin, tmp_path / "w", "w")
-
-    async def robots_known():
-        async with sessionmaker() as s:
-            return bool((await s.get(DomainState, "127.0.0.4")).sitemaps)
-
-    await _run_until(worker, robots_known)
-    assert (await admin.post("/api/admin/sources/fake-shop/discover")).json()["sitemaps"] == 1
 
     async def products_fetched():
         async with sessionmaker() as s:

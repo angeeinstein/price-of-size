@@ -61,8 +61,11 @@ export function SourcesPage() {
   const [editing, setEditing] = useState<string | null>(null);
   const [msg, setMsg] = useState<Record<string, string>>({});
   const discover = useMutation({
-    mutationFn: (name: string) => api.post<{ sitemaps: number; seeds: number }>(`/api/admin/sources/${encodeURIComponent(name)}/discover`),
-    onSuccess: (r, name) => { setMsg({ ...msg, [name]: `queued ${r.sitemaps} sitemaps, ${r.seeds} seeds` });
+    mutationFn: (name: string) =>
+      api.post<{ sitemaps: number; seeds: number; waiting_for_robots: number }>(`/api/admin/sources/${encodeURIComponent(name)}/discover`),
+    onSuccess: (r, name) => {
+      const waiting = r.waiting_for_robots ? `; ${r.waiting_for_robots} domains wait for robots.txt, their sitemaps follow` : "";
+      setMsg({ ...msg, [name]: `queued ${r.sitemaps} sitemaps, ${r.seeds} seeds${waiting}` });
       qc.invalidateQueries({ queryKey: ["jobs"] }); },
     onError: (e, name) => setMsg({ ...msg, [name]: e instanceof ApiError ? e.message : String(e) }),
   });

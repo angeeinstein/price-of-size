@@ -86,7 +86,7 @@ async def _derived_cmd(cmd: str) -> int:
             async with sm() as s:
                 n = await fx.refresh_from_ecb(s)
                 await s.commit()
-            print(f"stored {n} rates")
+            print(f"stored {n} rates; {await stage.backfill_fx(sm)} waiting offers converted")
             return 0
         if not store.available():
             print(f"raw store {store.root} is not available (NAS mounted?)", file=sys.stderr)

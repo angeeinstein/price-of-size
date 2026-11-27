@@ -440,6 +440,46 @@ async def _canonical_prices(session: AsyncSession, product_ids: set) -> None:
         )
 
 
+async def backfill_fx(sm: async_sessionmaker[AsyncSession], batch: int = 1000) -> int:
+    """Offers stored while a rate was missing (ECB down, a new currency) get their EUR
+    price once the rate is there; their products' price checks run again. Returns the
+    number of offers converted. Offers still without a rate stay flagged."""
+    total, after = 0, None
+    while True:
+        async with sm() as session:
+            q = (
+                select(Offer)
+                .where(Offer.flags.contains(["no_fx_rate"]))
+                .order_by(Offer.id)
+                .limit(batch)
+                .with_for_update(skip_locked=True)
+            )
+            if after is not None:
+                q = q.where(Offer.id > after)
+            offers = (await session.execute(q)).scalars().all()
+            if not offers:
+                return total
+            after = offers[-1].id
+            fx = RateCache(session)
+            touched: set = set()
+            for o in offers:
+                if o.price is None or not o.currency:
+                    continue
+                rate = await fx.rate(o.currency, o.observed_on.astimezone(UTC).date())
+                if rate is None:
+                    continue
+                o.fx_rate = rate
+                o.price_eur = _money((o.price / rate).quantize(Decimal("0.0001")))
+                o.flags = sorted(set(o.flags or []) - {"no_fx_rate"})
+                if o.product_id is not None:
+                    touched.add(o.product_id)
+                total += 1
+            await _canonical_prices(session, touched)
+            await session.commit()
+            if len(offers) < batch:
+                return total
+
+
 async def run_until_caught_up(
     sm: async_sessionmaker[AsyncSession],
     store: RawStore,
