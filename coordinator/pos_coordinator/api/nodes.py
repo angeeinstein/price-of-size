@@ -136,6 +136,13 @@ async def token(body: api.TokenRequest, session: Session, settings: AppSettings)
     return api.TokenResponse(access_token=tok, expires_at=expires)
 
 
+@router.get("/signing-key")
+async def signing_key(request: Request, node: CurrentNode):
+    """For nodes enrolled before keys were handed out at enrollment: the coordinator's
+    signing key over the node's authenticated channel."""
+    return {"public_key": signing.public_key_b64(request.app.state.signing_key)}
+
+
 def desired_state(node: Node) -> api.DesiredState:
     return api.DesiredState(
         run_state=api.RunState(node.desired_run_state),

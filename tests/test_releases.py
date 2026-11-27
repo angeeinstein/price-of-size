@@ -128,3 +128,21 @@ async def test_clearing_the_target_cancels_a_pending_update(app, admin, tmp_path
     await worker.heartbeat_once()
     assert not (exch / exchange.DESIRED).exists()
     await worker.client.aclose()
+
+
+async def test_identity_without_signing_key_fetches_it(app, admin, tmp_path):
+    """Codex finding: identities enrolled before keys came with enrollment must not be
+    locked out of signed updates."""
+    import json as _json
+
+    exch = tmp_path / "exchange"
+    worker = await make_agent(app, admin, tmp_path / "w", "w", agent_dir=exch)
+    ident = tmp_path / "w" / "identity.json"
+    ident.write_text(_json.dumps({"node_id": str(worker.identity.node_id)}))  # old format
+    worker.identity.coordinator_signing_key = None
+    await worker.heartbeat_once()
+    key = (await admin.get("/api/admin/releases/signing-key")).json()["public_key"]
+    assert worker.identity.coordinator_signing_key == key
+    assert _json.loads(ident.read_text())["coordinator_signing_key"] == key
+    assert (exch / exchange.PINNED_KEY).read_text().strip() == key
+    await worker.client.aclose()

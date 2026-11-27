@@ -26,9 +26,13 @@ def _check(kind: str, sha256: str) -> None:
 
 
 @router.head("/{kind}/{sha256}")
-async def exists(kind: str, sha256: str, node: CurrentNode, store: Store):
+async def exists(kind: str, sha256: str, node: CurrentNode, session: Session, store: Store):
+    """200 only if the object is fully stored: file *and* database row. A file without
+    a row (upload interrupted between the two) counts as missing, so the next upload
+    adds the row instead of being skipped."""
     _check(kind, sha256)
-    return Response(status_code=200 if store.exists(kind, sha256) else 404)
+    row = await session.get(RawObject, sha256)
+    return Response(status_code=200 if row is not None and store.exists(kind, sha256) else 404)
 
 
 @router.put("/{kind}/{sha256}", status_code=status.HTTP_201_CREATED)

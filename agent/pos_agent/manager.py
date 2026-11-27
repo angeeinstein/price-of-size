@@ -15,6 +15,8 @@ Invariants:
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -36,6 +38,7 @@ PINNED_KEY_FILE = "signing_key.pub"
 AGENT_HEALTH_FILE = "agent-health.json"
 AGENT_UPDATE_RESULT_FILE = "agent-update.json"
 HEALTH_POLL_S = 2.0
+CONFIG_LABEL = "org.price-of-size.config"
 
 
 class UpdateFailed(Exception):
@@ -180,10 +183,18 @@ class Manager:
             log.info("pulling %s", image)
             await self.docker.pull(image)
 
+    def _desired_config(self, slot: str, image: str, version: str | None) -> dict:
+        """The container definition with a fingerprint label of itself, so a running
+        container whose configuration drifted (env file, mounts, network...) is noticed."""
+        cfg = self.service.container_config(image, slot, version)
+        fp = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:16]
+        cfg.setdefault("Labels", {})[CONFIG_LABEL] = fp
+        return cfg
+
     async def _start_slot(self, slot: str, image: str, version: str | None) -> None:
         name = self.service.container_name(slot)
         await self.docker.remove(name)
-        await self.docker.create(name, self.service.container_config(image, slot, version))
+        await self.docker.create(name, self._desired_config(slot, image, version))
         await self.docker.start(name)
 
     async def _bootstrap(self, st: AgentState) -> None:
@@ -216,6 +227,17 @@ class Manager:
             await self.docker.stop(idle_name, self.settings.drain_timeout_s)
         name = self.service.container_name(slot)
         info = await self.docker.inspect(name)
+        if info is not None and current.image is not None:
+            want = self._desired_config(slot, current.image, current.version)["Labels"][
+                CONFIG_LABEL
+            ]
+            have = (info["Config"].get("Labels") or {}).get(CONFIG_LABEL)
+            if have != want:
+                # e.g. a changed env file or raw-store mount from re-running install.sh
+                log.info("%s configuration changed; recreating it", name)
+                await self.docker.stop(name, self.settings.drain_timeout_s)
+                await self._start_slot(slot, current.image, current.version)
+                return
         if info is None:
             if current.image is None:
                 self.problem = f"active slot {slot} has no image recorded"

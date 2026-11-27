@@ -133,6 +133,10 @@ class CoordinatorClient:
         self._token = None
         await self._ensure_token()
 
+    async def get_signing_key(self) -> str:
+        r = await self._call("GET", "/api/v1/nodes/signing-key")
+        return r.json()["public_key"]
+
     async def get_release(self, version: str) -> api.SignedManifest:
         r = await self._call("GET", f"/api/v1/releases/{version}")
         return api.SignedManifest.model_validate(r.json())

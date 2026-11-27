@@ -217,12 +217,23 @@ class Worker:
         for cmd in resp.commands:
             await self._run_command(cmd)
         if self.agent_dir is not None:
+            await self._ensure_signing_key()
             self._offer_signing_key()
             exchange.write_health(self.agent_dir, __version__, node_id=str(self.identity.node_id))
             await self._reconcile_release(resp.desired.target_version)
         return resp
 
     # --- updates (through the node agent) ------------------------------------
+
+    async def _ensure_signing_key(self) -> None:
+        """Identities from before keys were part of enrollment get the key now, over the
+        authenticated channel, so they can take part in signed updates."""
+        if self.identity.coordinator_signing_key or self.identity.node_id is None:
+            return
+        key = await self.client.get_signing_key()
+        identity.save_enrollment(self.settings.state_dir, self.identity.node_id, key)
+        self.identity.coordinator_signing_key = key
+        log.info("fetched the coordinator signing key for an existing identity")
 
     def _offer_signing_key(self) -> None:
         """The agent pins this once (trust on first use) in its own private volume."""

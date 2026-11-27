@@ -439,3 +439,19 @@ async def test_recovery_stops_the_other_slot_before_starting_the_active_one(env,
     assert ops.index(("stop", "pos-worker-b")) < ops.index(("start", "pos-worker-a"))
     assert docker.containers["pos-worker-a"]["State"]["Running"]
     assert not docker.containers["pos-worker-b"]["State"]["Running"]
+
+
+async def test_config_drift_recreates_the_service(env, key):
+    """Codex finding: a changed env file (or mount) must reach the running container."""
+    docker = FakeDocker()
+    m, clock = make_manager(env, docker)
+    docker.on_start = healthy_worker(env, clock)
+    await m.reconcile_once()
+    first = docker.containers["pos-worker-a"]
+    await m.reconcile_once()
+    assert docker.containers["pos-worker-a"] is first  # unchanged: left alone
+    env.service_env_file.write_text("POS_WORKER_COORDINATOR_URL=https://new.example\n")
+    await m.reconcile_once()
+    c = docker.containers["pos-worker-a"]
+    assert c is not first and "POS_WORKER_COORDINATOR_URL=https://new.example" in c["Config"]["Env"]
+    assert c["State"]["Running"]

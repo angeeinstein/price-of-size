@@ -54,3 +54,22 @@ def test_rawstore_content_addressed(tmp_path):
         store.put("snippets", "0" * 64, data)
     with pytest.raises(ValueError):
         store.path_for("snippets", "../../etc/passwd")
+
+
+async def test_interrupted_upload_is_completed_by_the_next_one(app, admin, tmp_path, sessionmaker):
+    """A file without its database row (upload interrupted between the two) must not
+    make the next uploader skip the upload."""
+    import zstandard
+    from sqlalchemy import select
+
+    from pos_coordinator.models import RawObject
+    from tests.helpers import make_agent
+
+    worker = await make_agent(app, admin, tmp_path / "w", "w")
+    blob = zstandard.ZstdCompressor().compress(b"evidence")
+    sha = hashlib.sha256(blob).hexdigest()
+    app.state.rawstore.put("snippets", sha, blob)  # file written, row never committed
+    await worker.client.upload_raw("snippets", sha, blob)
+    async with sessionmaker() as s:
+        assert (await s.execute(select(RawObject.sha256))).scalar_one() == sha
+    await worker.client.aclose()

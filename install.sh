@@ -320,19 +320,11 @@ agent_image() {  # agent_image NAME
   if [[ -n "$current" ]]; then echo "$current"; else image agent; fi
 }
 
-# The agent passes env files to containers when it creates them. After a config
-# change, stop its containers gracefully; the agent recreates them within seconds.
-restart_managed() {  # restart_managed COMPONENT
-  local ids
-  ids=$(docker ps -q --filter "label=org.price-of-size.component=$1")
-  [[ -z "$ids" ]] && return 0
-  info "applying the new configuration to the running $1"
-  # shellcheck disable=SC2086
-  docker stop -t 120 $ids >/dev/null && docker rm $ids >/dev/null
-}
+# Configuration changes (env files, paths) reach the agent-managed containers by
+# themselves: the agent fingerprints each container's full definition and recreates
+# it when the definition changes.
 
-ENV_CHANGED=0
-write_env() {  # write_env FILE KEY=VALUE...   (sets ENV_CHANGED=1 if the content changed)
+write_env() {  # write_env FILE KEY=VALUE...   (an unchanged file is left untouched)
   local file=$1; shift
   install -d -m 0700 "$ETC"
   : >"$file.new"
@@ -343,10 +335,8 @@ write_env() {  # write_env FILE KEY=VALUE...   (sets ENV_CHANGED=1 if the conten
   done
   if [[ -f "$file" ]] && cmp -s "$file" "$file.new"; then
     rm -f "$file.new"
-    ENV_CHANGED=0
   else
     mv "$file.new" "$file"
-    ENV_CHANGED=1
   fi
 }
 
@@ -409,7 +399,6 @@ install_node() {
       -v pos-worker-state:/var/lib/pos-worker --stop-timeout 120 --
     return
   fi
-  local env_changed=$ENV_CHANGED
   docker rm -f pos-worker >/dev/null 2>&1 || true  # leftover from simple mode
   docker volume create pos-agent-worker-data >/dev/null
   local agent; agent=$(agent_image pos-agent-worker)
@@ -427,7 +416,6 @@ install_node() {
     -e POS_AGENT_SERVICE_ENV_FILE=/etc/pos/worker.env \
     -e "POS_AGENT_WORKER_ON_NETWORK=$on_net" \
     ${REG_USER:+-e "POS_AGENT_REGISTRY_USERNAME=$REG_USER" -e "POS_AGENT_REGISTRY_PASSWORD=$REG_TOKEN"} --
-  [[ $env_changed -eq 1 ]] && restart_managed worker
   info "waiting for the worker to connect (up to 2 minutes)"
   for _ in $(seq 1 60); do
     if worker_healthy_since "$started_at"; then
@@ -452,7 +440,6 @@ install_coordinator() {
   admin_token=$(env_get "$env_file" POS_ADMIN_TOKEN)
   [[ -n "$admin_token" ]] || admin_token=$(random_secret)
   write_env "$env_file" "POS_DATABASE_URL=$DB_URL" "POS_ADMIN_TOKEN=$admin_token"
-  local env_changed=$ENV_CHANGED
   # Separate subdirectories: pre-migration dumps belong to the coordinator's service
   # user (10001), nightly database dumps to postgres (all-in-one shares BACKUP_DIR).
   local coord_backups=$BACKUP_DIR/coordinator
@@ -480,7 +467,6 @@ install_coordinator() {
     -e "POS_AGENT_HOST_BACKUP_DIR=$coord_backups" \
     -e "POS_AGENT_HTTP_PORT=$HTTP_PORT" \
     ${REG_USER:+-e "POS_AGENT_REGISTRY_USERNAME=$REG_USER" -e "POS_AGENT_REGISTRY_PASSWORD=$REG_TOKEN"} --
-  [[ $env_changed -eq 1 ]] && restart_managed coordinator
   info "waiting for the coordinator (migrations run on first start)"
   for _ in $(seq 1 90); do
     if curl -fsS "http://127.0.0.1:$HTTP_PORT/healthz" >/dev/null 2>&1; then
