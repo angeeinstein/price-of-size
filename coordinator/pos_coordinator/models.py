@@ -368,6 +368,55 @@ class Release(Base):
     created_at: Mapped[datetime] = created()
 
 
+class AppUser(Base):
+    """A person using the control panel."""
+
+    __tablename__ = "app_user"
+    __table_args__ = (CheckConstraint("role IN ('admin','viewer')", name="app_user_role"),)
+    id: Mapped[uuid.UUID] = pk()
+    username: Mapped[str] = mapped_column(Text, unique=True)  # lowercase
+    password_hash: Mapped[str] = mapped_column(Text)  # Argon2id
+    totp_secret: Mapped[str | None] = mapped_column(Text)  # base32, set once confirmed
+    totp_pending_secret: Mapped[str | None] = mapped_column(Text)  # during setup
+    totp_last_counter: Mapped[int | None] = mapped_column(BigInteger)  # no code reuse
+    role: Mapped[str] = mapped_column(Text, server_default="viewer")
+    disabled_at: Mapped[datetime | None]
+    password_changed_at: Mapped[datetime] = created()
+    last_login_at: Mapped[datetime | None]
+    created_at: Mapped[datetime] = created()
+
+
+class UserSession(Base):
+    __tablename__ = "user_session"
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("app_user.id", ondelete="CASCADE"), index=True
+    )
+    csrf_token: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = created()
+    expires_at: Mapped[datetime]
+    last_seen_at: Mapped[datetime] = created()
+    reauth_at: Mapped[datetime] = created()
+    ip: Mapped[str | None] = mapped_column(INET)
+    user_agent: Mapped[str | None] = mapped_column(Text)
+
+
+class LoginAttempt(Base):
+    """Failed and successful logins, for rate limiting and the audit trail."""
+
+    __tablename__ = "login_attempt"
+    __table_args__ = (
+        Index("ix_login_attempt_user_at", "username", "at"),
+        Index("ix_login_attempt_ip_at", "ip", "at"),
+    )
+    id: Mapped[uuid.UUID] = pk()
+    username: Mapped[str] = mapped_column(Text)
+    ip: Mapped[str | None] = mapped_column(INET)
+    ok: Mapped[bool] = mapped_column(Boolean)
+    reason: Mapped[str | None] = mapped_column(Text)
+    at: Mapped[datetime] = created()
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
     id: Mapped[uuid.UUID] = pk()

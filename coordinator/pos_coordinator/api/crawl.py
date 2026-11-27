@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from pos_coordinator.api.deps import CurrentAdmin, Session
+from pos_coordinator.api.deps import CurrentAdmin, CurrentViewer, SensitiveAdmin, Session
 from pos_coordinator.crawl import discovery, scheduler
 from pos_coordinator.models import (
     AuditLog,
@@ -80,7 +80,7 @@ def _domain_view(d: DomainState, groups: list[DomainEgressState], queued: int) -
 
 @router.get("/domains")
 async def list_domains(
-    admin: CurrentAdmin, session: Session, limit: int = 100, blocked: bool | None = None
+    admin: CurrentViewer, session: Session, limit: int = 100, blocked: bool | None = None
 ):
     q = select(DomainState).order_by(DomainState.last_fetch_at.desc().nullslast()).limit(limit)
     if blocked is not None:
@@ -112,7 +112,7 @@ class DomainUpdate(BaseModel):
 
 
 @router.patch("/domains/{domain}")
-async def update_domain(domain: str, body: DomainUpdate, admin: CurrentAdmin, session: Session):
+async def update_domain(domain: str, body: DomainUpdate, admin: SensitiveAdmin, session: Session):
     d = await session.get(DomainState, domain, with_for_update=True)
     if d is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown domain")
@@ -146,7 +146,7 @@ async def update_domain(domain: str, body: DomainUpdate, admin: CurrentAdmin, se
 
 
 @router.get("/domains/{domain}/events")
-async def domain_events(domain: str, admin: CurrentAdmin, session: Session, limit: int = 200):
+async def domain_events(domain: str, admin: CurrentViewer, session: Session, limit: int = 200):
     rows = (
         await session.execute(
             select(DomainEvent)
@@ -210,7 +210,7 @@ async def put_source(name: str, body: SourceIn, admin: CurrentAdmin, session: Se
 
 
 @router.get("/sources")
-async def list_sources(admin: CurrentAdmin, session: Session):
+async def list_sources(admin: CurrentViewer, session: Session):
     rows = (await session.execute(select(Source).order_by(Source.name))).scalars()
     return [_source_view(s) for s in rows]
 

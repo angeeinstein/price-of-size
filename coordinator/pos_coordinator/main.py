@@ -64,6 +64,48 @@ async def _check() -> int:
     return 0 if ok else 1
 
 
+async def _create_user(args) -> int:
+    import getpass
+
+    from sqlalchemy import select
+
+    from pos_coordinator.config import get_settings
+    from pos_coordinator.db import make_engine, make_sessionmaker
+    from pos_coordinator.models import AppUser, AuditLog
+    from pos_coordinator.panel import auth
+
+    if args.password_stdin:
+        password = sys.stdin.readline().rstrip("\n")
+    else:
+        password = getpass.getpass("Password: ")
+        if getpass.getpass("Repeat: ") != password:
+            print("passwords differ", file=sys.stderr)
+            return 1
+    try:
+        password_hash = auth.hash_password(password)
+    except auth.AuthError as e:
+        print(e.reason, file=sys.stderr)
+        return 1
+    name = auth.normalize_username(args.username)
+    engine = make_engine(get_settings().database_url)
+    try:
+        async with make_sessionmaker(engine)() as s:
+            if (await s.execute(select(AppUser).where(AppUser.username == name))).first():
+                print(f"user {name} exists", file=sys.stderr)
+                return 1
+            s.add(AppUser(username=name, password_hash=password_hash, role=args.role))
+            s.add(
+                AuditLog(
+                    actor="cli", action="user.create", target=name, details={"role": args.role}
+                )
+            )
+            await s.commit()
+    finally:
+        await engine.dispose()
+    print(f"created {args.role} {name}")
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="pos-coordinator")
     sub = parser.add_subparsers(dest="cmd")
@@ -72,6 +114,14 @@ def main() -> None:
     serve.add_argument("--port", type=int, default=8000)
     sub.add_parser("migrate", help="upgrade the database schema to head")
     sub.add_parser("check", help="self-test: config, database, signing key")
+    cu = sub.add_parser("create-user", help="create a control panel user (e.g. the first admin)")
+    cu.add_argument("username")
+    cu.add_argument("--role", choices=["admin", "viewer"], default="admin")
+    cu.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="read the password from stdin instead of prompting",
+    )
     bk = sub.add_parser("backup", help="pg_dump the database")
     bk.add_argument("--out", type=Path, default=None)
     bk.add_argument("--label", default="manual")
@@ -86,6 +136,8 @@ def main() -> None:
         return
     if args.cmd == "check":
         sys.exit(asyncio.run(_check()))
+    if args.cmd == "create-user":
+        sys.exit(asyncio.run(_create_user(args)))
     if args.cmd == "backup":
         from pos_coordinator.backup import run_backup
         from pos_coordinator.config import get_settings

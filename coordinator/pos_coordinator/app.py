@@ -12,6 +12,7 @@ from pos_coordinator.api import admin, crawl, jobs, nodes, raw, releases
 from pos_coordinator.api.deps import Session
 from pos_coordinator.config import Settings, get_settings
 from pos_coordinator.db import make_engine, make_sessionmaker
+from pos_coordinator.panel import api as panel_api
 from pos_coordinator.partitions import PartitionCache
 from pos_coordinator.rawstore import RawStore
 from pos_shared.version import API_VERSION, __version__
@@ -64,6 +65,6 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
     async def version():
         return {"version": __version__, "api_version": API_VERSION}
 
-    for module in (nodes, jobs, raw, releases, admin, crawl):
+    for module in (nodes, jobs, raw, releases, admin, crawl, panel_api):
         app.include_router(module.router)
     return app

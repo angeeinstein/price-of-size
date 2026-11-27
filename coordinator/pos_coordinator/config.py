@@ -26,6 +26,8 @@ class Settings(BaseSettings):
 
     # Honour CF-Connecting-IP / X-Forwarded-For when behind Cloudflare Tunnel or Caddy.
     trust_proxy_headers: bool = False
+    # Session cookies only over HTTPS (Cloudflare). Off only for local development.
+    cookie_secure: bool = True
 
     access_token_ttl_s: int = 15 * 60
     challenge_ttl_s: int = 60

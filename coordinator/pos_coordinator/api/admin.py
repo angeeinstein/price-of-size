@@ -12,7 +12,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 
 from pos_coordinator import budget, queue, runtime_settings
-from pos_coordinator.api.deps import AppSettings, CurrentAdmin, Session
+from pos_coordinator.api.deps import (
+    AppSettings,
+    CurrentAdmin,
+    CurrentViewer,
+    SensitiveAdmin,
+    Session,
+)
 from pos_coordinator.models import (
     AuditLog,
     EnrollmentCode,
@@ -42,7 +48,7 @@ class EnrollmentCodeRequest(BaseModel):
 
 @router.post("/enrollment-codes", status_code=status.HTTP_201_CREATED)
 async def create_enrollment_code(
-    body: EnrollmentCodeRequest, admin: CurrentAdmin, session: Session, settings: AppSettings
+    body: EnrollmentCodeRequest, admin: SensitiveAdmin, session: Session, settings: AppSettings
 ):
     code = new_enrollment_code()
     expires = datetime.now(UTC) + timedelta(seconds=body.ttl_s or settings.enrollment_code_ttl_s)
@@ -89,7 +95,7 @@ def _node_view(n: Node, offline_after_s: int) -> dict[str, Any]:
 
 
 @router.get("/nodes")
-async def list_nodes(admin: CurrentAdmin, session: Session, settings: AppSettings):
+async def list_nodes(admin: CurrentViewer, session: Session, settings: AppSettings):
     nodes = (await session.execute(select(Node).order_by(Node.enrolled_at))).scalars().all()
     return [_node_view(n, settings.node_offline_after_s) for n in nodes]
 
@@ -112,7 +118,7 @@ async def _get_node(session, node_id: UUID) -> Node:
 async def update_node(
     node_id: UUID,
     body: DesiredStateUpdate,
-    admin: CurrentAdmin,
+    admin: SensitiveAdmin,
     session: Session,
     settings: AppSettings,
 ):
@@ -135,7 +141,7 @@ async def update_node(
 
 
 @router.post("/nodes/{node_id}/revoke")
-async def revoke_node(node_id: UUID, admin: CurrentAdmin, session: Session):
+async def revoke_node(node_id: UUID, admin: SensitiveAdmin, session: Session):
     node = await _get_node(session, node_id)
     node.revoked_at = func.now()
     await session.execute(delete(NodeToken).where(NodeToken.node_id == node_id))
@@ -161,7 +167,7 @@ async def send_command(node_id: UUID, body: CommandRequest, admin: CurrentAdmin,
 
 
 @router.get("/nodes/{node_id}/commands")
-async def list_commands(node_id: UUID, admin: CurrentAdmin, session: Session):
+async def list_commands(node_id: UUID, admin: CurrentViewer, session: Session):
     rows = (
         await session.execute(
             select(NodeCommand)
@@ -209,7 +215,7 @@ async def enqueue_jobs(body: EnqueueRequest, admin: CurrentAdmin, session: Sessi
 
 
 @router.get("/jobs/stats")
-async def job_stats(admin: CurrentAdmin, session: Session):
+async def job_stats(admin: CurrentViewer, session: Session):
     return await queue.queue_stats(session)
 
 
@@ -217,12 +223,12 @@ async def job_stats(admin: CurrentAdmin, session: Session):
 
 
 @router.get("/settings")
-async def get_settings(admin: CurrentAdmin, session: Session):
+async def get_settings(admin: CurrentViewer, session: Session):
     return await runtime_settings.get_all(session)
 
 
 @router.put("/settings/{key}")
-async def put_setting(key: str, body: dict[str, Any], admin: CurrentAdmin, session: Session):
+async def put_setting(key: str, body: dict[str, Any], admin: SensitiveAdmin, session: Session):
     if "value" not in body:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, 'body must be {"value": ...}')
     try:
@@ -237,6 +243,6 @@ async def put_setting(key: str, body: dict[str, Any], admin: CurrentAdmin, sessi
 
 
 @router.get("/budget")
-async def get_budget(admin: CurrentAdmin, session: Session):
+async def get_budget(admin: CurrentViewer, session: Session):
     s = await budget.status(session)
     return {**s.__dict__, "ahead_of_pace": s.ahead_of_pace}
