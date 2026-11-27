@@ -59,6 +59,26 @@ async def test_login_cookie_flags_and_me(panel_app, settings):
         assert "Secure" in r.headers["set-cookie"]
 
 
+async def test_the_cookie_is_secure_except_for_plain_http_on_the_lan(settings):
+    # behind the agent's Caddy: it sets the client address and the scheme it saw
+    app = create_app(settings.model_copy(update={"trust_proxy_headers": True}),
+                     run_maintenance=False)  # fmt: skip
+    async with app.router.lifespan_context(app):
+        await make_user(app.state.sessionmaker)
+        cases = [
+            ("192.168.1.50", "http", False),  # the panel by its LAN address
+            ("192.168.1.50", "https", True),
+            ("203.0.113.9", "https", True),  # through Cloudflare
+            ("203.0.113.9", "http", True),  # never a plain cookie for a public caller
+        ]
+        for ip, proto, secure in cases:
+            async with browser(app) as c:
+                c.headers.update({"X-Pos-Client-Ip": ip, "X-Forwarded-Proto": proto})
+                r = await login(c)
+                assert r.status_code == 200, r.text
+                assert ("Secure" in r.headers["set-cookie"]) is secure, (ip, proto)
+
+
 async def test_wrong_password_and_unknown_user_look_the_same(panel_app):
     await make_user(panel_app.state.sessionmaker)
     async with browser(panel_app) as c:

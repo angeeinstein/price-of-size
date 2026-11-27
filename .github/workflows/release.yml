@@ -1,8 +1,9 @@
 name: Release
 
-# Push a tag vX.Y.Z (matching shared/pos_shared/version.py) to publish a release:
-# multi-arch images on GHCR, and a GitHub release with release.json (every image
-# pinned by digest) and install.sh. The coordinator signs a release only when an
+# Push a tag vX.Y.Z (matching shared/pos_shared/version.py), or publish a release
+# with a new tag vX.Y.Z on GitHub's release page, to build a release: multi-arch
+# images on GHCR, and the GitHub release with release.json (every image pinned by
+# digest) and install.sh attached. The coordinator signs a release only when an
 # admin registers it, so publishing here does not roll anything out by itself.
 
 on:
@@ -80,5 +81,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" release.json install.sh \
-            --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+          # a release made on the web page (which created the tag) gets the files;
+          # a pushed tag gets a new release
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release.json install.sh --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release.json install.sh \
+              --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+          fi

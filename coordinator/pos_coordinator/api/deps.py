@@ -138,13 +138,22 @@ CurrentViewer = Annotated[Admin, Depends(current_viewer)]
 SensitiveAdmin = Annotated[Admin, Depends(recent_reauth)]
 
 
+CLIENT_IP_HEADER = "x-pos-client-ip"  # set by Caddy, overwriting what callers send
+
+
 def client_ip(request: Request, settings: Settings) -> str | None:
-    """Public egress IP of the caller as the coordinator sees it."""
+    """Public egress IP of the caller as the coordinator sees it. Behind the agent's
+    Caddy, its X-Pos-Client-Ip: Caddy believes CF-Connecting-IP only from trusted
+    proxies (the cloudflared host) and overwrites the header on every request."""
     candidates: list[str] = []
     if settings.trust_proxy_headers:
-        if cf := request.headers.get("cf-connecting-ip"):
+        if own := request.headers.get(CLIENT_IP_HEADER):
+            candidates.append(own.strip())
+        elif cf := request.headers.get("cf-connecting-ip"):
             candidates.append(cf.strip())
-        if xff := request.headers.get("x-forwarded-for"):
+        if not request.headers.get(CLIENT_IP_HEADER) and (
+            xff := request.headers.get("x-forwarded-for")
+        ):
             candidates.append(xff.split(",")[0].strip())
     if request.client:
         candidates.append(request.client.host)
@@ -156,6 +165,46 @@ def client_ip(request: Request, settings: Settings) -> str | None:
     return None
 
 
+LAN_GROUP = "lan"
+# A local network: RFC 1918, loopback, link-local and IPv6 unique local addresses
+# (not Python's is_private, which also counts documentation and other reserved ranges).
+LOCAL_NETWORKS = tuple(
+    ipaddress.ip_network(n)
+    for n in (
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+    )  # fmt: skip
+)
+
+
+def is_local(addr: ipaddress.IPv4Address | ipaddress.IPv6Address | str | None) -> bool:
+    """An address on a local network: a caller on the coordinator's LAN."""
+    if addr is None:
+        return False
+    if isinstance(addr, str):
+        try:
+            addr = ipaddress.ip_address(addr)
+        except ValueError:
+            return False
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    return any(addr in n for n in LOCAL_NETWORKS if n.version == addr.version)
+
+
+def request_https(request: Request, settings: Settings) -> bool:
+    """Whether the caller reached us over HTTPS. Behind Caddy, X-Forwarded-Proto is
+    Caddy's: passed on from trusted proxies (Cloudflare), else the scheme it saw."""
+    if settings.trust_proxy_headers and (proto := request.headers.get("x-forwarded-proto")):
+        return proto.split(",")[0].strip().lower() == "https"
+    return request.url.scheme == "https"
+
+
 def egress_group_for(ip: str | None) -> str | None:
     """Nodes behind the same public IP share one per-domain budget.
 
@@ -164,6 +213,10 @@ def egress_group_for(ip: str | None) -> str | None:
     if ip is None:
         return None
     addr = ipaddress.ip_address(ip)
+    if is_local(addr):
+        # callers on the coordinator's own network (a worker beside it, nodes on the
+        # LAN) leave through the same public address: one budget
+        return LAN_GROUP
     if addr.version == 6:
         return str(ipaddress.ip_network(f"{addr}/64", strict=False))
     return str(addr)

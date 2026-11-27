@@ -17,7 +17,7 @@ async def test_desired_state_and_commands(app, admin, tmp_path):
     await agent.heartbeat_once()
     nodes = (await admin.get("/api/admin/nodes")).json()
     assert nodes[0]["online"] and nodes[0]["actual_state"] == "running"
-    assert nodes[0]["egress_group"] == "127.0.0.1"
+    assert nodes[0]["egress_group"] == "lan"  # a node on the local network
 
     # pause: the node stops leasing
     await admin.patch(f"/api/admin/nodes/{node_id}", json={"run_state": "paused"})

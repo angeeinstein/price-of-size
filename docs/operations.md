@@ -27,10 +27,12 @@ The menu asks only what the role needs. The same in one line, without prompts:
 ```bash
 # 1. database (prints the URL for the coordinator)
 sudo bash install.sh --role database --non-interactive --pg-allow 10.0.0.0/24 --backup-dir /srv/pos/backups
-# 2. coordinator
+# 2. coordinator (--listen 0.0.0.0: reachable from the LAN, e.g. by cloudflared in
+#    another LXC at 10.0.0.5; omit both for this machine only)
 sudo bash install.sh --role coordinator --non-interactive \
   --db-url 'postgresql+psycopg://pos:PASSWORD@10.0.0.11:5432/pos' \
-  --raw-store /mnt/nas/pos/raw --backup-dir /mnt/nas/pos/backups --http-port 8080
+  --raw-store /mnt/nas/pos/raw --backup-dir /mnt/nas/pos/backups --http-port 8080 \
+  --listen 0.0.0.0 --trusted-proxy 10.0.0.5
 # 3. a node (enrollment code: POST /api/admin/enrollment-codes, later the control panel)
 sudo bash install.sh --role node --non-interactive --coordinator https://pos.example.org --enroll ABCD-EFGH-JKLM-NPQR
 ```
@@ -80,15 +82,40 @@ docker run -d --name pos-worker --restart unless-stopped --init --shm-size 1g \
   -v pos-worker-state:/var/lib/pos-worker ghcr.io/angeeinstein/price-of-size-worker@sha256:...
 ```
 
-### Remote access (Cloudflare Tunnel)
+### Remote access (Cloudflare Tunnel) and the LAN
 
-Caddy listens on `127.0.0.1:<http-port>` of the coordinator host, loopback
-only: publishing it on other interfaces would bypass Cloudflare Access, and
-direct callers could set `CF-Connecting-IP` themselves. Publish it
-with a Cloudflare Tunnel (`cloudflared tunnel ... --url http://localhost:8080`)
-and protect the hostname with Cloudflare Access. Nodes send a Cloudflare
-Access service token (`--cf-client-id/--cf-client-secret`) in addition to
-their own node credentials. No inbound ports are needed anywhere.
+Caddy listens on `<listen>:<http-port>` of the coordinator host (`--listen`,
+`--http-port`, default `127.0.0.1:8080`). Publish it through a Cloudflare Tunnel
+and protect the hostname with Cloudflare Access; nodes elsewhere send a Cloudflare
+Access service token (`--cf-client-id/--cf-client-secret`) in addition to their own
+node credentials. No inbound ports are needed anywhere.
+
+* **cloudflared on the coordinator host:** keep `--listen 127.0.0.1` and point the
+  tunnel at `http://localhost:8080`.
+* **cloudflared in another LXC (one tunnel for all your services):** install with
+  `--listen 0.0.0.0` (or the coordinator's LAN address) and
+  `--trusted-proxy <cloudflared IP>`, and point the tunnel's public hostname at
+  `http://<coordinator IP>:8080`.
+
+With `--listen` beyond loopback the control panel and the node API are also
+reachable from the LAN at `http://<coordinator IP>:8080`, without Cloudflare
+Access: the panel's sign-in (password, two-factor) and the nodes' own credentials
+still apply, and a node on the LAN can use that URL instead of the tunnel. Over
+plain HTTP from a LAN address the session cookie is set without `Secure` (the
+browser would not send it back otherwise); everywhere else it keeps it.
+
+The visitor's address (sign-in rate limits, the audit log, a node's egress group)
+comes from Caddy: it believes `CF-Connecting-IP` only from `--trusted-proxy` (on
+loopback only: from every caller, since only this machine can call) and passes its
+result on in `X-Pos-Client-Ip`, overwriting whatever a caller sent. Without
+`--trusted-proxy`, visitors through a cloudflared on another host appear with that
+host's address. `GET /api/admin/connection` shows how the coordinator sees a
+request (address, egress group, HTTPS) to check the setup.
+
+Callers on a local network (RFC 1918, loopback, link-local, IPv6 ULA) share one
+egress group, `lan`: they leave through the same public address, so they share one
+budget per domain. A node of the same network that comes in through the tunnel is
+grouped by its public address instead; keep the nodes of one site on one path.
 
 ## The node agent
 
@@ -133,9 +160,11 @@ inactive slot stopped, and updates when the signed desired release differs:
 
 ## Releases and updates
 
-1. Bump `shared/pos_shared/version.py`, merge, and push the tag `vX.Y.Z`. The
-   release workflow builds multi-arch images, pins them by digest in
-   `release.json` and publishes the GitHub release.
+1. Bump `shared/pos_shared/version.py`, merge, and push the tag `vX.Y.Z` (or, on
+   GitHub's release page, publish a release with a new tag `vX.Y.Z` on `main`).
+   The release workflow builds multi-arch images, pins them by digest in
+   `release.json` and attaches it and `install.sh` to the GitHub release. Wait for
+   the workflow to finish before installing.
 2. Register the release with the coordinator (control panel later; for now):
    ```bash
    curl -X POST https://pos.example.org/api/admin/releases -H "Authorization: Bearer $POS_ADMIN_TOKEN" \

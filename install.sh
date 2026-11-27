@@ -31,6 +31,7 @@ DOCKER_LOG_OPTS=(--log-opt max-size=10m --log-opt max-file=3)
 
 ROLE="" VERSION="" MODE="" COORDINATOR_URL="" ENROLL_CODE="" NODE_NAME=""
 DB_URL="" RAW_STORE="" BACKUP_DIR="" HTTP_PORT="" PG_ALLOW="" PG_DATA_DIR=""
+LISTEN="" TRUSTED_PROXY=""
 CF_ID="" CF_SECRET="" REG_USER="" REG_TOKEN="" REG_SERVER="" RELEASE_FILE=""
 REGISTRY_ENV=()
 ACTION=install NONINTERACTIVE=0 PURGE=0 ASSUME_YES=0
@@ -51,7 +52,12 @@ Options:
   --db-url URL           coordinator: postgresql+psycopg://user:pass@host:5432/pos
   --raw-store PATH       coordinator: raw store directory (NAS mount), default /srv/pos/raw
   --backup-dir PATH      coordinator/database: backup directory, default /srv/pos/backups
-  --http-port N          coordinator: local HTTP port for Caddy (default 8080)
+  --http-port N          coordinator: HTTP port for Caddy (default 8080)
+  --listen ADDR          coordinator: address Caddy listens on: 127.0.0.1 (default, this
+                         machine only) or 0.0.0.0 / a LAN address (cloudflared in another
+                         LXC, the control panel from the LAN)
+  --trusted-proxy IP[,..]  coordinator: the cloudflared host(s) whose visitor address
+                         (CF-Connecting-IP) is believed (IPs or CIDRs)
   --pg-allow CIDR[,..]   database: networks allowed to connect (default: private ranges)
   --pg-data-dir PATH     database: data directory (first install only)
   --registry-user U      only for private images (GHCR user + token with read:packages)
@@ -78,6 +84,8 @@ while [[ $# -gt 0 ]]; do
     --raw-store) RAW_STORE="$2"; shift ;;
     --backup-dir) BACKUP_DIR="$2"; shift ;;
     --http-port) HTTP_PORT="$2"; shift ;;
+    --listen) LISTEN="$2"; shift ;;
+    --trusted-proxy) TRUSTED_PROXY="$2"; shift ;;
     --pg-allow) PG_ALLOW="$2"; shift ;;
     --pg-data-dir) PG_DATA_DIR="$2"; shift ;;
     --registry-user) REG_USER="$2"; shift ;;
@@ -135,6 +143,16 @@ confirm() {
   [[ "$ans" =~ ^[Yy] ]]
 }
 
+is_loopback() { [[ -z "$1" || "$1" == 127.* || "$1" == ::1 || "$1" == localhost ]]; }
+
+# The coordinator as seen from this machine (wherever Caddy listens).
+local_url() {
+  local host=${LISTEN:-127.0.0.1}
+  [[ "$host" == 0.0.0.0 || "$host" == "::" ]] && host=127.0.0.1
+  [[ "$host" == *:* ]] && host="[$host]"
+  echo "http://$host:$HTTP_PORT"
+}
+
 random_secret() { head -c 48 /dev/urandom | base64 | tr -d '/+=\n' | head -c 40; }
 
 need_root() { [[ $EUID -eq 0 ]] || die "run as root (sudo)"; }
@@ -148,6 +166,8 @@ VERSION=$VERSION
 RAW_STORE=$RAW_STORE
 BACKUP_DIR=$BACKUP_DIR
 HTTP_PORT=$HTTP_PORT
+LISTEN=$LISTEN
+TRUSTED_PROXY=$TRUSTED_PROXY
 EOF
   chmod 0600 "$CONF"
 }
@@ -163,6 +183,8 @@ load_conf() {
       RAW_STORE) [[ -n "$RAW_STORE" ]] || RAW_STORE=$v ;;
       BACKUP_DIR) [[ -n "$BACKUP_DIR" ]] || BACKUP_DIR=$v ;;
       HTTP_PORT) [[ -n "$HTTP_PORT" ]] || HTTP_PORT=$v ;;
+      LISTEN) [[ -n "$LISTEN" ]] || LISTEN=$v ;;
+      TRUSTED_PROXY) [[ -n "$TRUSTED_PROXY" ]] || TRUSTED_PROXY=$v ;;
     esac
   done <"$CONF"
 }
@@ -397,7 +419,7 @@ install_node() {
     [[ -n "$CF_ID" ]] && ask_secret CF_SECRET "Cloudflare Access client secret"
   fi
   # "local": the coordinator runs on this machine. The worker then joins its Docker
-  # network and talks to Caddy directly, since Caddy publishes on loopback only.
+  # network and talks to Caddy directly (Caddy may publish on loopback only).
   local on_net=false url=$COORDINATOR_URL
   if [[ "$ROLE" == all-in-one || "$url" == local || "$url" == "$LOCAL_COORDINATOR" ]]; then
     docker network inspect "$NET" >/dev/null 2>&1 \
@@ -467,7 +489,17 @@ install_coordinator() {
   ask DB_URL "Database URL (postgresql+psycopg://pos:PASSWORD@DB-HOST:5432/pos)"
   ask RAW_STORE "Raw store directory (NAS mount)" "/srv/pos/raw"
   ask BACKUP_DIR "Backup directory" "/srv/pos/backups"
-  ask HTTP_PORT "Local HTTP port (point cloudflared here)" "8080"
+  ask HTTP_PORT "HTTP port (point cloudflared here)" "8080"
+  ask LISTEN "Listen on (127.0.0.1: this machine only; 0.0.0.0: also the LAN, e.g. for cloudflared in another LXC)" "127.0.0.1"
+  [[ "$LISTEN" =~ ^[0-9.]+$|^[0-9a-fA-F:]+$ ]] || die "--listen must be an IP address, got: $LISTEN"
+  if ! is_loopback "$LISTEN" && [[ -z "$TRUSTED_PROXY" ]] && can_prompt; then
+    read -r -p "IP of your cloudflared host, whose visitor addresses are believed (empty: none): " \
+      TRUSTED_PROXY </dev/tty || true
+  fi
+  local p
+  for p in ${TRUSTED_PROXY//,/ }; do
+    [[ "$p" =~ ^[0-9a-fA-F.:]+(/[0-9]{1,3})?$ ]] || die "--trusted-proxy: not an IP or CIDR: $p"
+  done
   local admin_token
   admin_token=$(env_get "$env_file" POS_ADMIN_TOKEN)
   [[ -n "$admin_token" ]] || admin_token=$(random_secret)
@@ -504,11 +536,13 @@ install_coordinator() {
     -e "POS_AGENT_HOST_RAW_STORE=$RAW_STORE" \
     -e "POS_AGENT_HOST_BACKUP_DIR=$coord_backups" \
     -e "POS_AGENT_HTTP_PORT=$HTTP_PORT" \
+    -e "POS_AGENT_HTTP_BIND=$LISTEN" \
+    -e "POS_AGENT_TRUSTED_PROXIES=$TRUSTED_PROXY" \
     "${REGISTRY_ENV[@]}" --
   info "waiting for the coordinator (migrations run on first start)"
   for _ in $(seq 1 90); do
-    if curl -fsS "http://127.0.0.1:$HTTP_PORT/healthz" >/dev/null 2>&1; then
-      ok "coordinator is up at http://127.0.0.1:$HTTP_PORT"
+    if curl -fsS "$(local_url)/healthz" >/dev/null 2>&1; then
+      ok "coordinator is up at $(local_url)"
       COORD_ADMIN_TOKEN=$admin_token
       return
     fi
@@ -811,7 +845,7 @@ main() {
       DB_URL=${DB_URL:-postgresql+psycopg://pos:$DB_PASSWORD@$gw:5432/pos}
       install_coordinator
       if [[ -z "$ENROLL_CODE" ]] && ! vol_has pos-worker-state identity.json; then
-        ENROLL_CODE=$(curl -fsS -X POST "http://127.0.0.1:$HTTP_PORT/api/admin/enrollment-codes" \
+        ENROLL_CODE=$(curl -fsS -X POST "$(local_url)/api/admin/enrollment-codes" \
           -H "Authorization: Bearer $COORD_ADMIN_TOKEN" -H 'content-type: application/json' \
           -d '{"label":"all-in-one"}' | jq -r .code)
       fi
@@ -823,7 +857,14 @@ main() {
   ok "The Price of Size $VERSION installed ($ROLE)"
   if [[ -n "$COORD_ADMIN_TOKEN" ]]; then
     echo "  Admin token: in $ETC/coordinator.env (POS_ADMIN_TOKEN)"
-    echo "  Next: publish http://127.0.0.1:$HTTP_PORT through a Cloudflare Tunnel (docs/operations.md)"
+    if is_loopback "$LISTEN"; then
+      echo "  Next: publish $(local_url) through a Cloudflare Tunnel (docs/operations.md)"
+    else
+      echo "  Control panel on the LAN: http://THIS-HOST:$HTTP_PORT (listening on $LISTEN)"
+      echo "  Next: point your Cloudflare Tunnel's public hostname at http://THIS-HOST:$HTTP_PORT"
+      [[ -n "$TRUSTED_PROXY" ]] \
+        || echo "  (no --trusted-proxy: visitors through the tunnel show the cloudflared host's address)"
+    fi
   fi
 }
 

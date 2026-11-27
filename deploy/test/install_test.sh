@@ -35,7 +35,12 @@ curl -fsS "http://127.0.0.1:$PORT/healthz" | jq -e .ok
 [[ "$(stat -c %u "$DATA/raw")" == 10001 ]] || fail "raw store not owned by the service user"
 [[ "$(stat -c %u "$DATA/backups/coordinator")" == 10001 ]] || fail "coordinator backups not owned by 10001"
 bind=$(docker inspect -f '{{(index (index .HostConfig.PortBindings "80/tcp") 0).HostIp}}' pos-caddy)
-[[ "$bind" == 127.0.0.1 ]] || fail "Caddy must publish on loopback only (got $bind)"
+[[ "$bind" == 127.0.0.1 ]] || fail "Caddy must publish on loopback only by default (got $bind)"
+seen_ip() {  # the client address the coordinator sees for a request claiming to be 203.0.113.9
+  admin -H 'CF-Connecting-IP: 203.0.113.9' "http://127.0.0.1:$PORT/api/admin/connection" | jq -r .client_ip
+}
+# loopback only: every caller is on this machine (a local cloudflared), believed
+[[ "$(seen_ip)" == 203.0.113.9 ]] || fail "Caddy on loopback must pass on CF-Connecting-IP"
 
 step "an API key added as documented survives a re-install"
 ! grep -q '^POS_ANTHROPIC_API_KEY=' /etc/pos/coordinator.env || fail "empty API key placeholder written"
@@ -45,6 +50,19 @@ $I --role coordinator --non-interactive --release-file "$RELEASE_FILE" --db-url 
 grep -qx 'POS_ANTHROPIC_API_KEY=sk-ant-install-test' /etc/pos/coordinator.env || fail "API key lost"
 [[ "$(grep -c '^POS_ANTHROPIC_API_KEY=' /etc/pos/coordinator.env)" == 1 ]] || fail "API key duplicated"
 wait_for 90 "coordinator healthy after the re-install" curl -fsS "http://127.0.0.1:$PORT/healthz"
+
+step "listening on the LAN: only the trusted proxy's visitor address is believed"
+$I --role coordinator --non-interactive --release-file "$RELEASE_FILE" --db-url "$DB" \
+  --raw-store "$DATA/raw" --backup-dir "$DATA/backups" --http-port "$PORT" \
+  --listen 0.0.0.0 --trusted-proxy 192.0.2.1
+wait_for 60 "Caddy on all addresses" bash -c \
+  "docker inspect -f '{{(index (index .HostConfig.PortBindings \"80/tcp\") 0).HostIp}}' pos-caddy | grep -qx 0.0.0.0"
+wait_for 60 "coordinator healthy on the LAN listener" curl -fsS "http://127.0.0.1:$PORT/healthz"
+seen=$(seen_ip)
+[[ "$seen" != 203.0.113.9 ]] || fail "a forged CF-Connecting-IP from an untrusted caller was believed"
+admin "http://127.0.0.1:$PORT/api/admin/connection" | jq -e '.local_network and .egress_group == "lan"' \
+  >/dev/null || fail "a caller on the local network must be in the lan egress group"
+grep -qx 'LISTEN=0.0.0.0' /etc/pos/install.conf || fail "--listen not kept for re-runs"
 
 step "node role (agent mode)"
 CODE=$(admin -X POST -H 'content-type: application/json' -d '{"label":"t"}' \

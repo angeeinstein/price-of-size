@@ -10,6 +10,7 @@ coordinator:  blue-green. The new slot starts beside the old one; Caddy has
               working on the new schema during the overlap.
 """
 
+import ipaddress
 import json
 from pathlib import Path
 from typing import Any
@@ -280,19 +281,52 @@ class CoordinatorService(Service):
 
     # --- reverse proxy --------------------------------------------------------
 
+    def trusted_proxy_ranges(self) -> list[str]:
+        """Networks whose CF-Connecting-IP / X-Forwarded-* Caddy believes."""
+        given = [p.strip() for p in self.settings.trusted_proxies.split(",") if p.strip()]
+        if given:
+            # a malformed entry is a configuration error, not something to skip quietly
+            return [str(ipaddress.ip_network(p, strict=False)) for p in given]
+        try:
+            loopback = ipaddress.ip_address(self.settings.http_bind).is_loopback
+        except ValueError:
+            loopback = self.settings.http_bind == "localhost"
+        # loopback only: every caller is on this machine (a local cloudflared)
+        return ["0.0.0.0/0", "::/0"] if loopback else []
+
     def caddy_config(self) -> dict[str, Any]:
         upstreams = [{"dial": f"{self.container_name(s)}:{self.port}"} for s in ("a", "b")]
+        server: dict[str, Any] = {
+            "listen": [":80"],
+            "automatic_https": {"disable": True},
+        }
+        ranges = self.trusted_proxy_ranges()
+        if ranges:
+            # the visitor's address from Cloudflare (or another proxy), from trusted
+            # proxies only; any other caller is its own client address
+            server["trusted_proxies"] = {"source": "static", "ranges": ranges}
+            server["client_ip_headers"] = ["CF-Connecting-IP", "X-Forwarded-For"]
         return {
             "admin": {"disabled": True},
             "apps": {
                 "http": {
                     "servers": {
                         "pos": {
-                            "listen": [":80"],
-                            "automatic_https": {"disable": True},
+                            **server,
                             "routes": [
                                 {
                                     "handle": [
+                                        # the client address as Caddy determined it,
+                                        # overwriting whatever the caller sent: the
+                                        # coordinator reads only this header
+                                        {
+                                            "handler": "headers",
+                                            "request": {
+                                                "set": {
+                                                    "X-Pos-Client-Ip": ["{http.vars.client_ip}"]
+                                                }
+                                            },
+                                        },
                                         {
                                             "handler": "reverse_proxy",
                                             "upstreams": upstreams,
@@ -310,7 +344,7 @@ class CoordinatorService(Service):
                                                 "passive": {"fail_duration": "5s"},
                                             },
                                             "flush_interval": -1,  # stream SSE/WebSocket
-                                        }
+                                        },
                                     ]
                                 }
                             ],
