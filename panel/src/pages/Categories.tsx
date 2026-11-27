@@ -102,6 +102,9 @@ function Classification() {
         <thead><tr><Th>Tier</Th><Th>Version</Th><Th className="text-right">Products</Th>
           <Th className="text-right">Mean confidence</Th><Th className="text-right">&lt; 0.6</Th><Th className="text-right">≥ 0.8</Th></tr></thead>
         <tbody>
+          {s.current.length === 0 && (
+            <Tr><Td className="text-muted" colSpan={6}>No product is classified yet.</Td></Tr>
+          )}
           {s.current.map((r) => (
             <Tr key={`${r.tier}/${r.version}`}>
               <Td>{TIER_LABEL[r.tier] ?? r.tier}</Td>
