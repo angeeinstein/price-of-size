@@ -302,12 +302,13 @@ class Worker:
         if isinstance(current, dict) and current.get("manifest", {}).get("version") == target:
             return
         signed = await self.client.get_release(target)
-        key = self.identity.coordinator_signing_key
-        payload = signed.manifest.model_dump(mode="json")
-        if key is None or not signing.verify(key, payload, signed.signature):
-            log.error("release %s has an invalid signature; not handing it to the agent", target)
+        manifest, problem = signing.open_signed_manifest(
+            signed, self.identity.coordinator_signing_key
+        )
+        if manifest is None or manifest.version != target:
+            log.error("release %s refused (%s); not handing it to the agent", target, problem)
             return
-        exchange.write_json(path, signed.model_dump(mode="json"))
+        exchange.write_json(path, signed)  # as received: the agent checks the same signature
         log.info("requested update to %s from the node agent", target)
 
     async def selftest(self) -> dict[str, object]:

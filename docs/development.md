@@ -74,7 +74,7 @@ and watch `GET /api/admin/jobs/stats`. Interactive API docs: `/docs`.
 | Runtime switches in the DB | `runtime_settings.py`, `setting` table |
 | Cost ledger and budget pacing | `budget.py`, `llm_call` table |
 | Raw store on the NAS, content-addressed | `rawstore.py`, `api/raw.py` |
-| API versioning, incompatible workers refused | `pos_shared/version.py`, `api/deps.py` |
+| API versioning, incompatible workers refused; replies read leniently, requests strictly | `pos_shared/version.py`, `pos_shared/api.py` (`Strict`, `Reply`), `api/deps.py` |
 | Signed releases, nodes pin the coordinator key | `pos_shared/signing.py`, `api/releases.py`, `signing_key.py` |
 | Node agent: A/B slots, health checks, rollback, self-update | `agent/pos_agent/` |
 | Blue-green coordinator, backup before migrations | `agent/pos_agent/services.py`, `coordinator/.../backup.py` |

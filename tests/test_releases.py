@@ -1,8 +1,11 @@
 """Signed releases: registration, node delivery, and hand-over to the node agent."""
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 from pos_coordinator import maintenance
 from pos_coordinator.backup import libpq_env, libpq_url
 from pos_shared import exchange, signing
+from pos_shared.ids import uuid7
 from tests.helpers import make_agent
 
 W = "ghcr.io/x/price-of-size-worker@sha256:" + "1" * 64
@@ -146,3 +149,51 @@ async def test_identity_without_signing_key_fetches_it(app, admin, tmp_path):
     assert _json.loads(ident.read_text())["coordinator_signing_key"] == key
     assert (exch / exchange.PINNED_KEY).read_text().strip() == key
     await worker.client.aclose()
+
+
+def test_coordinator_replies_tolerate_newer_fields():
+    """Codex finding: a newer coordinator (same API major) may add reply fields; an
+    older node must keep working, and node input stays strict."""
+    import pydantic
+    import pytest
+
+    from pos_shared import api
+
+    resp = api.EnrollResponse.model_validate(
+        {"node_id": str(uuid7()), "coordinator_api_version": "1.9", "added_later": True}
+    )
+    assert resp.signing_public_key is None  # an older coordinator: fetched later
+    hb = api.HeartbeatResponse.model_validate(
+        {
+            "desired": {"run_state": "running", "new_knob": 1, "limits": {"x": 2}},
+            "commands": [{"id": str(uuid7()), "type": "ping", "priority": 5}],
+            "coordinator_api_version": "1.9",
+            "server_time": "2026-11-27T00:00:00Z",
+            "new_section": {},
+        }
+    )
+    assert hb.desired.run_state == api.RunState.running
+    with pytest.raises(pydantic.ValidationError):
+        api.Heartbeat.model_validate({"version": "0.1.0", "state": "running", "sneaky": 1})
+
+
+def test_signed_manifest_is_verified_as_received():
+    """The signature covers the coordinator's JSON; fields this node does not know
+    must neither break verification nor let a modified manifest through."""
+    key = Ed25519PrivateKey.generate()
+    pub = signing.public_key_b64(key)
+    manifest = {
+        "version": "0.2.0",
+        "images": {"worker": "r/w@sha256:" + "a" * 64},
+        "created_at": "2026-11-27T00:00:00Z",
+        "added_in_a_later_release": {"rollout": "canary"},
+    }
+    raw = {"manifest": manifest, "signature": signing.sign(key, manifest), "key_id": "k"}
+    parsed, problem = signing.open_signed_manifest(raw, pub)
+    assert problem is None and parsed.version == "0.2.0"
+    tampered = {**raw, "manifest": {**manifest, "images": {"worker": "evil@sha256:" + "b" * 64}}}
+    assert signing.open_signed_manifest(tampered, pub) == (None, "not signed by the pinned key")
+    other = signing.public_key_b64(Ed25519PrivateKey.generate())
+    assert signing.open_signed_manifest(raw, other)[0] is None
+    assert signing.open_signed_manifest(raw, None)[0] is None
+    assert signing.open_signed_manifest({"manifest": "x"}, pub)[0] is None

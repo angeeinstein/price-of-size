@@ -137,9 +137,10 @@ class CoordinatorClient:
         r = await self._call("GET", "/api/v1/nodes/signing-key")
         return r.json()["public_key"]
 
-    async def get_release(self, version: str) -> api.SignedManifest:
+    async def get_release(self, version: str) -> dict:
+        """The signed manifest as received: its signature covers these exact values."""
         r = await self._call("GET", f"/api/v1/releases/{version}")
-        return api.SignedManifest.model_validate(r.json())
+        return r.json()
 
     async def heartbeat(self, hb: api.Heartbeat) -> api.HeartbeatResponse:
         r = await self._call("POST", "/api/v1/nodes/heartbeat", json=hb.model_dump(mode="json"))

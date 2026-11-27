@@ -28,7 +28,7 @@ from pos_agent.docker import Docker, DockerError
 from pos_agent.services import Service, labels, make_service
 from pos_agent.state import AgentState, Slot, other
 from pos_shared import exchange, signing
-from pos_shared.api import ReleaseManifest, SignedManifest
+from pos_shared.api import ReleaseManifest
 from pos_shared.version import __version__
 
 log = logging.getLogger(__name__)
@@ -89,20 +89,13 @@ class Manager:
         raw = exchange.read_json(self.settings.exchange_dir / exchange.DESIRED)
         if raw is None:
             return None
-        try:
-            signed = SignedManifest.model_validate(raw)
-        except ValueError as e:
-            self.problem = f"desired release is malformed: {e}"
-            return None
-        key = self.pinned_key()
-        payload = signed.manifest.model_dump(mode="json")
-        if key is None or not signing.verify(key, payload, signed.signature):
-            self.problem = (
-                f"desired release {signed.manifest.version} is not signed by the pinned key"
-            )
+        manifest, problem = signing.open_signed_manifest(raw, self.pinned_key())
+        if manifest is None:
+            version = raw.get("manifest", {}).get("version") if isinstance(raw, dict) else None
+            self.problem = f"desired release {version} refused: {problem}"
             log.error(self.problem)
             return None
-        return signed.manifest
+        return manifest
 
     def bootstrap_images(self) -> tuple[str | None, dict[str, str]]:
         raw = exchange.read_json(self.settings.bootstrap_release)
