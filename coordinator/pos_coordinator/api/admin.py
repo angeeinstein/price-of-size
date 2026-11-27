@@ -1,0 +1,231 @@
+"""Admin API (bootstrap token for now; the control panel will sit on top of this).
+
+Every state-changing action is written to `audit_log`.
+"""
+
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from uuid import UUID
+
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, func, select
+
+from pos_coordinator import budget, queue, runtime_settings
+from pos_coordinator.api.deps import AppSettings, CurrentAdmin, Session
+from pos_coordinator.models import AuditLog, EnrollmentCode, Node, NodeCommand, NodeToken
+from pos_coordinator.security import hash_secret, new_enrollment_code, normalize_code
+from pos_shared.api import NodeLimits, RunState
+
+router = APIRouter(prefix="/api/admin")
+
+
+def _audit(session, admin, action: str, target: str | None = None, **details: Any) -> None:
+    session.add(AuditLog(actor=admin.name, action=action, target=target, details=details))
+
+
+# --- enrollment ----------------------------------------------------------
+
+
+class EnrollmentCodeRequest(BaseModel):
+    label: str | None = None
+    trust_level: str = Field("owned", pattern="^(owned|community)$")
+    ttl_s: int | None = Field(None, ge=60, le=30 * 86400)
+
+
+@router.post("/enrollment-codes", status_code=status.HTTP_201_CREATED)
+async def create_enrollment_code(
+    body: EnrollmentCodeRequest, admin: CurrentAdmin, session: Session, settings: AppSettings
+):
+    code = new_enrollment_code()
+    expires = datetime.now(UTC) + timedelta(seconds=body.ttl_s or settings.enrollment_code_ttl_s)
+    session.add(
+        EnrollmentCode(
+            code_hash=hash_secret(normalize_code(code)),
+            label=body.label,
+            trust_level=body.trust_level,
+            expires_at=expires,
+        )
+    )
+    _audit(session, admin, "enrollment_code.create", body.label, trust_level=body.trust_level)
+    await session.commit()
+    return {"code": code, "expires_at": expires}
+
+
+# --- nodes ---------------------------------------------------------------
+
+
+def _node_view(n: Node, offline_after_s: int) -> dict[str, Any]:
+    online = (
+        n.last_heartbeat_at is not None
+        and (datetime.now(UTC) - n.last_heartbeat_at).total_seconds() < offline_after_s
+    )
+    return {
+        "id": n.id,
+        "name": n.name,
+        "trust_level": n.trust_level,
+        "version": n.version,
+        "capabilities": n.capabilities,
+        "egress_ip": str(n.egress_ip) if n.egress_ip else None,
+        "egress_group": n.egress_group,
+        "actual_state": n.actual_state,
+        "desired_run_state": n.desired_run_state,
+        "desired_target_version": n.desired_target_version,
+        "desired_limits": n.desired_limits,
+        "resources": n.resources,
+        "concurrency": n.concurrency,
+        "last_heartbeat_at": n.last_heartbeat_at,
+        "online": online and n.revoked_at is None,
+        "revoked_at": n.revoked_at,
+    }
+
+
+@router.get("/nodes")
+async def list_nodes(admin: CurrentAdmin, session: Session, settings: AppSettings):
+    nodes = (await session.execute(select(Node).order_by(Node.enrolled_at))).scalars().all()
+    return [_node_view(n, settings.node_offline_after_s) for n in nodes]
+
+
+class DesiredStateUpdate(BaseModel):
+    run_state: RunState | None = None
+    target_version: str | None = None
+    limits: NodeLimits | None = None
+    job_types: list[str] | None = None
+
+
+async def _get_node(session, node_id: UUID) -> Node:
+    node = await session.get(Node, node_id)
+    if node is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such node")
+    return node
+
+
+@router.patch("/nodes/{node_id}")
+async def update_node(
+    node_id: UUID,
+    body: DesiredStateUpdate,
+    admin: CurrentAdmin,
+    session: Session,
+    settings: AppSettings,
+):
+    node = await _get_node(session, node_id)
+    changes = body.model_dump(exclude_unset=True, mode="json")
+    if "run_state" in changes:
+        node.desired_run_state = changes["run_state"]
+    if "target_version" in changes:
+        node.desired_target_version = changes["target_version"]
+    if "limits" in changes:
+        node.desired_limits = changes["limits"]
+    if "job_types" in changes:
+        node.desired_job_types = changes["job_types"]
+    _audit(session, admin, "node.update", str(node_id), **changes)
+    await session.commit()
+    return _node_view(node, settings.node_offline_after_s)
+
+
+@router.post("/nodes/{node_id}/revoke")
+async def revoke_node(node_id: UUID, admin: CurrentAdmin, session: Session):
+    node = await _get_node(session, node_id)
+    node.revoked_at = func.now()
+    await session.execute(delete(NodeToken).where(NodeToken.node_id == node_id))
+    released = await queue.release_node(session, node_id)
+    _audit(session, admin, "node.revoke", str(node_id), released_jobs=released)
+    await session.commit()
+    return {"revoked": True, "released_jobs": released}
+
+
+class CommandRequest(BaseModel):
+    type: str = Field(pattern=r"^[a-z_]{1,40}$")
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/nodes/{node_id}/commands", status_code=status.HTTP_201_CREATED)
+async def send_command(node_id: UUID, body: CommandRequest, admin: CurrentAdmin, session: Session):
+    await _get_node(session, node_id)
+    cmd = NodeCommand(node_id=node_id, type=body.type, args=body.args)
+    session.add(cmd)
+    _audit(session, admin, "node.command", str(node_id), type=body.type)
+    await session.commit()
+    return {"id": cmd.id}
+
+
+@router.get("/nodes/{node_id}/commands")
+async def list_commands(node_id: UUID, admin: CurrentAdmin, session: Session):
+    rows = (
+        await session.execute(
+            select(NodeCommand)
+            .where(NodeCommand.node_id == node_id)
+            .order_by(NodeCommand.id.desc())
+            .limit(100)
+        )
+    ).scalars()
+    return [
+        {
+            "id": c.id,
+            "type": c.type,
+            "args": c.args,
+            "created_at": c.created_at,
+            "delivered_at": c.delivered_at,
+            "acked_at": c.acked_at,
+            "ok": c.ok,
+            "result": c.result,
+        }
+        for c in rows
+    ]
+
+
+# --- jobs ----------------------------------------------------------------
+
+
+class EnqueueJob(BaseModel):
+    type: str = Field(pattern=r"^[a-z_]{1,40}$")
+    payload: dict[str, Any] = Field(default_factory=dict)
+    priority: int = Field(0, ge=-100, le=100)
+    max_attempts: int = Field(5, ge=1, le=50)
+    domain: str | None = None
+
+
+class EnqueueRequest(BaseModel):
+    jobs: list[EnqueueJob] = Field(min_length=1, max_length=10000)
+
+
+@router.post("/jobs", status_code=status.HTTP_201_CREATED)
+async def enqueue_jobs(body: EnqueueRequest, admin: CurrentAdmin, session: Session):
+    ids = await queue.enqueue(session, [queue.NewJob(**j.model_dump()) for j in body.jobs])
+    _audit(session, admin, "jobs.enqueue", None, count=len(ids))
+    await session.commit()
+    return {"ids": ids}
+
+
+@router.get("/jobs/stats")
+async def job_stats(admin: CurrentAdmin, session: Session):
+    return await queue.queue_stats(session)
+
+
+# --- settings and budget ---------------------------------------------------
+
+
+@router.get("/settings")
+async def get_settings(admin: CurrentAdmin, session: Session):
+    return await runtime_settings.get_all(session)
+
+
+@router.put("/settings/{key}")
+async def put_setting(key: str, body: dict[str, Any], admin: CurrentAdmin, session: Session):
+    if "value" not in body:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, 'body must be {"value": ...}')
+    try:
+        await runtime_settings.put(session, key, body["value"], admin.name)
+    except runtime_settings.UnknownSetting as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"unknown setting {key}") from e
+    except runtime_settings.InvalidSetting as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
+    _audit(session, admin, "setting.put", key, value=body["value"])
+    await session.commit()
+    return {"key": key, "value": body["value"]}
+
+
+@router.get("/budget")
+async def get_budget(admin: CurrentAdmin, session: Session):
+    s = await budget.status(session)
+    return {**s.__dict__, "ahead_of_pace": s.ahead_of_pace}

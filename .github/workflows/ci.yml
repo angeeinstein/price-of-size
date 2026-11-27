@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: pos
+          POSTGRES_PASSWORD: pos
+          POSTGRES_DB: pos_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pos" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      POS_TEST_DATABASE_URL: postgresql+psycopg://pos:pos@localhost:5432/pos_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - name: Migrations match models
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+          uv run alembic downgrade base
+        env:
+          POS_DATABASE_URL: postgresql+psycopg://pos:pos@localhost:5432/pos_test
+      - run: uv run pytest -q

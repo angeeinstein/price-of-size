@@ -1,0 +1,35 @@
+[project]
+name = "price-of-size"
+version = "0.1.0"
+description = "The Price of Size: data collection system (workspace root)"
+requires-python = ">=3.12"
+dependencies = ["pos-shared", "pos-coordinator", "pos-worker"]
+
+[tool.uv.workspace]
+members = ["shared", "coordinator", "worker"]
+
+[tool.uv.sources]
+pos-shared = { workspace = true }
+pos-coordinator = { workspace = true }
+pos-worker = { workspace = true }
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pos_shared", "pos_coordinator", "pos_worker"]
+
+[tool.ruff.lint.per-file-ignores]
+"migrations/versions/*" = ["E501", "UP", "I"]
