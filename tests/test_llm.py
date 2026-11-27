@@ -5,7 +5,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 from sqlalchemy import select
 
 from pos_coordinator import runtime_settings
@@ -455,3 +455,30 @@ async def test_an_interrupted_batch_submission_keeps_its_estimate(sessionmaker):
         assert (await s.get(LlmBatch, rows[1].id)).status == "failed"
     (row,) = await _ledger(sessionmaker)
     assert row.batch and row.cost_usd == rows[1].estimated_cost_usd
+
+
+def test_the_estimate_counts_the_answer_schema():
+    class Wide(BaseModel):
+        model_config = {"json_schema_extra": {"description": "x" * 30_000}}
+        a: str
+
+    small = service.estimate_cost("claude-haiku-5-5", _task(), batch=False)
+    task = Task(stage="test", system="Classify the product.", prompt="Regal 80 x 40 cm",
+                schema=Wide)  # fmt: skip
+    # 30,000 more characters of schema: about 10,000 more input tokens
+    assert service.estimate_cost("claude-haiku-5-5", task, batch=False) - small >= Decimal("0.0009")
+
+
+async def test_the_application_key_is_used(settings, monkeypatch):
+    from pos_coordinator.app import create_app
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("POS_ANTHROPIC_API_KEY", raising=False)
+    configured = settings.model_copy(update={"anthropic_api_key": SecretStr("sk-ant-test")})
+    app = create_app(configured, run_maintenance=False)
+    async with app.router.lifespan_context(app):
+        assert app.state.llm.available()
+        assert app.state.llm.client.api_key == "sk-ant-test"
+    app = create_app(settings, run_maintenance=False)
+    async with app.router.lifespan_context(app):
+        assert not app.state.llm.available()

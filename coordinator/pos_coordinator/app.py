@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import functools
 import logging
 from contextlib import asynccontextmanager
 
@@ -16,7 +17,7 @@ from pos_coordinator.config import Settings, get_settings
 from pos_coordinator.db import make_engine, make_sessionmaker
 from pos_coordinator.derive import fx
 from pos_coordinator.derive import stage as derive_stage
-from pos_coordinator.llm.service import LlmService
+from pos_coordinator.llm.service import LlmService, default_client
 from pos_coordinator.panel import api as panel_api
 from pos_coordinator.panel import static as panel_static
 from pos_coordinator.partitions import PartitionCache
@@ -71,7 +72,9 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
         )
         app.state.engine = engine
         app.state.sessionmaker = make_sessionmaker(engine)
-        app.state.llm = LlmService(app.state.sessionmaker)
+        app.state.llm = LlmService(
+            app.state.sessionmaker, functools.partial(default_client, settings)
+        )
         await rawstore.bind_to_database(app.state.sessionmaker, app.state.rawstore)
         tasks: list[asyncio.Task] = []
         if run_maintenance:

@@ -48,6 +48,9 @@ FALLBACK_MODELS = {"claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-2"}
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_BATCH_REQUESTS = 5_000
 CHARS_PER_TOKEN = 3.0  # conservative, for estimates before a call
+# what the API adds to a request with structured output (its own instructions),
+# generously: estimates must not fall short
+REQUEST_OVERHEAD_TOKENS = 500
 # Advisory lock that serialises budget admission (any coordinator): b"pos_llm".
 BUDGET_LOCK = 0x706F735F6C6C6D
 # Batch rows that still hold a reservation: being submitted, or running remotely.
@@ -188,14 +191,22 @@ def _params(model: str, task: Task) -> dict[str, Any]:
 
 
 def estimate_cost(model: str, task: Task, batch: bool) -> Decimal:
-    tokens_in = int((len(task.system) + len(task.prompt)) / CHARS_PER_TOKEN) + 50
+    """An upper estimate before the call: everything sent (instructions, input, the
+    answer schema, the API's own instructions for structured output) and the full
+    `max_tokens` answered."""
+    chars = len(task.system) + len(task.prompt) + len(json.dumps(strict_schema(task.schema)))
+    tokens_in = int(chars / CHARS_PER_TOKEN) + REQUEST_OVERHEAD_TOKENS
     return pricing.cost_usd(model, tokens_in, task.max_tokens, batch=batch)
 
 
-def default_client() -> Any:
-    from pos_coordinator.config import get_settings
+def default_client(settings: Any = None) -> Any:
+    """A client with the key from `settings` (the application's), else the
+    process settings, else ANTHROPIC_API_KEY."""
+    if settings is None:
+        from pos_coordinator.config import get_settings
 
-    key = get_settings().anthropic_api_key
+        settings = get_settings()
+    key = settings.anthropic_api_key
     secret = key.get_secret_value() if key is not None else os.environ.get("ANTHROPIC_API_KEY")
     if not secret:
         raise LlmUnavailable("no Anthropic API key (POS_ANTHROPIC_API_KEY)")
