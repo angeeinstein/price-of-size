@@ -3,7 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     reaper_interval_s: float = 15.0
     derive_interval_s: float = 10.0
     node_offline_after_s: int = 90
+    # The Claude API key (only the coordinator calls the API). Unset: LLM stages idle.
+    anthropic_api_key: SecretStr | None = None
+    llm_poll_interval_s: float = 60.0
 
 
 @lru_cache

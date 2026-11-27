@@ -469,7 +469,12 @@ install_coordinator() {
   local admin_token
   admin_token=$(env_get "$env_file" POS_ADMIN_TOKEN)
   [[ -n "$admin_token" ]] || admin_token=$(random_secret)
-  write_env "$env_file" "POS_DATABASE_URL=$DB_URL" "POS_ADMIN_TOKEN=$admin_token"
+  # Added by hand (docs/operations.md, "LLM"): kept across re-installs, never asked for
+  # on the terminal.
+  local anthropic_key
+  anthropic_key=$(env_get "$env_file" POS_ANTHROPIC_API_KEY)
+  write_env "$env_file" "POS_DATABASE_URL=$DB_URL" "POS_ADMIN_TOKEN=$admin_token" \
+    "POS_ANTHROPIC_API_KEY=$anthropic_key"
   # Separate subdirectories: pre-migration dumps belong to the coordinator's service
   # user (10001), nightly database dumps to postgres (all-in-one shares BACKUP_DIR).
   local coord_backups=$BACKUP_DIR/coordinator

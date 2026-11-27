@@ -170,4 +170,6 @@ pos-coordinator fx-refresh        # ECB reference rates (also fetched daily)
 - [ ] Tier 2 (microdata/RDFa), tier 4 (LLM extraction within budget)
 - [x] Target taxonomy: Google Product Taxonomy (en, de) + extension (`classify/taxonomy.py`)
 - [x] Classification tier 1: shop category mappings (`classify/shopmap.py`, panel: Categories)
+- [x] LLM service (`llm/`): budget per priority, ledger, cache by input, strict JSON,
+      retry once then flag, refusals, Message Batches with stage handlers
 - [ ] LLM proposals for mappings; embeddings and classifier; per-category size scalar
