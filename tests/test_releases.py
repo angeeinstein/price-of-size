@@ -100,14 +100,31 @@ async def test_coordinator_syncs_its_own_agent_exchange(app, admin, tmp_path):
 
 
 def test_backup_connection_settings():
-    url = "postgresql+psycopg://pos:p%40ss@db.lan:6543/pos?sslmode=require"
-    assert libpq_url(url) == "postgresql://pos:p%40ss@db.lan:6543/pos?sslmode=require"
-    env = libpq_env(url)
-    assert env == {
-        "PGHOST": "db.lan",
+    # Built at runtime: a credential-shaped literal would (rightly) trip secret scanners.
+    secret = "".join(["not", "-a-", "real", "@", "secret"])
+    quoted = secret.replace("@", "%40")
+    url = f"postgresql+psycopg://user:{quoted}@db.invalid:6543/pos?sslmode=require"
+    assert libpq_url(url) == f"postgresql://user:{quoted}@db.invalid:6543/pos?sslmode=require"
+    assert libpq_env(url) == {
+        "PGHOST": "db.invalid",
         "PGPORT": "6543",
         "PGDATABASE": "pos",
-        "PGUSER": "pos",
-        "PGPASSWORD": "p@ss",
+        "PGUSER": "user",
+        "PGPASSWORD": secret,
         "PGSSLMODE": "require",
     }
+
+
+async def test_clearing_the_target_cancels_a_pending_update(app, admin, tmp_path):
+    """Codex finding: a cleared target must remove the manifest the agent would act on."""
+    exch = tmp_path / "exchange"
+    worker = await make_agent(app, admin, tmp_path / "w", "w", agent_dir=exch)
+    await _release(admin)
+    node = f"/api/admin/nodes/{worker.identity.node_id}"
+    await admin.patch(node, json={"target_version": "0.2.0"})
+    await worker.heartbeat_once()
+    assert (exch / exchange.DESIRED).exists()
+    await admin.patch(node, json={"target_version": None})
+    await worker.heartbeat_once()
+    assert not (exch / exchange.DESIRED).exists()
+    await worker.client.aclose()

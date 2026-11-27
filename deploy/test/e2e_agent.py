@@ -335,6 +335,14 @@ def main() -> int:
     log(f"coordinator switched blue-green: {requests_[0]} probes, {len(errors)} errors")
     assert not errors, errors[:5]
     assert list(backups.glob("pos-*-before-0.2.0.dump")), "no pre-migration backup"
+    bind = sh(
+        "docker",
+        "inspect",
+        "-f",
+        '{{(index (index .HostConfig.PortBindings "80/tcp") 0).HostIp}}',
+        "pos-caddy",
+    )
+    assert bind == "127.0.0.1", bind
 
     wait(
         "coordinator agent on 0.2.0",

@@ -59,7 +59,9 @@ docker run -d --name pos-worker --restart unless-stopped --init --shm-size 1g \
 
 ### Remote access (Cloudflare Tunnel)
 
-Caddy listens on `127.0.0.1:<http-port>` of the coordinator host. Publish it
+Caddy listens on `127.0.0.1:<http-port>` of the coordinator host, loopback
+only: publishing it on other interfaces would bypass Cloudflare Access, and
+direct callers could set `CF-Connecting-IP` themselves. Publish it
 with a Cloudflare Tunnel (`cloudflared tunnel ... --url http://localhost:8080`)
 and protect the hostname with Cloudflare Access. Nodes send a Cloudflare
 Access service token (`--cf-client-id/--cf-client-secret`) in addition to
@@ -128,12 +130,12 @@ simple-mode worker). In agent mode the coordinator steers versions.
 ## Backups
 
 * **Database role:** `pos-db-backup.timer` dumps the database nightly
-  (custom format, newest 14 kept) to the backup directory;
+  (custom format, newest 14 kept) to `<backup-dir>/database`;
   `pos-db-restore-test.timer` restores the newest dump into a scratch database
   every month. Check with `systemctl list-timers 'pos-*'` and
   `journalctl -u pos-db-backup`.
 * **Before every coordinator migration** the agent runs `pos-coordinator backup`
-  (newest 20 kept).
+  into `<backup-dir>/coordinator` (newest 20 kept).
 * **Also back up:** the `pos-coordinator-data` volume (signing key), `/etc/pos`,
   the raw store and HTML archive on the NAS, and Proxmox snapshots of the LXCs.
 

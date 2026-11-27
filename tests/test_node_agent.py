@@ -401,3 +401,23 @@ async def test_worker_role_does_not_pull_coordinator_only_images(env, key):
     st = await m.reconcile_once()
     assert st.active == "b" and st.update_state == "idle"
     assert ("pull", CADDY) not in docker.events
+
+
+async def test_caddy_publishes_on_loopback_and_is_fixed_if_not(env, key, tmp_path):
+    (tmp_path / "etc" / "coordinator.env").write_text("POS_DATABASE_URL=x\n")
+    exchange.write_json(
+        env.bootstrap_release, {"version": "0.1.0", "images": {"coordinator": C1, "caddy": CADDY}}
+    )
+    settings = env.model_copy(
+        update={"role": "coordinator", "service_env_file": tmp_path / "etc" / "coordinator.env"}
+    )
+    docker = FakeDocker()
+    m, _ = make_manager(settings, docker)
+    await m.reconcile_once()
+    binding = docker.containers["pos-caddy"]["HostConfig"]["PortBindings"]["80/tcp"][0]
+    assert binding == {"HostIp": "127.0.0.1", "HostPort": "8080"}
+    # an older Caddy published on every interface is replaced
+    docker.containers["pos-caddy"]["HostConfig"]["PortBindings"]["80/tcp"][0] = {"HostPort": "8080"}
+    await m.reconcile_once()
+    fixed = docker.containers["pos-caddy"]["HostConfig"]["PortBindings"]["80/tcp"][0]
+    assert fixed["HostIp"] == "127.0.0.1"

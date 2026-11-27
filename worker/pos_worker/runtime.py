@@ -254,9 +254,14 @@ class Worker:
         The agent verifies the signature itself against its own pinned key; the
         check here only avoids handing over something that will be refused.
         """
-        if target is None or self.agent_dir is None:
+        if self.agent_dir is None:
             return
         path = self.agent_dir / exchange.DESIRED
+        if target is None:
+            # A cleared target cancels a pending update: the agent reads this file on
+            # every round, so it must not outlive the coordinator's decision.
+            path.unlink(missing_ok=True)
+            return
         current = exchange.read_json(path)
         if isinstance(current, dict) and current.get("manifest", {}).get("version") == target:
             return

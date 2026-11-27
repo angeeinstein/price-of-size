@@ -33,6 +33,9 @@ $I --role coordinator --non-interactive --release-file "$RELEASE_FILE" --db-url 
   --raw-store "$DATA/raw" --backup-dir "$DATA/backups" --http-port "$PORT"
 curl -fsS "http://127.0.0.1:$PORT/healthz" | jq -e .ok
 [[ "$(stat -c %u "$DATA/raw")" == 10001 ]] || fail "raw store not owned by the service user"
+[[ "$(stat -c %u "$DATA/backups/coordinator")" == 10001 ]] || fail "coordinator backups not owned by 10001"
+bind=$(docker inspect -f '{{(index (index .HostConfig.PortBindings "80/tcp") 0).HostIp}}' pos-caddy)
+[[ "$bind" == 127.0.0.1 ]] || fail "Caddy must publish on loopback only (got $bind)"
 
 step "node role (agent mode)"
 CODE=$(admin -X POST -H 'content-type: application/json' -d '{"label":"t"}' \

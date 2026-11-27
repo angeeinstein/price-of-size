@@ -442,8 +442,12 @@ install_coordinator() {
   [[ -n "$admin_token" ]] || admin_token=$(random_secret)
   write_env "$env_file" "POS_DATABASE_URL=$DB_URL" "POS_ADMIN_TOKEN=$admin_token"
   local env_changed=$ENV_CHANGED
-  install -d -o 10001 -g 10001 -m 0750 "$RAW_STORE" "$BACKUP_DIR"
-  chown 10001:10001 "$RAW_STORE" "$BACKUP_DIR"  # an existing (NAS) directory too
+  # Separate subdirectories: pre-migration dumps belong to the coordinator's service
+  # user (10001), nightly database dumps to postgres (all-in-one shares BACKUP_DIR).
+  local coord_backups=$BACKUP_DIR/coordinator
+  install -d -m 0755 "$BACKUP_DIR"
+  install -d -o 10001 -g 10001 -m 0750 "$RAW_STORE" "$coord_backups"
+  chown 10001:10001 "$RAW_STORE" "$coord_backups"  # an existing (NAS) directory too
   docker network create "$NET" >/dev/null 2>&1 || true
   for v in pos-coordinator-data pos-coordinator-exchange pos-agent-coordinator-data; do
     docker volume create "$v" >/dev/null
@@ -462,7 +466,7 @@ install_coordinator() {
     -e POS_AGENT_EXCHANGE_VOLUME=pos-coordinator-exchange \
     -e POS_AGENT_SERVICE_ENV_FILE=/etc/pos/coordinator.env \
     -e "POS_AGENT_HOST_RAW_STORE=$RAW_STORE" \
-    -e "POS_AGENT_HOST_BACKUP_DIR=$BACKUP_DIR" \
+    -e "POS_AGENT_HOST_BACKUP_DIR=$coord_backups" \
     -e "POS_AGENT_HTTP_PORT=$HTTP_PORT" \
     ${REG_USER:+-e "POS_AGENT_REGISTRY_USERNAME=$REG_USER" -e "POS_AGENT_REGISTRY_PASSWORD=$REG_TOKEN"} --
   [[ $env_changed -eq 1 ]] && restart_managed coordinator
@@ -565,12 +569,14 @@ DB_PASSWORD=""
 install_db_backups() {
   local v=$1
   ask BACKUP_DIR "Backup directory" "/srv/pos/backups"
-  install -d -o postgres -g postgres -m 0750 "$BACKUP_DIR"
+  local db_backups=$BACKUP_DIR/database
+  install -d -m 0755 "$BACKUP_DIR"
+  install -d -o postgres -g postgres -m 0750 "$db_backups"
   cat >/usr/local/sbin/pos-db-backup <<EOF
 #!/bin/bash
 # Nightly pg_dump of the pos database (custom format); keeps the newest 14.
 set -euo pipefail
-dir="$BACKUP_DIR"
+dir="$db_backups"
 f="\$dir/pos-daily-\$(date -u +%Y%m%dT%H%M%SZ).dump"
 pg_dump --format=custom --compress=6 --file="\$f.partial" pos
 mv "\$f.partial" "\$f"
@@ -616,7 +622,7 @@ Description=The Price of Size: monthly backup restore test
 [Service]
 Type=oneshot
 User=postgres
-ExecStart=/usr/local/sbin/pos-db-restore-test $BACKUP_DIR
+ExecStart=/usr/local/sbin/pos-db-restore-test $db_backups
 EOF
   cat >/etc/systemd/system/pos-db-restore-test.timer <<'EOF'
 [Unit]
@@ -630,7 +636,7 @@ EOF
   if command -v systemctl >/dev/null && [[ -d /run/systemd/system ]]; then
     systemctl daemon-reload
     systemctl enable --now pos-db-backup.timer pos-db-restore-test.timer >/dev/null
-    ok "nightly backups to $BACKUP_DIR, monthly restore test"
+    ok "nightly backups to $db_backups, monthly restore test"
   else
     warn "no systemd: schedule /usr/local/sbin/pos-db-backup yourself"
   fi

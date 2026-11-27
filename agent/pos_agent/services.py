@@ -327,9 +327,19 @@ class CoordinatorService(Service):
             return
         info = await self.docker.inspect(name)
         config_json = json.dumps(self.caddy_config(), sort_keys=True)
+        bindings = {
+            "80/tcp": [
+                {"HostIp": self.settings.http_bind, "HostPort": str(self.settings.http_port)}
+            ]
+        }
         if info is not None:
             env = info["Config"].get("Env") or []
-            if info["Config"]["Image"] == image and f"CADDY_CONFIG_JSON={config_json}" in env:
+            current = (info.get("HostConfig") or {}).get("PortBindings")
+            if (
+                info["Config"]["Image"] == image
+                and f"CADDY_CONFIG_JSON={config_json}" in env
+                and current == bindings
+            ):
                 if not info["State"].get("Running"):
                     await self.docker.start(name)
                 return
@@ -351,7 +361,7 @@ class CoordinatorService(Service):
                 "ExposedPorts": {"80/tcp": {}},
                 "HostConfig": {
                     "NetworkMode": self.settings.network,
-                    "PortBindings": {"80/tcp": [{"HostPort": str(self.settings.http_port)}]},
+                    "PortBindings": bindings,
                     "RestartPolicy": {"Name": "unless-stopped"},
                     "LogConfig": LOG_CONFIG,
                 },

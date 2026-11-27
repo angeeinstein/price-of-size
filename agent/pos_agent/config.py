@@ -43,6 +43,10 @@ class AgentSettings(BaseSettings):
     host_raw_store: str | None = None  # host path (NAS mount) for the raw store
     host_backup_dir: str | None = None  # host path for pre-migration backups
     http_port: int = 8080  # host port Caddy publishes (cloudflared points here)
+    # Loopback only: everything external goes through Cloudflare Tunnel + Access.
+    # Publishing on other interfaces bypasses Access, and direct callers could set
+    # CF-Connecting-IP themselves (the coordinator trusts it behind Caddy).
+    http_bind: str = "127.0.0.1"
     switch_grace_s: float = 10.0
 
     # Optional registry credentials (private GHCR packages)
