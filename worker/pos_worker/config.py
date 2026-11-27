@@ -33,5 +33,6 @@ class WorkerSettings(BaseSettings):
     flush_interval_s: float = 2.0
     result_batch_size: int = 200
     lease_poll_s: float = 2.0
+    lease_check_s: float = 5.0
     request_timeout_s: float = 30.0
     cgroup_root: Path = Path("/sys/fs/cgroup")

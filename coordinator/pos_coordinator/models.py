@@ -211,8 +211,13 @@ class Job(Base):
     status: Mapped[str] = mapped_column(Text, server_default="queued")
     priority: Mapped[int] = mapped_column(SmallInteger, server_default="0")
     attempts: Mapped[int] = mapped_column(SmallInteger, server_default="0")
+    # Attempt whose result was committed (None: no result stored yet). Lets the queue
+    # tell a replayed result from a late one, see queue.complete().
+    result_attempt: Mapped[int | None] = mapped_column(SmallInteger)
     max_attempts: Mapped[int] = mapped_column(SmallInteger, server_default="5")
     not_before: Mapped[datetime] = created()
+    # Holder of the latest attempt. Kept when a lease expires, so a late result
+    # from that holder can still be accepted until the job is leased again.
     node_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("node.id"))
     lease_expires_at: Mapped[datetime | None]
     domain: Mapped[str | None] = mapped_column(Text)

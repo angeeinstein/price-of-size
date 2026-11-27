@@ -56,7 +56,7 @@ async def test_results_survive_coordinator_outage(app, admin, tmp_path, monkeypa
     agent = await make_agent(app, admin, tmp_path / "a", "a")
     await admin.post("/api/admin/jobs", json={"jobs": [{"type": "echo", "payload": {"i": 1}}]})
     assert await agent.lease_once() == 1
-    await asyncio.gather(*agent.active.values())
+    await asyncio.gather(*(a.task for a in agent.active.values()))
     assert agent.spool.result_count() == 1
 
     async def down(*a, **kw):
@@ -161,3 +161,36 @@ async def _ge(counter, n):
 
 async def _b_has_work(b):
     return bool(b.active) or b.spool.result_count() > 0
+
+
+async def test_leases_renewed_independently_of_heartbeat(app, admin, tmp_path, sessionmaker):
+    """Codex finding: with a heartbeat interval longer than the lease, leases of a
+    long-running job must still be renewed."""
+    await admin.put("/api/admin/settings/heartbeat_interval_s", json={"value": 600})
+    await admin.put("/api/admin/settings/job_lease_s", json={"value": 30})
+    agent = await make_agent(app, admin, tmp_path / "a", "a")
+    await admin.post(
+        "/api/admin/jobs", json={"jobs": [{"type": "sleep", "payload": {"seconds": 60}}]}
+    )
+    assert await agent.lease_once() == 1
+    (entry,) = agent.active.values()
+    assert entry.job.lease_seconds == 30
+
+    assert await agent.renew_leases_once() == 0  # not due yet
+    async with sessionmaker() as s:
+        before = (await s.execute(select(Job.lease_expires_at))).scalar_one()
+    assert await agent.renew_leases_once(now=entry.renew_at + 0.01) == 1
+    async with sessionmaker() as s:
+        after = (await s.execute(select(Job.lease_expires_at))).scalar_one()
+    assert after > before
+
+    # The coordinator gives the job away (e.g. node revoked and re-enrolled elsewhere):
+    async with sessionmaker() as s:
+        await s.execute(update(Job).values(status="queued", node_id=None))
+        await s.commit()
+    task = entry.task
+    await agent.renew_leases_once(now=entry.renew_at + 1)
+    assert not agent.active
+    await asyncio.sleep(0)
+    assert task.cancelled() or task.cancelling()
+    await agent.client.aclose()

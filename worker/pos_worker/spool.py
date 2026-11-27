@@ -20,8 +20,11 @@ class Spool:
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(
             """
+            -- One pending result per job: a newer attempt replaces an older one,
+            -- which the coordinator would reject as superseded anyway.
             CREATE TABLE IF NOT EXISTS result (
                 job_id TEXT PRIMARY KEY,
+                attempt INTEGER NOT NULL,
                 body TEXT NOT NULL,
                 created_at REAL NOT NULL DEFAULT (unixepoch('subsec'))
             );
@@ -36,11 +39,11 @@ class Spool:
 
     # results -------------------------------------------------------------
 
-    def add_result(self, job_id: str, body: dict) -> None:
+    def add_result(self, job_id: str, attempt: int, body: dict) -> None:
         with self._lock:
             self._db.execute(
-                "INSERT OR REPLACE INTO result (job_id, body) VALUES (?, ?)",
-                (job_id, json.dumps(body)),
+                "INSERT OR REPLACE INTO result (job_id, attempt, body) VALUES (?, ?, ?)",
+                (job_id, attempt, json.dumps(body)),
             )
 
     def peek_results(self, limit: int) -> list[dict]:
@@ -50,11 +53,12 @@ class Spool:
             ).fetchall()
         return [json.loads(r[0]) for r in rows]
 
-    def remove_results(self, job_ids: list[str]) -> None:
-        if not job_ids:
+    def remove_results(self, sent: list[tuple[str, int]]) -> None:
+        """Delete results by (job_id, attempt), leaving newer attempts in place."""
+        if not sent:
             return
         with self._lock:
-            self._db.executemany("DELETE FROM result WHERE job_id = ?", [(j,) for j in job_ids])
+            self._db.executemany("DELETE FROM result WHERE job_id = ? AND attempt = ?", sent)
 
     def result_count(self) -> int:
         with self._lock:

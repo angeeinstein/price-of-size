@@ -10,8 +10,10 @@ import collections
 import contextlib
 import logging
 import socket
+import time
 import traceback
-from typing import Any
+import uuid
+from dataclasses import dataclass
 
 import httpx
 
@@ -26,6 +28,18 @@ from pos_worker.spool import Spool
 log = logging.getLogger(__name__)
 
 EXIT_RESTART = 75  # tells the supervisor (Docker restart policy, systemd) to start us again
+
+
+@dataclass
+class ActiveJob:
+    job: api.LeasedJob
+    task: asyncio.Task
+    renew_at: float  # time.monotonic() at which the lease should be renewed
+
+
+def _renew_after(lease_seconds: float) -> float:
+    """Renew once a third of the lease has passed: two more tries before it runs out."""
+    return max(lease_seconds / 3, 1.0)
 
 
 class RingLogHandler(logging.Handler):
@@ -63,7 +77,7 @@ class Agent:
         self.heartbeat_interval = 15.0
         self.limits = cgroup.read_limits(settings.cgroup_root, settings.state_dir)
         self.slots = self._compute_slots()
-        self.active: dict[Any, asyncio.Task] = {}
+        self.active: dict[uuid.UUID, ActiveJob] = {}
         self.exit_code = 0
         self._stop = asyncio.Event()
         self._capacity_freed = asyncio.Event()
@@ -108,15 +122,17 @@ class Agent:
             asyncio.create_task(self._resource_loop(), name="resources"),
             asyncio.create_task(self._job_loop(), name="jobs"),
             asyncio.create_task(self._flush_loop(), name="flush"),
+            asyncio.create_task(self._lease_renewal_loop(), name="lease-renewal"),
         ]
         try:
             await self._stop.wait()
         finally:
             # Graceful drain: no new leases, let running jobs finish, flush what we can.
+            # Lease renewal keeps running while jobs drain.
             if self.active:
-                await asyncio.wait(list(self.active.values()), timeout=drain_timeout_s)
-            for t in self.active.values():
-                t.cancel()
+                await asyncio.wait([a.task for a in self.active.values()], timeout=drain_timeout_s)
+            for a in self.active.values():
+                a.task.cancel()
             for t in loops:
                 t.cancel()
             await asyncio.gather(*loops, return_exceptions=True)
@@ -195,13 +211,6 @@ class Agent:
             self._capacity_freed.set()
         for cmd in resp.commands:
             await self._run_command(cmd)
-        if self.active:
-            ext = await self.client.extend(list(self.active))
-            for job_id in ext.lost:
-                task = self.active.pop(job_id, None)
-                if task is not None:
-                    log.warning("lost lease on job %s; cancelling", job_id)
-                    task.cancel()
         return resp
 
     async def _heartbeat_loop(self) -> None:
@@ -261,9 +270,12 @@ class Agent:
         free, types = self._free_slots(), self._job_types()
         if free <= 0 or not types:
             return 0
+        requested_at = time.monotonic()  # conservative: the lease started no earlier
         jobs = await self.client.lease(types, free)
         for job in jobs:
-            self.active[job.id] = asyncio.create_task(self._execute(job), name=f"job-{job.id}")
+            task = asyncio.create_task(self._execute(job), name=f"job-{job.id}")
+            renew_at = requested_at + _renew_after(job.lease_seconds)
+            self.active[job.id] = ActiveJob(job=job, task=task, renew_at=renew_at)
         return len(jobs)
 
     async def _job_loop(self) -> None:
@@ -291,15 +303,54 @@ class Agent:
         except Exception as e:
             result = api.JobResult(
                 job_id=job.id,
+                attempt=job.attempt,
                 outcome=api.JobOutcome.failed,
                 error=f"{e!r}\n{traceback.format_exc()}"[-20000:],
                 retryable=True,
             )
-        if job.id in self.active:  # not cancelled because the lease was lost
-            self.spool.add_result(str(job.id), result.model_dump(mode="json"))
-            self.active.pop(job.id, None)
+        entry = self.active.get(job.id)
+        if entry is not None and entry.job.attempt == job.attempt:
+            # Spooled even if a renewal failed: the coordinator still accepts a late
+            # result for the current attempt until the job is leased again.
+            self.spool.add_result(str(job.id), job.attempt, result.model_dump(mode="json"))
+            del self.active[job.id]
             self._result_ready.set()
             self._capacity_freed.set()
+
+    # --- lease renewal ---------------------------------------------------------
+
+    async def renew_leases_once(self, now: float | None = None) -> int:
+        """Renew the leases that are due. Returns how many were renewed."""
+        now = time.monotonic() if now is None else now
+        due = [a for a in self.active.values() if a.renew_at <= now]
+        if not due:
+            return 0
+        started = time.monotonic()
+        resp = await self.client.extend(
+            [api.LeaseRef(job_id=a.job.id, attempt=a.job.attempt) for a in due]
+        )
+        renewed = set(resp.extended)
+        for a in due:
+            if a.job.id in renewed:
+                a.renew_at = started + _renew_after(resp.lease_seconds)
+        for job_id in resp.lost:
+            entry = self.active.pop(job_id, None)
+            if entry is not None:
+                log.warning(
+                    "lost lease on job %s (attempt %s); cancelling", job_id, entry.job.attempt
+                )
+                entry.task.cancel()
+                self._capacity_freed.set()
+        return len(renewed)
+
+    async def _lease_renewal_loop(self) -> None:
+        """Independent of the heartbeat, so no heartbeat interval can starve leases."""
+        while True:
+            try:
+                await self.renew_leases_once()
+            except (CoordinatorError, httpx.HTTPError) as e:
+                log.warning("lease renewal failed (will retry): %s", e)
+            await asyncio.sleep(self.settings.lease_check_s)
 
     # --- results -------------------------------------------------------------
 
@@ -307,10 +358,13 @@ class Agent:
         sent = 0
         while batch := self.spool.peek_results(self.settings.result_batch_size):
             ack = await self.client.push_results(batch)
+            sent_attempts = {r["job_id"]: r["attempt"] for r in batch}
             done = [str(i) for i in ack.accepted] + list(ack.rejected)
             for job_id, reason in ack.rejected.items():
                 log.warning("result for job %s rejected: %s", job_id, reason)
-            self.spool.remove_results(done)
+            # Remove exactly what was sent: a newer attempt's result for the same job,
+            # spooled while this batch was in flight, must survive.
+            self.spool.remove_results([(j, sent_attempts[j]) for j in done if j in sent_attempts])
             sent += len(done)
             if not done:
                 break

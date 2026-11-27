@@ -131,21 +131,28 @@ class LeasedJob(Strict):
     id: UUID
     type: str
     payload: dict[str, Any]
-    attempt: int
+    attempt: int = Field(ge=1, description="Lease generation; results must quote it")
     lease_expires_at: datetime
+    lease_seconds: int = Field(description="Lease duration; renew well before it runs out")
 
 
 class LeaseResponse(Strict):
     jobs: list[LeasedJob]
 
 
+class LeaseRef(Strict):
+    job_id: UUID
+    attempt: int = Field(ge=1)
+
+
 class ExtendRequest(Strict):
-    job_ids: list[UUID] = Field(max_length=500)
+    leases: list[LeaseRef] = Field(max_length=500)
 
 
 class ExtendResponse(Strict):
     extended: list[UUID]
     lost: list[UUID] = Field(description="Jobs whose lease this node no longer holds")
+    lease_seconds: int
 
 
 class JobOutcome(StrEnum):
@@ -173,6 +180,7 @@ class FetchRecord(Strict):
 
 class JobResult(Strict):
     job_id: UUID
+    attempt: int = Field(ge=1, description="The lease attempt this result belongs to")
     outcome: JobOutcome
     output: dict[str, Any] | None = None
     error: str | None = Field(None, max_length=20000)

@@ -29,6 +29,7 @@ async def lease(body: api.LeaseRequest, node: CurrentNode, session: Session):
                 payload=j.payload,
                 attempt=j.attempts,
                 lease_expires_at=j.lease_expires_at,
+                lease_seconds=lease_s,
             )
             for j in jobs
         ]
@@ -38,10 +39,15 @@ async def lease(body: api.LeaseRequest, node: CurrentNode, session: Session):
 @router.post("/extend", response_model=api.ExtendResponse)
 async def extend(body: api.ExtendRequest, node: CurrentNode, session: Session):
     lease_s = await runtime_settings.get(session, "job_lease_s")
-    extended = await queue.extend(session, node.id, body.job_ids, lease_s)
+    leases = [(ref.job_id, ref.attempt) for ref in body.leases]
+    extended = await queue.extend(session, node.id, leases, lease_s)
     await session.commit()
     kept = set(extended)
-    return api.ExtendResponse(extended=extended, lost=[j for j in body.job_ids if j not in kept])
+    return api.ExtendResponse(
+        extended=extended,
+        lost=[ref.job_id for ref in body.leases if ref.job_id not in kept],
+        lease_seconds=lease_s,
+    )
 
 
 @router.post("/results", response_model=api.ResultAck)

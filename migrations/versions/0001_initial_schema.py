@@ -344,6 +344,7 @@ def upgrade() -> None:
         sa.Column("status", sa.Text(), server_default="queued", nullable=False),
         sa.Column("priority", sa.SmallInteger(), server_default="0", nullable=False),
         sa.Column("attempts", sa.SmallInteger(), server_default="0", nullable=False),
+        sa.Column("result_attempt", sa.SmallInteger(), nullable=True),
         sa.Column("max_attempts", sa.SmallInteger(), server_default="5", nullable=False),
         sa.Column(
             "not_before",

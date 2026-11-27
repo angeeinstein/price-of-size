@@ -35,7 +35,9 @@ def handler(job_type: str):
 
 
 def done(job: api.LeasedJob, output: dict[str, Any] | None = None, **kw) -> api.JobResult:
-    return api.JobResult(job_id=job.id, outcome=api.JobOutcome.done, output=output, **kw)
+    return api.JobResult(
+        job_id=job.id, attempt=job.attempt, outcome=api.JobOutcome.done, output=output, **kw
+    )
 
 
 @handler("noop")
@@ -59,6 +61,7 @@ async def echo(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
 async def fail(job: api.LeasedJob, ctx: JobContext) -> api.JobResult:
     return api.JobResult(
         job_id=job.id,
+        attempt=job.attempt,
         outcome=api.JobOutcome.failed,
         error=str(job.payload.get("error", "requested failure")),
         retryable=bool(job.payload.get("retryable", True)),
