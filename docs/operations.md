@@ -337,6 +337,18 @@ currency that arrives before its rate is stored with `no_fx_rate` and converted
 (and its product's price recomputed) once the rate is there;
 `pos-coordinator fx-refresh` does both at once.
 
+### LLM extraction (tier 4)
+
+A page with a title but no price, or no sizes, after the other tiers is read by
+the LLM: the default model in batches, at most `llm_extraction_per_round` (500)
+pages per batch, switch `llm_extraction`. The model gets a condensed text of the
+captured snippets (title, description, breadcrumbs, price texts, spec tables). It
+copies the price as written and the size and weight lines with their labels; the
+same parsers as for every other tier turn them into numbers. Its answer only fills
+what was missing, with method `llm`. Answers are stored per raw fetch
+(`llm_extraction`, kept across rebuilds), and the page is derived again when its
+answer arrives.
+
 ### Price checks
 
 Beyond the checks on each product's own offers (other shops, earlier visits), the

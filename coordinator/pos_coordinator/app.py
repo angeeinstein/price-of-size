@@ -17,7 +17,7 @@ from pos_coordinator.api.deps import Session
 from pos_coordinator.classify import by_llm, proposals  # (registers batch handlers)
 from pos_coordinator.config import Settings, get_settings
 from pos_coordinator.db import make_engine, make_sessionmaker
-from pos_coordinator.derive import fx
+from pos_coordinator.derive import fx, llm_tier  # (llm_tier registers a batch handler)
 from pos_coordinator.derive import stage as derive_stage
 from pos_coordinator.llm.service import LlmService, default_client
 from pos_coordinator.panel import api as panel_api
@@ -58,6 +58,7 @@ async def llm_loop(service, interval_s: float, store: RawStore) -> None:
                 ("queueing mapping proposals", lambda: proposals.schedule(service.sm, service)),
                 ("queueing LLM classification", lambda: by_llm.schedule(service.sm, service)),
                 ("queueing price reviews", lambda: review.schedule(service.sm, service, store)),
+                ("queueing LLM extraction", lambda: llm_tier.schedule(service.sm, service, store)),
             ):
                 try:
                     n = await step()
@@ -125,6 +126,7 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
     app = FastAPI(title="The Price of Size: coordinator", version=__version__, lifespan=lifespan)
     app.state.settings = settings
     app.state.rawstore = RawStore(settings.raw_store_path)
+    llm_tier.configure(app.state.rawstore)
     app.state.partitions = PartitionCache()
     app.state.signing_key = signing_key.load_or_create(settings.signing_key_path)
 

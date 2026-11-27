@@ -22,7 +22,7 @@ from decimal import Decimal
 from typing import Any
 
 import zstandard
-from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy import and_, case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -262,6 +262,11 @@ async def _derive_one(session, store: RawStore, f: RawFetch, fx: RateCache, repo
     if "snippets" not in evidence:
         return set()  # robots.txt or sitemap evidence: nothing to derive
     ex = await asyncio.to_thread(extract_evidence, evidence)
+    if f.mode in ("http", "browser"):
+        from pos_coordinator.derive import llm_tier
+
+        lang = ((evidence.get("snippets") or {}).get("lang") or "")[:2].lower() or None
+        await llm_tier.merge(session, f, ex, lang)  # tier 4: an answer, or a request for one
     pid = await _write(session, f, ex, fx, report)
     return {pid} if pid is not None else set()
 
@@ -316,6 +321,15 @@ async def _write(
             "title": func.coalesce(Product.title, stmt.excluded.title),
             "brand": func.coalesce(Product.brand, stmt.excluded.brand),
             "dimensionality": func.coalesce(Product.dimensionality, stmt.excluded.dimensionality),
+            # the first page with breadcrumbs gives the product its shop category
+            "attributes": case(
+                (
+                    func.coalesce(Product.attributes["category_path"], text("'[]'::jsonb"))
+                    == text("'[]'::jsonb"),
+                    Product.attributes.op("||")(stmt.excluded.attributes),
+                ),
+                else_=Product.attributes,
+            ),
         },
     ).returning(Product.id, text("(xmax = 0) AS inserted"))
     product_id, inserted = (await session.execute(stmt)).one()

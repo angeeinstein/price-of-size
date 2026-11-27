@@ -61,6 +61,10 @@ DEFAULTS: dict[str, Any] = {
     "category_outlier_z": 3.5,
     "price_review": True,
     "price_review_per_round": 500,
+    # Tier-4 extraction: pages the other tiers left without price or sizes are read by
+    # the LLM, at most `llm_extraction_per_round` per batch.
+    "llm_extraction": True,
+    "llm_extraction_per_round": 500,
     "llm_models": {
         "default": "claude-haiku-5-5",
         "parser_generation": "claude-sonnet-5-5",
@@ -116,6 +120,8 @@ VALIDATORS: dict[str, Any] = {
     ),
     "price_review": lambda v: isinstance(v, bool),
     "price_review_per_round": _int_in(1, 5_000),
+    "llm_extraction": lambda v: isinstance(v, bool),
+    "llm_extraction_per_round": _int_in(1, 5_000),
 }
 
 
