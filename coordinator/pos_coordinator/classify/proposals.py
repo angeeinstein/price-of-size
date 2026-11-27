@@ -3,9 +3,10 @@
 A shop's category path with at least `category_mapping_min_products` products
 (with a title and a vector) and no mapping yet goes to the stronger model (the
 `category_mapping` role, Sonnet by default) with a few of its product titles and a
-shortlist of taxonomy nodes: the CANDIDATES nearest to the centroid of its products' embeddings. The answer becomes a
-mapping with method "llm", its confidence and the model's one-line reason, and
-classifies the products under that path at once. "None fits" becomes an
+shortlist of taxonomy nodes: the CANDIDATES nearest to the centroid of its
+products' embeddings. The answer becomes a mapping with method "llm", its
+confidence and the model's one-line reason, and classifies the products under that
+path at once. "None fits" becomes an
 "unmappable" mapping (the products are then classified one by one).
 
 A person reviews LLM mappings in the panel: confirming one makes it a manual
