@@ -3,37 +3,32 @@
 import asyncio
 import logging
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from pos_coordinator import queue
+from pos_coordinator import partitions, queue
 
 log = logging.getLogger(__name__)
 
-PARTITION_MONTHS_AHEAD = 3
-
-
-async def ensure_partitions(session: AsyncSession) -> int:
-    created = (
-        await session.execute(
-            text("SELECT pos_ensure_raw_fetch_partitions(date_trunc('month', now())::date, :n)"),
-            {"n": PARTITION_MONTHS_AHEAD},
-        )
-    ).scalar_one()
-    return int(created)
-
 
 async def run_once(sm: async_sessionmaker[AsyncSession]) -> dict[str, int]:
-    async with sm() as session:
-        requeued, failed = await queue.reap_expired(session)
-        created = await ensure_partitions(session)
-        await session.commit()
-    if requeued or failed or created:
-        log.info(
-            "maintenance",
-            extra={"requeued": requeued, "failed": failed, "partitions_created": created},
-        )
-    return {"requeued": requeued, "failed": failed, "partitions_created": created}
+    """One round. Each task has its own transaction, so one failing task (e.g.
+    partition DDL) can never hold back another (e.g. lease reaping)."""
+    out = {"requeued": 0, "failed": 0, "partitions_created": 0}
+    try:
+        async with sm() as session:
+            out["requeued"], out["failed"] = await queue.reap_expired(session)
+            await session.commit()
+    except Exception:
+        log.exception("lease reaping failed")
+    try:
+        async with sm() as session:
+            out["partitions_created"] = await partitions.ensure_ahead(session)
+            await session.commit()
+    except Exception:
+        log.exception("partition upkeep failed")
+    if any(out.values()):
+        log.info("maintenance: %s", out)
+    return out
 
 
 async def loop(sm: async_sessionmaker[AsyncSession], interval_s: float) -> None:

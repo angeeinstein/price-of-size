@@ -1,8 +1,8 @@
 """Job leasing and result submission for nodes."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
-from pos_coordinator import queue, runtime_settings
+from pos_coordinator import partitions, queue, runtime_settings
 from pos_coordinator.api.deps import CurrentNode, Session, check_api_version
 from pos_shared import api
 
@@ -51,7 +51,10 @@ async def extend(body: api.ExtendRequest, node: CurrentNode, session: Session):
 
 
 @router.post("/results", response_model=api.ResultAck)
-async def results(body: api.ResultBatch, node: CurrentNode, session: Session):
+async def results(body: api.ResultBatch, request: Request, node: CurrentNode, session: Session):
+    months = {partitions.month_of(f.fetched_at) for r in body.results for f in r.fetches}
+    if months:
+        await request.app.state.partitions.ensure_months(request.app.state.sessionmaker, months)
     accepted, rejected = await queue.complete(session, node.id, body.results)
     await session.commit()
     return api.ResultAck(accepted=accepted, rejected=rejected)

@@ -12,6 +12,7 @@ from pos_coordinator.api import admin, jobs, nodes, raw
 from pos_coordinator.api.deps import Session
 from pos_coordinator.config import Settings, get_settings
 from pos_coordinator.db import make_engine, make_sessionmaker
+from pos_coordinator.partitions import PartitionCache
 from pos_coordinator.rawstore import RawStore
 from pos_shared.version import API_VERSION, __version__
 
@@ -41,6 +42,7 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
     app = FastAPI(title="The Price of Size: coordinator", version=__version__, lifespan=lifespan)
     app.state.settings = settings
     app.state.rawstore = RawStore(settings.raw_store_path)
+    app.state.partitions = PartitionCache()
 
     @app.get("/healthz")
     async def healthz(session: Session):

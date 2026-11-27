@@ -18,28 +18,44 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
-# Creates monthly partitions of `raw_fetch` for [from_month, from_month + months).
-# Called by the coordinator at start and periodically; idempotent.
+# Creates the monthly partitions of `raw_fetch` for [from_month, from_month + months),
+# month boundaries in UTC. Idempotent and safe to call concurrently (advisory lock).
+# Rows that already landed in raw_fetch_default for a month being created (e.g. a
+# node clock ahead of the pre-created window) are moved into the new partition, so
+# creating it can never fail because of them.
 ENSURE_PARTITIONS_FN = """
 CREATE OR REPLACE FUNCTION pos_ensure_raw_fetch_partitions(from_month date, months int)
 RETURNS int LANGUAGE plpgsql AS $$
 DECLARE
     i int;
     lo date;
-    hi date;
+    lo_ts timestamptz;
+    hi_ts timestamptz;
     part text;
     created int := 0;
 BEGIN
     FOR i IN 0 .. months - 1 LOOP
         lo := (date_trunc('month', from_month) + make_interval(months => i))::date;
-        hi := (lo + interval '1 month')::date;
+        lo_ts := lo::timestamp AT TIME ZONE 'UTC';
+        hi_ts := (lo + interval '1 month')::timestamp AT TIME ZONE 'UTC';
         part := format('raw_fetch_%s', to_char(lo, 'YYYY_MM'));
-        IF to_regclass(part) IS NULL THEN
-            EXECUTE format(
-                'CREATE TABLE %I PARTITION OF raw_fetch FOR VALUES FROM (%L) TO (%L)',
-                part, lo, hi);
-            created := created + 1;
+        IF to_regclass(part) IS NOT NULL THEN
+            CONTINUE;
         END IF;
+        PERFORM pg_advisory_xact_lock(hashtext('pos_raw_fetch_partitions'));
+        IF to_regclass(part) IS NOT NULL THEN  -- created while we waited
+            CONTINUE;
+        END IF;
+        EXECUTE format(
+            'CREATE TABLE %I (LIKE raw_fetch INCLUDING DEFAULTS INCLUDING CONSTRAINTS)', part);
+        EXECUTE format(
+            'WITH moved AS (DELETE FROM raw_fetch_default '
+            'WHERE fetched_at >= %L AND fetched_at < %L RETURNING *) '
+            'INSERT INTO %I SELECT * FROM moved', lo_ts, hi_ts, part);
+        EXECUTE format(
+            'ALTER TABLE raw_fetch ATTACH PARTITION %I FOR VALUES FROM (%L) TO (%L)',
+            part, lo_ts, hi_ts);
+        created := created + 1;
     END LOOP;
     RETURN created;
 END $$;
@@ -125,7 +141,10 @@ def upgrade() -> None:
     # Safety net: rows outside the monthly partitions are never rejected.
     op.execute("CREATE TABLE raw_fetch_default PARTITION OF raw_fetch DEFAULT")
     op.execute(ENSURE_PARTITIONS_FN)
-    op.execute("SELECT pos_ensure_raw_fetch_partitions(date_trunc('month', now())::date, 3)")
+    op.execute(
+        "SELECT pos_ensure_raw_fetch_partitions("
+        "date_trunc('month', now() AT TIME ZONE 'UTC')::date, 3)"
+    )
     op.create_index("ix_raw_fetch_url", "raw_fetch", ["url"], unique=False)
     op.create_table(
         "llm_call",
