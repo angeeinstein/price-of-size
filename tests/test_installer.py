@@ -1,5 +1,6 @@
 """install.sh, piece by piece: functions run in bash against fake system files."""
 
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -64,3 +65,42 @@ def test_detecting_the_system_keeps_the_release_to_install(tmp_path, os_release,
     )
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == f"0.1.0|keep|{expected}"
+
+
+def _run(body: str, tty: bool = False) -> subprocess.CompletedProcess:
+    """`body` in bash with install.sh's strict mode, ERR trap and `progress`."""
+    script = "\n".join(
+        [
+            "set -Eeuo pipefail",
+            'die() { echo "error: $*" >&2; exit 1; }',
+            "trap 'die \"failed at line $LINENO\"' ERR",
+            _function("progress"),
+            body,
+        ]
+    )
+    if tty:  # stderr on a terminal: the elapsed-time line
+        return subprocess.run(
+            ["script", "-qec", f"bash -c {shlex.quote(script)}", "/dev/null"],
+            capture_output=True,
+            text=True,
+        )
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_progress_says_what_runs_and_shows_output_only_on_failure():
+    r = _run('progress "copying" sh -c "echo noise; sleep 1"; echo after')
+    assert r.returncode == 0 and r.stdout == "after\n"
+    assert "copying ..." in r.stderr and "noise" not in r.stderr
+    r = _run('progress "breaking" sh -c "echo why it broke >&2; exit 3" || echo "rc=$?"')
+    assert r.stdout == "rc=3\n"  # the command's own status; no trap fired inside
+    assert "why it broke" in r.stderr and "failed at line" not in r.stderr
+
+
+@pytest.mark.skipif(shutil.which("script") is None, reason="needs script(1)")
+def test_progress_on_a_terminal_counts_the_seconds():
+    r = _run('progress "waiting" sleep 2; echo done', tty=True)
+    assert r.returncode == 0
+    assert "waiting ... 1s" in r.stdout and "done" in r.stdout  # script(1) merges the streams
+    r = _run('progress "breaking" sh -c "echo why >&2; exit 3" || echo "rc=$?"', tty=True)
+    assert "rc=3" in r.stdout and "why" in r.stdout and "failed at line" not in r.stdout

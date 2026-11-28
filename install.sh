@@ -216,8 +216,39 @@ detect_os() {
   esac
 }
 
+# Run a command that takes a while, showing what it does and for how long (on a
+# terminal: one line with the elapsed time, replaced when it ends; otherwise one
+# line at the start). Its output is kept and shown only if it fails.
+progress() {  # progress "what it does" command...
+  local what=$1; shift
+  local out; out=$(mktemp)
+  if [[ ! -t 2 ]]; then
+    echo "    $what ..." >&2
+    local rc=0
+    "$@" >"$out" 2>&1 || rc=$?
+    ((rc == 0)) || tail -n 20 "$out" >&2
+    rm -f "$out"
+    return "$rc"
+  fi
+  # in a subshell without the ERR trap: a failure is reported here, once
+  ( trap - ERR; set +e; "$@" ) >"$out" 2>&1 &
+  local pid=$! start=$SECONDS rc=0
+  while kill -0 "$pid" 2>/dev/null; do
+    printf '\r    %s ... %ds ' "$what" $((SECONDS - start)) >&2
+    sleep 1
+  done
+  wait "$pid" || rc=$?
+  printf '\r\033[K' >&2
+  if ((rc != 0)); then tail -n 20 "$out" >&2; fi
+  rm -f "$out"
+  return "$rc"
+}
+
+apt_update() { progress "updating the package lists" apt-get update -qq; }
+
 apt_install() {
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@" >/dev/null
+  progress "installing $*" env DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y --no-install-recommends "$@"
 }
 
 ensure_base_tools() {
@@ -231,7 +262,7 @@ ensure_base_tools() {
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
     info "installing ${missing[*]}"
-    apt-get update -qq
+    apt_update
     apt_install "${missing[@]}"
   fi
 }
@@ -253,7 +284,7 @@ ensure_docker() {
     chmod a+r /etc/apt/keyrings/docker.gpg
     echo "deb [arch=$ARCH signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$distro $OS_CODENAME stable" \
       >/etc/apt/sources.list.d/docker.list
-    apt-get update -qq
+    apt_update
     apt_install docker-ce docker-ce-cli containerd.io
   fi
   systemctl enable --now docker >/dev/null 2>&1 || service docker start >/dev/null 2>&1 || true
@@ -340,7 +371,7 @@ vol_has() {  # vol_has VOLUME FILE
 pull() {
   local ref=$1
   [[ -n "$ref" ]] || die "release has no image for this component"
-  docker pull -q "$ref" >/dev/null || die "could not pull $ref"
+  progress "downloading ${ref%%@*}" docker pull -q "$ref" || die "could not pull $ref"
 }
 
 # Run (or keep) a long-lived container. It is recreated only if its image or its
@@ -547,16 +578,45 @@ install_coordinator() {
     -e "POS_AGENT_HTTP_BIND=$LISTEN" \
     -e "POS_AGENT_TRUSTED_PROXIES=$TRUSTED_PROXY" \
     "${REGISTRY_ENV[@]}" --
-  info "waiting for the coordinator (migrations run on first start)"
-  for _ in $(seq 1 90); do
-    if curl -fsS "$(local_url)/healthz" >/dev/null 2>&1; then
-      ok "coordinator is up at $(local_url)"
+  # The agent now pulls the images, migrates the database and starts the service
+  # containers; the service answers through Caddy once it is up.
+  info "starting the coordinator service (first start: images are pulled and the database is set up)"
+  local started deadline=$((SECONDS + 600)) reported=""
+  started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local begin=$SECONDS step=""
+  while ((SECONDS < deadline)); do
+    if curl -fsS --max-time 5 "$(local_url)/healthz" >/dev/null 2>&1; then
+      [[ -t 2 ]] && printf '\r\033[K' >&2
+      ok "coordinator service is up at $(local_url)"
       COORD_ADMIN_TOKEN=$admin_token
       return
     fi
-    sleep 2
+    local logs err
+    logs=$(docker logs --since "$started" pos-agent-coordinator 2>&1 || true)
+    # the agent retries on its own; say what went wrong as soon as it does
+    err=$(agent_error <<<"$logs" || true)
+    if [[ -n "$err" && "$err" != "$reported" ]]; then
+      [[ -t 2 ]] && printf '\r\033[K' >&2
+      warn "the coordinator service failed to start (the agent keeps retrying):"
+      echo "$err" | sed 's/^/    /' >&2
+      reported=$err
+    fi
+    # what the agent is doing now (pulling, migrating, starting ...)
+    step=$(grep -E ' INFO pos_agent' <<<"$logs" | tail -n 1 | sed -E 's/.* INFO pos_agent[^ ]* //' || true)
+    if [[ -t 2 ]]; then
+      printf '\r\033[K    %s ... %ds' "${step:-starting}" $((SECONDS - begin)) >&2
+    fi
+    sleep 3
   done
-  die "coordinator did not come up; check: docker logs pos-agent-coordinator / pos-coordinator-a"
+  [[ -t 2 ]] && printf '\r\033[K' >&2
+  die "the coordinator service did not come up within 10 minutes; see: docker logs pos-agent-coordinator"
+}
+
+# The last error the agent logged: its message and the final line of the traceback.
+agent_error() {
+  awk '/ERROR pos_agent/ {msg = $0; last = ""; next}
+       /^[A-Za-z_.]*(Error|Exception|Exit)[A-Za-z_.]*: / {last = $0}
+       END {if (msg != "") {print msg; if (last != "") print last}}'
 }
 COORD_ADMIN_TOKEN=""
 
@@ -573,7 +633,7 @@ pg_major() {
 }
 
 install_database() {
-  apt-get update -qq
+  apt_update
   local v; v=$(pg_major)
   info "installing PostgreSQL $v with pgvector"
   apt_install "postgresql-$v" "postgresql-$v-pgvector" postgresql-contrib
@@ -633,7 +693,21 @@ DO \$\$ BEGIN
     ALTER ROLE pos LOGIN PASSWORD '$pw';
   END IF;
 END \$\$;
-SELECT 'CREATE DATABASE pos OWNER pos' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'pos')\gexec
+EOF
+  # UTF8 whatever the system's locale: in a container without one (LANG unset) the
+  # cluster's default is SQL_ASCII, which the coordinator cannot use. An earlier
+  # install's empty SQL_ASCII database is made again; one with data is left alone.
+  local enc tables
+  enc=$(su postgres -c "psql -Atc \"SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname = 'pos'\"")
+  if [[ -n "$enc" && "$enc" != UTF8 ]]; then
+    tables=$(su postgres -c "psql -d pos -Atc \"SELECT count(*) FROM pg_tables WHERE schemaname = 'public'\"")
+    [[ "$tables" == 0 ]] || die "database pos uses $enc, not UTF8, and holds data (docs/operations.md, Troubleshooting)"
+    warn "database pos was created as $enc; it is empty and is created again as UTF8"
+    su postgres -c "psql -q -v ON_ERROR_STOP=1 -c 'DROP DATABASE pos WITH (FORCE)'"
+  fi
+  su postgres -c "psql -q -v ON_ERROR_STOP=1" <<EOF
+SELECT 'CREATE DATABASE pos OWNER pos ENCODING ''UTF8'' LC_COLLATE ''C.UTF-8'' LC_CTYPE ''C.UTF-8'' TEMPLATE template0'
+  WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'pos')\gexec
 \c pos
 CREATE EXTENSION IF NOT EXISTS vector;
 EOF
@@ -853,7 +927,7 @@ main() {
       DB_URL=${DB_URL:-postgresql+psycopg://pos:$DB_PASSWORD@$gw:5432/pos}
       install_coordinator
       if [[ -z "$ENROLL_CODE" ]] && ! vol_has pos-worker-state identity.json; then
-        ENROLL_CODE=$(curl -fsS -X POST "$(local_url)/api/admin/enrollment-codes" \
+        ENROLL_CODE=$(curl -fsS --max-time 30 -X POST "$(local_url)/api/admin/enrollment-codes" \
           -H "Authorization: Bearer $COORD_ADMIN_TOKEN" -H 'content-type: application/json' \
           -d '{"label":"all-in-one"}' | jq -r .code)
       fi

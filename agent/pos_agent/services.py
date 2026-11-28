@@ -12,6 +12,7 @@ coordinator:  blue-green. The new slot starts beside the old one; Caddy has
 
 import ipaddress
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,8 @@ import httpx
 from pos_agent.config import AgentSettings
 from pos_agent.docker import Docker
 from pos_shared import exchange
+
+log = logging.getLogger(__name__)
 
 LOG_CONFIG = {"Type": "json-file", "Config": {"max-size": "10m", "max-file": "3"}}
 MANAGED_LABEL = "org.price-of-size.managed"
@@ -259,11 +262,13 @@ class CoordinatorService(Service):
 
     async def pre_switch(self, image: str, version: str, backup: bool = True) -> None:
         if backup and self.settings.backup_before_migrate:
+            log.info("backing up the database before migrating")
             await self.run_once(
                 f"{self.settings.name_prefix}-coordinator-backup",
                 self._oneoff(image, ["pos-coordinator", "backup"], "coordinator-backup"),
                 timeout_s=3600,
             )
+        log.info("migrating the database")
         await self.run_once(
             f"{self.settings.name_prefix}-coordinator-migrate",
             self._oneoff(image, ["pos-coordinator", "migrate"], "coordinator-migrate"),

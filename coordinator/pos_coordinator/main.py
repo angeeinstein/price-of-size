@@ -45,6 +45,16 @@ async def _check() -> int:
     except Exception as e:  # noqa: BLE001
         print(f"FAIL signing key: {e}")
         ok = False
+    try:
+        from pos_coordinator.schema import require_utf8
+
+        await asyncio.to_thread(require_utf8, settings.database_url)
+    except SystemExit as e:
+        print(f"FAIL database: {e}")
+        return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"FAIL database: {type(e).__name__}: {e}")
+        return 1
     engine = make_engine(settings.database_url)
     try:
         async with engine.connect() as c:
