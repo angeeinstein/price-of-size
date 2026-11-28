@@ -192,12 +192,19 @@ load_conf() {
 INSTALLED_VERSION=""  # set by load_conf
 
 detect_os() {
-  [[ -r /etc/os-release ]] || die "unsupported system (no /etc/os-release)"
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  OS_ID=${ID:-}
-  OS_LIKE=${ID_LIKE:-}
-  OS_CODENAME=${VERSION_CODENAME:-}
+  local os_release=${POS_OS_RELEASE:-/etc/os-release}
+  [[ -r "$os_release" ]] || die "unsupported system (no $os_release)"
+  # Read in a subshell: os-release defines VERSION, NAME, ID ... which must not
+  # overwrite this script's own variables (VERSION is the release to install).
+  local vars
+  vars=$(
+    # shellcheck disable=SC1090
+    . "$os_release"
+    # one line, fields separated by US (0x1f): empty fields (no ID_LIKE or
+    # VERSION_CODENAME) survive, where trailing newlines would be stripped
+    printf '%s\x1f%s\x1f%s\x1f' "${ID:-}" "${ID_LIKE:-}" "${VERSION_CODENAME:-}"
+  )
+  IFS=$'\x1f' read -r OS_ID OS_LIKE OS_CODENAME _ <<<"$vars"
   case "$OS_ID $OS_LIKE" in
     *debian*|*ubuntu*) ;;
     *) die "only Debian, Ubuntu and derivatives (incl. Raspberry Pi OS) are supported, found $OS_ID" ;;
