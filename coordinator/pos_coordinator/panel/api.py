@@ -338,6 +338,14 @@ async def overview(session) -> dict[str, Any]:
         {"hour": h, "fetches": counts.get(h, 0)}
         for h in (first_hour + timedelta(hours=i) for i in range(24))
     ]
+    # the stat is a rolling 24 hours, which reaches into the hour before the first bar
+    fetches_24h = (
+        await session.execute(
+            select(func.count())
+            .select_from(RawFetch)
+            .where(RawFetch.fetched_at >= now - timedelta(hours=24))
+        )
+    ).scalar_one()
     domains = dict(
         (
             await session.execute(
@@ -357,7 +365,7 @@ async def overview(session) -> dict[str, Any]:
         "jobs": jobs,
         "nodes": {"total": len(nodes), "online": online},
         "fetches_per_hour": per_hour,
-        "fetches_24h": sum(x["fetches"] for x in per_hour),
+        "fetches_24h": fetches_24h,
         "domains": {"total": sum(domains.values()), "blocked": domains.get("blocked", 0)},
         "budget": {
             "state": b.state,

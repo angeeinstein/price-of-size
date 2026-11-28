@@ -221,7 +221,9 @@ async def test_overview(panel_app, sessionmaker):
     await make_user(panel_app.state.sessionmaker)
     now = datetime.now(UTC)
     async with sessionmaker() as s:
-        for ago in (timedelta(hours=2), timedelta(hours=2), timedelta(hours=30)):
+        # inside the rolling 24 hours, usually before the first hourly bar; 30 h: neither
+        late = timedelta(hours=23, minutes=59)
+        for ago in (timedelta(hours=2), timedelta(hours=2), late, timedelta(hours=30)):
             s.add(RawFetch(id=uuid7(), fetched_at=now - ago, url="https://x.invalid/", mode="http"))
         await s.commit()
     async with browser(panel_app) as c:
@@ -232,9 +234,13 @@ async def test_overview(panel_app, sessionmaker):
     hours = [datetime.fromisoformat(x["hour"]) for x in ov["fetches_per_hour"]]
     assert len(hours) == 24
     assert all(b - a == timedelta(hours=1) for a, b in zip(hours, hours[1:], strict=False))
-    assert hours[-1] == now.replace(minute=0, second=0, microsecond=0)
+    this_hour = now.replace(minute=0, second=0, microsecond=0)
+    assert hours[-1] in (this_hour, this_hour + timedelta(hours=1))  # an hour may turn
     counts = [x["fetches"] for x in ov["fetches_per_hour"]]
-    assert counts[21] == 2 and sum(counts) == 2 and ov["fetches_24h"] == 2
+    late_in_bars = now - late >= hours[0]  # only in the last minute of an hour
+    two_hours_ago = (now - timedelta(hours=2)).replace(minute=0, second=0, microsecond=0)
+    assert counts[hours.index(two_hours_ago)] == 2 and sum(counts) == 2 + late_in_bars
+    assert ov["fetches_24h"] == 3  # rolling 24 hours, not the bars' sum
 
 
 async def test_cli_create_user(settings, monkeypatch, capsys):
