@@ -565,6 +565,19 @@ Restore a dump: `pg_restore --clean --if-exists --no-owner -d pos <file>.dump`.
 
 ## Uninstalling
 
+On an installed machine, `install.sh` without options shows a menu:
+
+| Choice | Does |
+|---|---|
+| Update | coordinator: the latest release on the coordinator, then every node (as the panel's Update button); node in simple mode: its latest worker |
+| Repair | the installation again with the saved settings (`/etc/pos/install.conf`) |
+| Add a node | coordinator only: a node on this machine too, enrolled by the installer itself (it then shares the machine's CPUs and RAM) |
+| Uninstall | services removed, data kept |
+| Delete | services removed and their data deleted (type `delete` to confirm) |
+
+A node in agent mode shows no Update: its coordinator updates it. The same as
+options:
+
 ```bash
 sudo bash install.sh --uninstall                 # everything on this machine, data kept
 sudo bash install.sh --uninstall --role node     # only the node on a multi-role machine

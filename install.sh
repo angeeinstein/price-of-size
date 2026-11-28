@@ -12,6 +12,9 @@
 # which lists every image by digest), never whatever is on `main`. Running it
 # again repairs an installation instead of breaking it.
 #
+# Run without options on a machine where it is installed, it offers a menu:
+# update, repair, add a node here (coordinator), uninstall (keeping or deleting data).
+#
 #   --update        repair the installed role and, on the coordinator, update everything
 #                   to the latest release: the same as the panel's Update button
 #                   (coordinator, then one node, then the others), with its progress
@@ -33,7 +36,7 @@ DOCKER_LOG_OPTS=(--log-opt max-size=10m --log-opt max-file=3)
 
 ROLE="" VERSION="" MODE="" COORDINATOR_URL="" ENROLL_CODE="" NODE_NAME=""
 DB_URL="" RAW_STORE="" BACKUP_DIR="" HTTP_PORT="" PG_ALLOW="" PG_DATA_DIR=""
-LISTEN="" TRUSTED_PROXY=""
+LISTEN="" TRUSTED_PROXY="" LOCAL_NODE=""
 CF_ID="" CF_SECRET="" REG_USER="" REG_TOKEN="" REG_SERVER="" RELEASE_FILE=""
 REGISTRY_ENV=()
 ACTION=install NONINTERACTIVE=0 PURGE=0 ASSUME_YES=0
@@ -171,6 +174,7 @@ BACKUP_DIR=$BACKUP_DIR
 HTTP_PORT=$HTTP_PORT
 LISTEN=$LISTEN
 TRUSTED_PROXY=$TRUSTED_PROXY
+LOCAL_NODE=$LOCAL_NODE
 EOF
   chmod 0600 "$CONF"
 }
@@ -188,6 +192,7 @@ load_conf() {
       HTTP_PORT) [[ -n "$HTTP_PORT" ]] || HTTP_PORT=$v ;;
       LISTEN) [[ -n "$LISTEN" ]] || LISTEN=$v ;;
       TRUSTED_PROXY) [[ -n "$TRUSTED_PROXY" ]] || TRUSTED_PROXY=$v ;;
+      LOCAL_NODE) [[ -n "$LOCAL_NODE" ]] || LOCAL_NODE=$v ;;
     esac
   done <"$CONF"
 }
@@ -1064,6 +1069,65 @@ uninstall() {
   ok "uninstalled: $roles$([[ $PURGE -eq 1 ]] && echo ' (data purged)' || echo ' (data kept; --purge deletes it)')"
 }
 
+# A node on the coordinator's own machine: it joins the coordinator's Docker network
+# and is enrolled with a code the installer creates itself.
+install_local_node() {  # install_local_node LABEL
+  if [[ -z "$ENROLL_CODE" ]] && ! vol_has pos-worker-state identity.json; then
+    ENROLL_CODE=$(curl -fsS --max-time 30 -X POST "$(local_url)/api/admin/enrollment-codes" \
+      -H "Authorization: Bearer $COORD_ADMIN_TOKEN" -H 'content-type: application/json' \
+      -d "{\"label\":\"$1\"}" | jq -r .code)
+    [[ -n "$ENROLL_CODE" && "$ENROLL_CODE" != null ]] || die "could not create an enrollment code"
+  fi
+  COORDINATOR_URL=local
+  install_node
+}
+
+# Run without options where it is already installed: what to do.
+installed_menu() {
+  local version=${INSTALLED_VERSION:-?} ans n=0 choices=()
+  echo "The Price of Size is installed here: $ROLE, release $version." >/dev/tty
+  case "$ROLE" in
+    coordinator|all-in-one)
+      choices+=("update|Update        the latest release: this coordinator, then every node") ;;
+    node)
+      if [[ "${MODE:-agent}" == simple ]]; then
+        choices+=("update|Update        the latest release for this node")
+      fi ;;
+  esac
+  choices+=("repair|Repair        install again with the saved settings")
+  if [[ "$ROLE" == coordinator && "$LOCAL_NODE" != 1 ]]; then
+    choices+=("local-node|Add a node    collect data on this machine too")
+  fi
+  choices+=("uninstall|Uninstall     remove services, keep the data")
+  choices+=("purge|Delete        remove services and delete their data (keys, identities, settings)")
+  choices+=("cancel|Cancel")
+  local c
+  for c in "${choices[@]}"; do
+    n=$((n + 1))
+    printf '  %d) %s\n' "$n" "${c#*|}" >/dev/tty
+  done
+  if [[ "$ROLE" == node && "${MODE:-agent}" != simple ]]; then
+    echo "  (this node is updated by its coordinator: Releases > Update in its panel)" >/dev/tty
+  fi
+  read -r -p "Choice [1]: " ans </dev/tty || true
+  ans=${ans:-1}
+  [[ "$ans" =~ ^[0-9]+$ ]] && ((ans >= 1 && ans <= n)) || die "unknown choice $ans"
+  case "${choices[ans - 1]%%|*}" in
+    update) ACTION=update ;;
+    repair) NONINTERACTIVE=1 ;;
+    local-node) LOCAL_NODE=1 NONINTERACTIVE=1 ;;
+    uninstall) ACTION=uninstall ;;
+    purge)
+      local word
+      echo "This deletes the node identities, the coordinator's signing key (nodes must enroll" >/dev/tty
+      echo "again) and the settings in $ETC. The database, raw store and backups are kept." >/dev/tty
+      read -r -p "Type delete to confirm: " word </dev/tty || true
+      [[ "$word" == delete ]] || die "not confirmed; nothing deleted"
+      ACTION=uninstall PURGE=1 ASSUME_YES=1 ;;
+    cancel) exit 0 ;;
+  esac
+}
+
 # --- main -----------------------------------------------------------------------------------
 
 choose_role() {
@@ -1091,6 +1155,10 @@ main() {
   local explicit_role=$ROLE
   if [[ -n "$VERSION" || -n "$RELEASE_FILE" ]]; then EXPLICIT_RELEASE=1; fi
   load_conf
+  # installed already, and nothing asked for: a menu
+  if [[ $ACTION == install && -z "$explicit_role" && -n "$ROLE" ]] && can_prompt; then
+    installed_menu
+  fi
   if [[ $ACTION == uninstall ]]; then ROLE=$explicit_role; uninstall; return; fi
   if [[ $ACTION == update ]]; then
     [[ -n "$ROLE" ]] || die "nothing installed yet (no $CONF)"
@@ -1121,20 +1189,16 @@ main() {
   fi
   case "$ROLE" in
     node) install_node ;;
-    coordinator) install_coordinator ;;
+    coordinator)
+      install_coordinator
+      if [[ "$LOCAL_NODE" == 1 ]]; then install_local_node local; fi ;;
     all-in-one)
       install_database
       docker network create "$NET" >/dev/null 2>&1 || true
       local gw; gw=$(docker network inspect "$NET" -f '{{(index .IPAM.Config 0).Gateway}}')
       DB_URL=${DB_URL:-postgresql+psycopg://pos:$DB_PASSWORD@$gw:5432/pos}
       install_coordinator
-      if [[ -z "$ENROLL_CODE" ]] && ! vol_has pos-worker-state identity.json; then
-        ENROLL_CODE=$(curl -fsS --max-time 30 -X POST "$(local_url)/api/admin/enrollment-codes" \
-          -H "Authorization: Bearer $COORD_ADMIN_TOKEN" -H 'content-type: application/json' \
-          -d '{"label":"all-in-one"}' | jq -r .code)
-      fi
-      COORDINATOR_URL=local
-      install_node ;;
+      install_local_node all-in-one ;;
   esac
   save_conf
   if [[ $ACTION == update ]]; then
