@@ -172,7 +172,8 @@ class _FakeCoordinator:
                 if self.path == "/api/admin/releases":
                     return self._send(201, {"manifest": {}})
                 if not fake.upgraded:
-                    return self._send(404, {"detail": "Not Found"})
+                    # like the real one: the panel's catch-all GET route matches the path
+                    return self._send(405, {"detail": "Method Not Allowed"})
                 if self.path == "/api/admin/updates/check":
                     ov = _overview(available=not check_error)
                     if check_error:
@@ -324,7 +325,7 @@ def test_an_older_coordinator_is_moved_first_then_the_nodes_follow(tmp_path):
     assert "ok  updated to 0.2.0" in r.stdout
     calls = [(m, p) for m, p, _, _ in fake.requests if p != "/healthz"]
     assert calls[:4] == [
-        ("POST", "/api/admin/updates/check"),  # 404: no update API yet
+        ("POST", "/api/admin/updates/check"),  # 405: no update API yet
         ("POST", "/api/admin/releases"),
         ("PUT", "/api/admin/settings/coordinator.target_version"),
         ("POST", "/api/admin/updates/check"),
