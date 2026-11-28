@@ -120,12 +120,13 @@ def _assignment(name: str) -> str:
 class _FakeCoordinator:
     """The admin update API, answering GET /api/admin/updates from a script."""
 
-    def __init__(self, polls, start_status=200, start_detail=""):
+    def __init__(self, polls, start_status=200, start_detail="", legacy=False):
         import http.server
         import json
         import threading
 
         self.requests = []
+        self.upgraded = not legacy  # a legacy coordinator has no update API until updated
         polls = list(polls)
         fake = self
 
@@ -151,14 +152,27 @@ class _FakeCoordinator:
             def do_GET(self):
                 self._record()
                 if self.path == "/healthz":
-                    return self._send(200, {"ok": True})
+                    return self._send(
+                        200, {"ok": True, "version": "0.2.0" if fake.upgraded else "0.1.0"}
+                    )
                 state = polls.pop(0) if len(polls) > 1 else polls[0]
                 if state is None:
                     return self._send(502, {"detail": "bad gateway"})
                 return self._send(200, state)
 
+            def do_PUT(self):
+                self._record()
+                if self.path == "/api/admin/settings/coordinator.target_version":
+                    fake.upgraded = True  # the agent switches it
+                    return self._send(200, {"value": "0.2.0"})
+                self._send(404, {"detail": "Not Found"})
+
             def do_POST(self):
                 self._record()
+                if self.path == "/api/admin/releases":
+                    return self._send(201, {"manifest": {}})
+                if not fake.upgraded:
+                    return self._send(404, {"detail": "Not Found"})
                 if self.path == "/api/admin/updates/check":
                     return self._send(200, _overview(available=True))
                 if self.path == "/api/admin/updates/start":
@@ -178,8 +192,10 @@ class _FakeCoordinator:
 def _overview(status=None, *, available=False, agent_state=None, a="0.1.0", b="0.1.0", error=None):
     nodes = [
         {"id": "n-a", "name": "node-a", "managed": True, "online": True, "version": a,
+         "running_version": a,
          "update_state": "draining" if status == "canary" and a == "0.1.0" else "idle"},
         {"id": "n-b", "name": "node-b", "managed": True, "online": True, "version": b,
+         "running_version": b,
          "update_state": "idle"},
     ]  # fmt: skip
     return {
@@ -202,7 +218,7 @@ def _overview(status=None, *, available=False, agent_state=None, a="0.1.0", b="0
     }
 
 
-def _run_update(url: str) -> subprocess.CompletedProcess:
+def _run_update(url: str, etc: Path | None = None) -> subprocess.CompletedProcess:
     script = "\n".join(
         [
             "set -Eeuo pipefail",
@@ -212,11 +228,14 @@ def _run_update(url: str) -> subprocess.CompletedProcess:
             'die() { echo "error: $*" >&2; exit 1; }',
             "sleep() { :; }",
             f"local_url() {{ echo {shlex.quote(url)}; }}",
-            "ETC=/nonexistent COORD_ADMIN_TOKEN=secret-token COORD_API_ERROR=''",
+            f"ETC={shlex.quote(str(etc or '/nonexistent'))} COORD_ADMIN_TOKEN=secret-token"
+            " COORD_API_ERROR='' COORD_API_CODE=''",
+            "docker() { :; }",
             _function("env_get"),
             _function("coord_api"),
             _assignment("ROLLOUT_LINE"),
             _function("follow_update"),
+            _function("legacy_coordinator_update"),
             _function("update_installation"),
             "update_installation",
         ]
@@ -277,3 +296,34 @@ def test_up_to_date_is_not_an_error():
         fake.close()
     assert r.returncode == 0, r.stderr
     assert "up to date: everything runs 0.2.0" in r.stdout
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="needs jq")
+def test_an_older_coordinator_is_moved_first_then_the_nodes_follow(tmp_path):
+    """A coordinator from before the update API: registered and switched the earlier
+    way, then the nodes are updated through the new API."""
+    import json
+
+    (tmp_path / "release.json").write_text(
+        json.dumps({"version": "0.2.0", "images": {"coordinator": "c@sha256:" + "1" * 64}})
+    )
+    fake = _FakeCoordinator(
+        [_overview("canary"), _overview("done", a="0.2.0", b="0.2.0")], legacy=True
+    )
+    try:
+        r = _run_update(fake.url, etc=tmp_path)
+    finally:
+        fake.close()
+    assert r.returncode == 0, r.stderr
+    assert "predates one-click updates: moving it to 0.2.0" in r.stdout
+    assert "ok  coordinator runs 0.2.0" in r.stdout
+    assert "ok  updated to 0.2.0" in r.stdout
+    calls = [(m, p) for m, p, _, _ in fake.requests if p != "/healthz"]
+    assert calls[:4] == [
+        ("POST", "/api/admin/updates/check"),  # 404: no update API yet
+        ("POST", "/api/admin/releases"),
+        ("PUT", "/api/admin/settings/coordinator.target_version"),
+        ("POST", "/api/admin/updates/check"),
+    ]
+    register = next(b for m, p, _, b in fake.requests if p == "/api/admin/releases")
+    assert json.loads(register)["version"] == "0.2.0"

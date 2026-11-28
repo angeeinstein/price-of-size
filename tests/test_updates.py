@@ -268,6 +268,12 @@ async def _targets(sm) -> dict[str, str | None]:
         return {n.name: n.desired_target_version for n in (await s.execute(select(Node))).scalars()}
 
 
+async def _switched(sm, node_id, version=NEW):
+    """The node's worker runs the version and its agent has recorded the switch."""
+    await _set(sm, node_id, version=version,
+               agent_status={"running_version": version, "update_state": "idle"})  # fmt: skip
+
+
 async def _set(sm, node_id, **fields):
     async with sm() as s:
         n = await s.get(Node, node_id)
@@ -290,10 +296,10 @@ async def test_coordinator_first_then_one_node_then_the_rest(app, agent_dir, ses
     assert await _advance(sm, agent_dir, own=NEW) == "canary"
     assert await _targets(sm) == {"a": NEW, "b": None, "c": None, "simple": None}
     assert await _advance(sm, agent_dir, own=NEW) == "canary"  # still switching
-    await _set(sm, a, version=NEW)
+    await _switched(sm, a)
     assert await _advance(sm, agent_dir, own=NEW) == "nodes"
     assert await _targets(sm) == {"a": NEW, "b": NEW, "c": NEW, "simple": None}
-    await _set(sm, b, version=NEW)
+    await _switched(sm, b)
     assert await _advance(sm, agent_dir, own=NEW) == "done"  # c is offline: updates later
     assert await _advance(sm, agent_dir, own=NEW) is None
     async with sm() as s:
@@ -312,6 +318,24 @@ async def test_the_nodes_wait_until_the_coordinator_agent_has_switched(
     assert await _advance(sessionmaker, agent_dir, own=NEW) == "coordinator"
     exchange.write_json(status, {"running_version": NEW, "update_state": "idle"})
     assert await _advance(sessionmaker, agent_dir, own=NEW) == "canary"
+
+
+async def test_the_others_wait_until_the_first_node_agent_has_switched(
+    app, agent_dir, sessionmaker
+):
+    """The new worker reports its version before its agent has finished checking it
+    (and might still roll back): that is not yet a node on the new version."""
+    sm = sessionmaker
+    a = await _node(sm, "a", __version__)
+    await _node(sm, "b", __version__)
+    await _start(sm, app.state.signing_key, agent_dir)
+    assert await _advance(sm, agent_dir, own=NEW) == "canary"
+    checking = {"running_version": __version__, "update_state": "health_check"}
+    await _set(sm, a, version=NEW, agent_status=checking)
+    assert await _advance(sm, agent_dir, own=NEW) == "canary"
+    assert (await _targets(sm))["b"] is None
+    await _switched(sm, a)
+    assert await _advance(sm, agent_dir, own=NEW) == "nodes"
 
 
 async def test_a_failed_coordinator_update_ends_the_rollout(app, agent_dir, sessionmaker):
@@ -352,7 +376,7 @@ async def test_failed_nodes_among_the_rest_are_reported(app, agent_dir, sessionm
     b = await _node(sm, "b", __version__)
     await _start(sm, app.state.signing_key, agent_dir)
     await _advance(sm, agent_dir, own=NEW)
-    await _set(sm, a, version=NEW)
+    await _switched(sm, a)
     assert await _advance(sm, agent_dir, own=NEW) == "nodes"
     await _set(sm, b, agent_status={"update_state": "failed", "update_target": NEW,
                                      "update_error": "pull failed"})  # fmt: skip

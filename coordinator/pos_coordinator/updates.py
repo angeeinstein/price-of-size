@@ -210,7 +210,9 @@ async def start(
     if version_key(version) < version_key(__version__):
         raise UpdateError(f"{version} is older than the running {__version__}")
     if version == __version__ and not [
-        n for n in await _managed_nodes(session) if n.version != version
+        n
+        for n in await _managed_nodes(session)
+        if n.version != version or (n.agent_status or {}).get("running_version") != version
     ]:
         raise UpdateError(f"everything already runs {version}")
     release = await session.get(Release, version)
@@ -295,7 +297,11 @@ async def advance(
     nodes = await _managed_nodes(session)
 
     def pending(n: Node) -> bool:
-        return n.version != r.version
+        """Not on the version yet: its worker reports it *and* its agent has recorded
+        the switch (a worker can report it while its agent may still roll back)."""
+        return not (
+            n.version == r.version and (n.agent_status or {}).get("running_version") == r.version
+        )
 
     async def to_nodes() -> None:
         for n in nodes:
@@ -432,6 +438,7 @@ async def overview(
                 "managed": n.agent_status is not None,
                 "version": n.version,
                 "target": n.desired_target_version,
+                "running_version": (n.agent_status or {}).get("running_version"),
                 "update_state": (n.agent_status or {}).get("update_state"),
                 "update_target": (n.agent_status or {}).get("update_target"),
                 "update_error": (n.agent_status or {}).get("update_error"),

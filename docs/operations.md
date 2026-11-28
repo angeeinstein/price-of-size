@@ -214,7 +214,10 @@ panel: an admin account cannot point the installation at other code).
 **Updating: SSH.** `install.sh --update` on the coordinator repairs the
 coordinator's installation, then does the same as the Update button through the
 coordinator's API, printing each step. If an update is already running, it follows
-it. On a node it only repairs the node: nodes are updated by their coordinator.
+it. A coordinator from before one-click updates (0.1.2 and older) has no update API:
+it is first moved to the latest release the earlier way (register, target version),
+then the nodes follow through the new API. On a node it only repairs the node:
+nodes are updated by their coordinator.
 
 **By hand.** Releases page: paste a `release.json`, register it, **Run on
 coordinator**, then set a node's target on the Nodes page, then the others. The

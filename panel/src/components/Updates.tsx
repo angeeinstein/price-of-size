@@ -30,6 +30,7 @@ interface NodeState {
   online: boolean;
   managed: boolean;
   version: string | null;
+  running_version: string | null;
   target: string | null;
   update_state: string | null;
   update_target: string | null;
@@ -96,8 +97,11 @@ function Step({ state, title, children }: { state: "done" | "active" | "waiting"
   );
 }
 
+// on the version: its worker reports it and its agent has recorded the switch
+const onVersion = (n: NodeState, version: string) => n.version === version && n.running_version === version;
+
 function nodeLine(n: NodeState, version: string): string {
-  if (n.version === version) return `running ${version}`;
+  if (onVersion(n, version)) return `running ${version}`;
   if (n.update_state === "failed" && n.update_target === version) return `failed: ${n.update_error ?? "update failed"}`;
   if (n.update_state && STEP[n.update_state]) return STEP[n.update_state];
   if (!n.online) return "offline: updates when it is back";
@@ -110,7 +114,7 @@ function RolloutView({ r, data }: { r: Rollout; data: UpdatesOverview }) {
   const managed = data.nodes.filter((n) => n.managed);
   const canary = managed.find((n) => n.id === r.canary_node_id);
   const others = managed.filter((n) => n.id !== r.canary_node_id);
-  const othersDone = others.filter((n) => n.version === r.version).length;
+  const othersDone = others.filter((n) => onVersion(n, r.version)).length;
   // the step reached: 0 coordinator, 1 first node, 2 other nodes, 3 all done
   const at =
     r.status === "done" ? 3
@@ -118,9 +122,9 @@ function RolloutView({ r, data }: { r: Rollout; data: UpdatesOverview }) {
     : r.status === "canary" ? 1
     : r.status === "nodes" ? 2
     // failed or cancelled: where it stopped (a coordinator failure says so)
-    : r.status === "failed" ? (r.error?.startsWith("coordinator:") ? 0 : canary && canary.version !== r.version ? 1 : 2)
+    : r.status === "failed" ? (r.error?.startsWith("coordinator:") ? 0 : canary && !onVersion(canary, r.version) ? 1 : 2)
     : data.current !== r.version ? 0
-    : canary && canary.version !== r.version ? 1
+    : canary && !onVersion(canary, r.version) ? 1
     : 2;
   const state = (i: number): "done" | "active" | "waiting" | "failed" =>
     i < at ? "done"

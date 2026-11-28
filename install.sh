@@ -633,7 +633,7 @@ COORD_ADMIN_TOKEN=""
 # The panel's Update button and `install.sh --update` share one implementation: the
 # coordinator's update API (coordinator/pos_coordinator/updates.py).
 
-COORD_API_ERROR=""
+COORD_API_ERROR="" COORD_API_CODE=""
 
 # coord_api VAR METHOD PATH [JSON]: the response body in VAR; on an error returns 1
 # with the reason in COORD_API_ERROR (no subshell, so the caller sees both)
@@ -644,13 +644,14 @@ coord_api() {
     -H "Authorization: Bearer $COORD_ADMIN_TOKEN" -H 'content-type: application/json'
     -w '\n%{http_code}')
   [[ $# -ge 4 ]] && args+=(-d "$4")
-  COORD_API_ERROR="" _body=""
+  COORD_API_ERROR="" COORD_API_CODE="" _body=""
   if ! out=$(curl "${args[@]}" 2>&1); then
     COORD_API_ERROR=$out
     return 1
   fi
   code=${out##*$'\n'}
   out=${out%$'\n'*}
+  COORD_API_CODE=$code
   if [[ $code != 2* ]]; then
     COORD_API_ERROR=$(jq -r '.detail // empty' <<<"$out" 2>/dev/null || true)
     COORD_API_ERROR=${COORD_API_ERROR:-HTTP $code}
@@ -675,7 +676,7 @@ ROLLOUT_LINE='
       | "first node \($n.name): " + (if ($n.update_state // "idle") != "idle"
           then step($n.update_state) else "waiting for its agent" end))
     elif $r.status == "nodes" then
-      "other nodes: \([$o.nodes[] | select(.managed and .version == $r.version)] | length) of \([$o.nodes[] | select(.managed)] | length) on \($r.version)"
+      "other nodes: \([$o.nodes[] | select(.managed and .version == $r.version and .running_version == $r.version)] | length) of \([$o.nodes[] | select(.managed)] | length) on \($r.version)"
     else $r.status end'
 
 follow_update() {  # follow_update ROLLOUT_ID VERSION
@@ -711,6 +712,38 @@ follow_update() {  # follow_update ROLLOUT_ID VERSION
   warn "still updating after an hour; follow it on the panel's Releases page"
 }
 
+# A coordinator from before one-click updates (0.1.2 and older) has no update API:
+# it is moved to the release this installer resolved the earlier way (register it,
+# set coordinator.target_version, wait until it answers as that version).
+legacy_coordinator_update() {
+  local version body ov begin=$SECONDS deadline=$((SECONDS + 1800)) started step logs
+  version=$(jq -r .version "$ETC/release.json")
+  info "this coordinator predates one-click updates: moving it to $version first"
+  body=$(jq -c '{version, images}' "$ETC/release.json")
+  if ! coord_api ov POST /api/admin/releases "$body" && [[ $COORD_API_CODE != 409 ]]; then
+    die "could not register $version: $COORD_API_ERROR"
+  fi
+  coord_api ov PUT /api/admin/settings/coordinator.target_version "{\"value\": \"$version\"}" \
+    || die "could not set the coordinator's target version: $COORD_API_ERROR"
+  started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  while ((SECONDS < deadline)); do
+    if [[ $(curl -fsS --max-time 5 "$(local_url)/healthz" 2>/dev/null | jq -r '.version // empty' 2>/dev/null) == "$version" ]]; then
+      [[ -t 2 ]] && printf '\r\033[K' >&2
+      ok "coordinator runs $version"
+      return 0
+    fi
+    logs=$(docker logs --since "$started" pos-agent-coordinator 2>&1 || true)
+    if grep -q "update to $version failed" <<<"$logs"; then
+      [[ -t 2 ]] && printf '\r\033[K' >&2
+      die "the coordinator update to $version failed (rolled back): $(grep "update to $version failed" <<<"$logs" | tail -n 1)"
+    fi
+    step=$(grep -E ' INFO pos_agent' <<<"$logs" | tail -n 1 | sed -E 's/.* INFO pos_agent[^ ]* //' || true)
+    [[ -t 2 ]] && printf '\r\033[K    coordinator: %s ... %ds' "${step:-waiting for its agent}" $((SECONDS - begin)) >&2
+    sleep 3
+  done
+  die "the coordinator did not answer as $version within 30 minutes; see: docker logs pos-agent-coordinator"
+}
+
 update_installation() {
   COORD_ADMIN_TOKEN=${COORD_ADMIN_TOKEN:-$(env_get "$ETC/coordinator.env" POS_ADMIN_TOKEN)}
   if ! curl -fsS --max-time 5 "$(local_url)/healthz" >/dev/null 2>&1; then
@@ -719,7 +752,12 @@ update_installation() {
   fi
   info "asking GitHub for the latest release"
   local ov id version
-  coord_api ov POST /api/admin/updates/check || die "update check failed: $COORD_API_ERROR"
+  if ! coord_api ov POST /api/admin/updates/check; then
+    [[ $COORD_API_CODE == 404 ]] || die "update check failed: $COORD_API_ERROR"
+    legacy_coordinator_update
+    # the new coordinator has the update API: the nodes follow through it
+    coord_api ov POST /api/admin/updates/check || die "update check failed: $COORD_API_ERROR"
+  fi
   local check_error; check_error=$(jq -r '.check.error // empty' <<<"$ov")
   [[ -z "$check_error" ]] || die "update check: $check_error"
   # an update already running: follow it
