@@ -104,3 +104,176 @@ def test_progress_on_a_terminal_counts_the_seconds():
     assert "waiting ... 1s" in r.stdout and "done" in r.stdout  # script(1) merges the streams
     r = _run('progress "breaking" sh -c "echo why >&2; exit 3" || echo "rc=$?"', tty=True)
     assert "rc=3" in r.stdout and "why" in r.stdout and "failed at line" not in r.stdout
+
+
+# --- install.sh --update: the coordinator's update API, followed in the terminal ------
+
+
+def _assignment(name: str) -> str:
+    """A multi-line NAME='...' assignment of install.sh."""
+    text = INSTALL.read_text()
+    start = text.index(f"\n{name}='") + 1
+    end = text.index("'\n", start + len(name) + 2) + 1
+    return text[start:end]
+
+
+class _FakeCoordinator:
+    """The admin update API, answering GET /api/admin/updates from a script."""
+
+    def __init__(self, polls, start_status=200, start_detail=""):
+        import http.server
+        import json
+        import threading
+
+        self.requests = []
+        polls = list(polls)
+        fake = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, body):
+                data = json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _record(self):
+                n = int(self.headers.get("content-length") or 0)
+                body = self.rfile.read(n).decode() if n else ""
+                fake.requests.append(
+                    (self.command, self.path, self.headers.get("authorization"), body)
+                )
+
+            def do_GET(self):
+                self._record()
+                if self.path == "/healthz":
+                    return self._send(200, {"ok": True})
+                state = polls.pop(0) if len(polls) > 1 else polls[0]
+                if state is None:
+                    return self._send(502, {"detail": "bad gateway"})
+                return self._send(200, state)
+
+            def do_POST(self):
+                self._record()
+                if self.path == "/api/admin/updates/check":
+                    return self._send(200, _overview(available=True))
+                if self.path == "/api/admin/updates/start":
+                    if start_status != 200:
+                        return self._send(start_status, {"detail": start_detail})
+                    return self._send(200, _overview("coordinator", available=True))
+                self._send(404, {"detail": "no"})
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def close(self):
+        self.server.shutdown()
+
+
+def _overview(status=None, *, available=False, agent_state=None, a="0.1.0", b="0.1.0", error=None):
+    nodes = [
+        {"id": "n-a", "name": "node-a", "managed": True, "online": True, "version": a,
+         "update_state": "draining" if status == "canary" and a == "0.1.0" else "idle"},
+        {"id": "n-b", "name": "node-b", "managed": True, "online": True, "version": b,
+         "update_state": "idle"},
+    ]  # fmt: skip
+    return {
+        "current": "0.1.0",
+        "update_available": available,
+        "check": {"error": None, "latest": {"version": "0.2.0"}},
+        "coordinator_agent": {"update_state": agent_state, "update_target": "0.2.0"},
+        "rollouts": []
+        if status is None
+        else [
+            {
+                "id": "r1",
+                "version": "0.2.0",
+                "status": status,
+                "canary_node_id": "n-a",
+                "error": error,
+            }
+        ],  # fmt: skip
+        "nodes": nodes,
+    }
+
+
+def _run_update(url: str) -> subprocess.CompletedProcess:
+    script = "\n".join(
+        [
+            "set -Eeuo pipefail",
+            'info() { echo "==> $*"; }',
+            'ok() { echo "ok  $*"; }',
+            'warn() { echo "warning: $*" >&2; }',
+            'die() { echo "error: $*" >&2; exit 1; }',
+            "sleep() { :; }",
+            f"local_url() {{ echo {shlex.quote(url)}; }}",
+            "ETC=/nonexistent COORD_ADMIN_TOKEN=secret-token COORD_API_ERROR=''",
+            _function("env_get"),
+            _function("coord_api"),
+            _assignment("ROLLOUT_LINE"),
+            _function("follow_update"),
+            _function("update_installation"),
+            "update_installation",
+        ]
+    )
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="needs jq")
+def test_update_from_the_terminal_follows_every_step():
+    fake = _FakeCoordinator(
+        [
+            _overview("coordinator", agent_state="backing_up"),
+            _overview("coordinator", agent_state="migrating"),
+            None,  # switching versions: not answering for a moment
+            _overview("canary"),
+            _overview("nodes", a="0.2.0"),
+            _overview("done", a="0.2.0", b="0.2.0"),
+        ]
+    )
+    try:
+        r = _run_update(fake.url)
+    finally:
+        fake.close()
+    assert r.returncode == 0, r.stderr
+    progress = r.stderr
+    for line in (
+        "coordinator: backing up the database",
+        "coordinator: migrating the database",
+        "coordinator: switching versions",
+        "first node node-a: stopping the old version",
+        "other nodes: 1 of 2 on 0.2.0",
+    ):
+        assert line in progress, progress
+    assert "ok  updated to 0.2.0" in r.stdout
+    start = next(q for q in fake.requests if q[1] == "/api/admin/updates/start")
+    assert start[2] == "Bearer secret-token" and '"version": "0.2.0"' in start[3]
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="needs jq")
+def test_a_failed_update_says_why():
+    fake = _FakeCoordinator([_overview("failed", error="coordinator: migrate exited with 1")])
+    try:
+        r = _run_update(fake.url)
+    finally:
+        fake.close()
+    assert r.returncode == 1
+    assert "failed: coordinator: migrate exited with 1" in r.stderr
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="needs jq")
+def test_up_to_date_is_not_an_error():
+    fake = _FakeCoordinator(
+        [_overview()], start_status=409, start_detail="everything already runs 0.2.0"
+    )
+    try:
+        r = _run_update(fake.url)
+    finally:
+        fake.close()
+    assert r.returncode == 0, r.stderr
+    assert "up to date: everything runs 0.2.0" in r.stdout

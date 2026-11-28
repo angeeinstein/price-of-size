@@ -78,7 +78,10 @@ async def prune(session: AsyncSession) -> int:
 
 
 async def run_once(
-    sm: async_sessionmaker[AsyncSession], agent_dir: Path | None = None, key=None
+    sm: async_sessionmaker[AsyncSession],
+    agent_dir: Path | None = None,
+    key=None,
+    offline_after_s: float = 90.0,
 ) -> dict[str, int]:
     """One round. Each task has its own transaction, so one failing task (e.g.
     partition DDL) can never hold back another (e.g. lease reaping)."""
@@ -95,6 +98,14 @@ async def run_once(
             await session.commit()
     except Exception:
         log.exception("partition upkeep failed")
+    try:
+        async with sm() as session:
+            from pos_coordinator import updates
+
+            await updates.advance(session, agent_dir, offline_after_s)
+            await session.commit()
+    except Exception:
+        log.exception("advancing the update rollout failed")
     if agent_dir is not None and key is not None:
         try:
             async with sm() as session:
@@ -167,11 +178,15 @@ async def run_once(
 
 
 async def loop(
-    sm: async_sessionmaker[AsyncSession], interval_s: float, agent_dir: Path | None = None, key=None
+    sm: async_sessionmaker[AsyncSession],
+    interval_s: float,
+    agent_dir: Path | None = None,
+    key=None,
+    offline_after_s: float = 90.0,
 ) -> None:
     while True:
         try:
-            await run_once(sm, agent_dir, key)
+            await run_once(sm, agent_dir, key, offline_after_s)
         except asyncio.CancelledError:
             raise
         except Exception:  # keep the loop alive; the next round retries

@@ -184,28 +184,51 @@ inactive slot stopped, and updates when the signed desired release differs:
 
 ## Releases and updates
 
-1. Bump `shared/pos_shared/version.py`, merge, and push the tag `vX.Y.Z` (or, on
-   GitHub's release page, publish a release with a new tag `vX.Y.Z` on `main`).
-   The release workflow builds multi-arch images, pins them by digest in
-   `release.json` and attaches it and `install.sh` to the GitHub release. Wait for
-   the workflow to finish before installing.
-2. Register the release with the coordinator (control panel later; for now):
-   ```bash
-   curl -X POST https://pos.example.org/api/admin/releases -H "Authorization: Bearer $POS_ADMIN_TOKEN" \
-     -H 'content-type: application/json' -d @release.json
-   ```
-3. Roll out: set one canary node's target (`PATCH /api/admin/nodes/<id>` with
-   `{"target_version": "X.Y.Z"}`), watch its `agent_status`, then the rest.
-   The coordinator itself: `PUT /api/admin/settings/coordinator.target_version`.
-4. **Rollback** is the same with the previous version (already present in the
-   other slot, so it is just a container start). A rolled-back coordinator keeps
-   the newer database schema (`migrate` says so and changes nothing): migrations
-   only add, and removals land a release after the code stopped using them, so
-   the previous release runs on it. Go back one release at a time; for anything
-   further, restore the pre-migration dump in the backup directory.
+**Publishing a release.** Bump `shared/pos_shared/version.py`, merge, and publish
+a release with the tag `vX.Y.Z` on `main` (GitHub's release page, or push the
+tag). The release workflow builds multi-arch images, pins them by digest in
+`release.json` and attaches it and `install.sh` to the release (10–15 minutes).
 
-`install.sh --update` updates the installer-managed parts (agent bootstrap,
-simple-mode worker). In agent mode the coordinator steers versions.
+**Updating: the panel.** Releases page, card "Updates": the coordinator asks
+GitHub for the latest release every few hours (`POS_UPDATE_CHECK_INTERVAL_H`,
+default 6; 0: only on request), or right away with **Check now**. **Update to
+X.Y.Z** then does everything, with each step shown as it happens:
+
+1. downloads that release's `release.json`, checks it (version, every image pinned
+   by digest, no image moved to another repository) and registers and signs it;
+2. the coordinator: its agent downloads the images, checks the new version, backs
+   up the database **if the release has migrations** (keeping the newest 3 such
+   dumps in the backup directory), migrates, starts the new version next to the
+   old one and switches once it answers (blue-green);
+3. one node (the first online one): its agent drains the old worker, starts the
+   new one and switches once it is healthy;
+4. the other nodes. Offline nodes keep the target and update when they are back.
+
+A step that fails stops the rollout ("failed", with the reason); the agent of that
+machine has rolled back to the version before by then, and tries the failed version
+again only after 6 hours. **Stop the rollout** leaves nodes that have not started
+on their version. The updates come from `POS_UPDATE_REPOSITORY` (default
+`angeeinstein/price-of-size`, in the coordinator's environment file, not in the
+panel: an admin account cannot point the installation at other code).
+
+**Updating: SSH.** `install.sh --update` on the coordinator repairs the
+coordinator's installation, then does the same as the Update button through the
+coordinator's API, printing each step. If an update is already running, it follows
+it. On a node it only repairs the node: nodes are updated by their coordinator.
+
+**By hand.** Releases page: paste a `release.json`, register it, **Run on
+coordinator**, then set a node's target on the Nodes page, then the others. The
+API equivalents: `POST /api/admin/releases`, `PUT
+/api/admin/settings/coordinator.target_version`, `PATCH /api/admin/nodes/<id>`
+with `{"target_version": "X.Y.Z"}`; the update API is `GET /api/admin/updates`,
+`POST /api/admin/updates/check`, `/start` (`{"version": "X.Y.Z"}`) and `/cancel`.
+
+**Rollback** is the same by hand with the previous version (still present in the
+other slot, so it is just a container start). A rolled-back coordinator keeps the
+newer database schema (`migrate` says so and changes nothing): migrations only
+add, and removals land a release after the code stopped using them, so the
+previous release runs on it. Go back one release at a time; for anything further,
+restore the pre-migration dump in the backup directory.
 
 ## Crawling
 
@@ -527,8 +550,11 @@ sudo chmod 600 /etc/pos/coordinator.env
   `pos-db-restore-test.timer` restores the newest dump into a scratch database
   every month. Check with `systemctl list-timers 'pos-*'` and
   `journalctl -u pos-db-backup`.
-* **Before every coordinator migration** the agent runs `pos-coordinator backup`
-  into `<backup-dir>/coordinator` (newest 20 kept).
+* **Before a coordinator update that migrates the database** the agent runs
+  `pos-coordinator backup` into `<backup-dir>/coordinator` (newest 3 kept,
+  `POS_AGENT_BACKUP_KEEP`; off with `POS_AGENT_BACKUP_BEFORE_MIGRATE=false` in the
+  agent's environment). A release without migrations needs none: the agent asks
+  the new release first (`pos-coordinator migrations-pending`).
 * **Also back up:** the `pos-coordinator-data` volume (signing key), `/etc/pos`,
   the raw store and HTML archive on the NAS, and Proxmox snapshots of the LXCs.
 

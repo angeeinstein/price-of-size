@@ -7,6 +7,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { NavLink } from "react-router";
 import { api, setCsrf } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { useUpdates } from "@/components/Updates";
 import { applyTheme, initialDark } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
@@ -28,6 +29,12 @@ const NAV = [
 export function Layout({ children }: { children: ReactNode }) {
   const { me } = useAuth();
   const qc = useQueryClient();
+  const updates = useUpdates();
+  const badge: Record<string, string | null> = {
+    "/releases": updates.data?.rollouts.some((r) => ["coordinator", "canary", "nodes"].includes(r.status))
+      ? "updating"
+      : updates.data?.update_available ? "update" : null,
+  };
   const [dark, setDark] = useState(initialDark);
   useEffect(() => applyTheme(dark), [dark]);
 
@@ -53,6 +60,7 @@ export function Layout({ children }: { children: ReactNode }) {
                 isActive ? "bg-accent/10 font-medium text-accent" : "text-muted hover:bg-bg hover:text-fg",
               )}>
               <Icon size={16} /> {label}
+              {badge[to] && <span className="ml-auto rounded-full bg-accent/15 px-2 py-0.5 text-xs font-medium text-accent">{badge[to]}</span>}
             </NavLink>
           ))}
         </nav>

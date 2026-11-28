@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = None
     llm_poll_interval_s: float = 60.0
 
+    # Where updates come from (updates.py): the GitHub repository whose releases carry
+    # a release.json. Set by whoever runs the machine, not in the panel, so that an
+    # admin account cannot point the installation at other code. Empty: no checks.
+    update_repository: str = "angeeinstein/price-of-size"
+    update_check_interval_h: float = 6.0  # 0: check only on request
+
 
 @lru_cache
 def get_settings() -> Settings:

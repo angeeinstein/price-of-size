@@ -71,6 +71,7 @@ and watch `GET /api/admin/jobs/stats`. Interactive API docs: `/docs`.
 | Egress groups (per public IP, IPv6 per /64) | `api/deps.py` |
 | Offline buffering (SQLite spool) | `worker/.../spool.py` |
 | Dynamic resource use from cgroup limits | `worker/.../cgroup.py` |
+| Updates: GitHub check, one-click rollout (coordinator, one node, the rest) | `updates.py`, `api/updates.py`, `update_rollout` table; panel `components/Updates.tsx`; `install.sh --update` |
 | Runtime switches in the DB | `runtime_settings.py` (defaults, checks), `settings_schema.py` (the panel's form), `setting` table |
 | Cost ledger and budget pacing | `budget.py`, `llm_call` table |
 | Raw store on the NAS, content-addressed; identity marker (unmounted NAS is detected) | `rawstore.py`, `api/raw.py` |

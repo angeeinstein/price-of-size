@@ -380,18 +380,73 @@ async def test_coordinator_blue_green_with_backup_and_migrations(env, key, tmp_p
     assert "pos-coordinator-backup" not in first  # nothing to back up on first start
 
     docker.events.clear()
+    configs = {}
+    create = docker.create
+
+    async def recording_create(name, config):
+        configs[name] = config
+        return await create(name, config)
+
+    docker.create = recording_create
     offer(settings, key, "0.2.0", {"coordinator": C2, "agent": A1, "caddy": CADDY})
     st = await m.reconcile_once()
     assert st.active == "b"
     names = [(e[0], e[1]) for e in docker.events if e[0] in ("create", "start", "stop")]
     created = [n for op, n in names if op == "create"]
-    assert created[:3] == [
+    # the new release has migrations to run (exit 0): backed up first
+    assert created[:4] == [
         "pos-coordinator-selftest",
+        "pos-coordinator-pending",
         "pos-coordinator-backup",
         "pos-coordinator-migrate",
     ]
+    assert configs["pos-coordinator-backup"]["Cmd"] == [
+        "pos-coordinator", "backup", "--label", "before-0.2.0", "--keep", "3",
+    ]  # fmt: skip
     # blue-green: the new slot starts before the old one stops
     assert names.index(("start", "pos-coordinator-b")) < names.index(("stop", "pos-coordinator-a"))
+
+
+@pytest.mark.parametrize(
+    "pending_exit, backed_up",
+    [
+        (3, False),  # no migrations in the new release: no dump
+        (2, True),  # a release from before the question existed: back up to be safe
+    ],
+)
+async def test_a_backup_only_when_the_release_migrates(env, key, tmp_path, pending_exit, backed_up):
+    (tmp_path / "etc" / "coordinator.env").write_text("POS_DATABASE_URL=postgresql+psycopg://x\n")
+    exchange.write_json(
+        env.bootstrap_release,
+        {"version": "0.1.0", "images": {"coordinator": C1, "agent": A1, "caddy": CADDY}},
+    )
+    settings = env.model_copy(
+        update={"role": "coordinator", "service_env_file": tmp_path / "etc" / "coordinator.env"}
+    )
+    docker = FakeDocker()
+    m, clock = make_manager(settings, docker)
+    m.service.is_healthy = lambda slot, version, since: _running(docker, slot)
+    await m.reconcile_once()
+    phases = []
+    save = m._save
+    m._save = lambda st: (phases.append(st.update_state), save(st))[1]
+    docker.exit_codes[(C2, "migrations-pending")] = pending_exit
+    docker.events.clear()
+    offer(settings, key, "0.2.0", {"coordinator": C2, "agent": A1, "caddy": CADDY})
+    st = await m.reconcile_once()
+    assert st.active == "b"
+    created = [e[1] for e in docker.events if e[0] == "create"]
+    assert ("pos-coordinator-backup" in created) is backed_up
+    assert created.index("pos-coordinator-migrate") < created.index("pos-coordinator-b")
+    # the steps the panel shows while it runs
+    steps = [p for i, p in enumerate(phases) if p != "idle" and (not i or phases[i - 1] != p)]
+    expected = ["pulling", "selftest", "preparing"] + (["backing_up"] if backed_up else [])
+    assert steps == [*expected, "migrating", "starting", "health_check"]
+
+
+async def _running(docker, slot):
+    c = docker.containers.get(f"pos-coordinator-{slot}")
+    return bool(c and c["State"]["Running"])
 
 
 async def test_worker_role_does_not_pull_coordinator_only_images(env, key):

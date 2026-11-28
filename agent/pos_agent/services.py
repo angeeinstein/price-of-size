@@ -13,6 +13,7 @@ coordinator:  blue-green. The new slot starts beside the old one; Caddy has
 import ipaddress
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ import httpx
 from pos_agent.config import AgentSettings
 from pos_agent.docker import Docker
 from pos_shared import exchange
+from pos_shared.exchange import MIGRATIONS_PENDING, NO_MIGRATIONS_PENDING
 
 log = logging.getLogger(__name__)
 
@@ -91,14 +93,21 @@ class Service:
     async def prepare(self) -> None:
         """Ensure shared infrastructure (networks, proxies) exists."""
 
-    async def pre_switch(self, image: str, version: str, backup: bool = True) -> None:
-        """Run before the new slot starts (e.g. backup + migrations)."""
+    async def pre_switch(
+        self,
+        image: str,
+        version: str,
+        backup: bool = True,
+        phase: Callable[[str], None] | None = None,
+    ) -> None:
+        """Run before the new slot starts (e.g. backup + migrations); `phase` reports
+        the step it is in."""
 
     async def is_healthy(self, slot: str, version: str, since: float) -> bool:
         raise NotImplementedError
 
-    async def run_once(self, name: str, config: dict[str, Any], timeout_s: float) -> str:
-        """Run a one-off container to completion; raise with its logs if it fails."""
+    async def run(self, name: str, config: dict[str, Any], timeout_s: float) -> tuple[int, str]:
+        """Run a one-off container to completion: its exit code and logs."""
         await self.docker.remove(name)
         await self.docker.create(name, config)
         try:
@@ -107,6 +116,11 @@ class Service:
             logs = await self.docker.logs(name, tail=100)
         finally:
             await self.docker.remove(name)
+        return code, logs
+
+    async def run_once(self, name: str, config: dict[str, Any], timeout_s: float) -> str:
+        """Run a one-off container to completion; raise with its logs if it fails."""
+        code, logs = await self.run(name, config, timeout_s)
         if code != 0:
             raise RuntimeError(f"{name} exited with {code}: {logs[-1500:]}")
         return logs
@@ -260,14 +274,44 @@ class CoordinatorService(Service):
         await self.docker.ensure_network(self.settings.network)
         await self.ensure_caddy()
 
-    async def pre_switch(self, image: str, version: str, backup: bool = True) -> None:
+    async def migrations_pending(self, image: str) -> bool | None:
+        """Does the new release have database migrations to run? None: it cannot
+        say (a release from before this question existed)."""
+        code, logs = await self.run(
+            f"{self.settings.name_prefix}-coordinator-pending",
+            self._oneoff(image, ["pos-coordinator", "migrations-pending"], "coordinator-pending"),
+            timeout_s=300,
+        )
+        if code in (MIGRATIONS_PENDING, NO_MIGRATIONS_PENDING):
+            return code == MIGRATIONS_PENDING
+        log.warning("cannot tell whether migrations are pending (exit %s): backing up", code)
+        return None
+
+    async def pre_switch(
+        self,
+        image: str,
+        version: str,
+        backup: bool = True,
+        phase: Callable[[str], None] | None = None,
+    ) -> None:
+        step = phase or (lambda name: None)
         if backup and self.settings.backup_before_migrate:
-            log.info("backing up the database before migrating")
-            await self.run_once(
-                f"{self.settings.name_prefix}-coordinator-backup",
-                self._oneoff(image, ["pos-coordinator", "backup"], "coordinator-backup"),
-                timeout_s=3600,
-            )
+            if await self.migrations_pending(image) is False:
+                log.info("%s has no database migrations: no backup needed", version)
+            else:
+                step("backing_up")
+                log.info("backing up the database before migrating")
+                cmd = [
+                    "pos-coordinator", "backup",
+                    "--label", f"before-{version}",
+                    "--keep", str(self.settings.backup_keep),
+                ]  # fmt: skip
+                await self.run_once(
+                    f"{self.settings.name_prefix}-coordinator-backup",
+                    self._oneoff(image, cmd, "coordinator-backup"),
+                    timeout_s=3600,
+                )
+        step("migrating")
         log.info("migrating the database")
         await self.run_once(
             f"{self.settings.name_prefix}-coordinator-migrate",

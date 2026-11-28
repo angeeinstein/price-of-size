@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { PageTitle } from "@/components/Layout";
+import { UpdatesCard } from "@/components/Updates";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
@@ -41,9 +42,10 @@ export function ReleasesPage() {
   return (
     <>
       <PageTitle title="Releases" subtitle={`Signed by this coordinator (key ${key.data?.key_id ?? "…"})`} />
+      <UpdatesCard />
       {admin && (
         <Card className="mb-6">
-          <CardHeader title="Register a release" subtitle="Paste release.json from the GitHub release (images pinned by digest)" />
+          <CardHeader title="Register a release by hand" subtitle="Paste release.json from a GitHub release (images pinned by digest); the Update button above does this for you" />
           <CardBody className="space-y-3">
             <textarea className="h-32 w-full rounded-md border border-line bg-panel p-2 font-mono text-xs outline-none focus:border-accent"
               value={json} onChange={(e) => setJson(e.target.value)} placeholder='{"version": "0.2.0", "images": {...}}' aria-label="release.json" />
@@ -53,7 +55,7 @@ export function ReleasesPage() {
         </Card>
       )}
       <Card>
-        <CardHeader title="Releases" subtitle="Roll out to one node first (Nodes page), then the rest" />
+        <CardHeader title="Releases" subtitle="By hand: run a release on the coordinator here, then on one node (Nodes page), then the rest" />
         {releases.data?.length === 0 ? <Empty>No releases registered yet.</Empty> : (
           <Table>
             <thead><tr><Th>Version</Th><Th>Images</Th><Th>Registered</Th><Th>Coordinator</Th></tr></thead>

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link } from "react-router";
 import { PageTitle } from "@/components/Layout";
+import { UpdatesHint } from "@/components/Updates";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
@@ -298,6 +299,7 @@ export function SettingsPage() {
   return (
     <>
       <PageTitle title="Settings" subtitle="Runtime switches; changes apply within seconds and are audit-logged" />
+      <UpdatesHint />
       <div className="mb-4 flex justify-end">
         <label className="flex items-center gap-2 text-sm text-muted">
           <Switch checked={json} onChange={setJson} label="Edit as JSON" /> Edit as JSON
