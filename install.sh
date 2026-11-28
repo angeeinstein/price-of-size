@@ -148,7 +148,8 @@ is_loopback() { [[ -z "$1" || "$1" == 127.* || "$1" == ::1 || "$1" == localhost 
 # The coordinator as seen from this machine (wherever Caddy listens).
 local_url() {
   local host=${LISTEN:-127.0.0.1}
-  [[ "$host" == 0.0.0.0 || "$host" == "::" ]] && host=127.0.0.1
+  # a wildcard: the loopback of its family (Docker publishes "::" on IPv6 only)
+  case "$host" in 0.0.0.0) host=127.0.0.1 ;; ::) host=::1 ;; esac
   [[ "$host" == *:* ]] && host="[$host]"
   echo "http://$host:$HTTP_PORT"
 }
