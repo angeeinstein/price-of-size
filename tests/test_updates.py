@@ -406,6 +406,21 @@ async def test_a_revoked_canary_is_replaced(app, agent_dir, sessionmaker):
         assert (await s.get(Node, r.canary_node_id)).name == "b"
 
 
+async def test_a_canary_that_left_agent_mode_is_replaced(app, agent_dir, sessionmaker):
+    """A node switched to simple mode reports no agent: it cannot follow the target,
+    so the rollout must not wait for it."""
+    sm = sessionmaker
+    a = await _node(sm, "a", __version__)
+    await _node(sm, "b", __version__)
+    await _start(sm, app.state.signing_key, agent_dir)
+    assert await _advance(sm, agent_dir, own=NEW) == "canary"
+    await _set(sm, a, agent_status=None)
+    assert await _advance(sm, agent_dir, own=NEW) == "canary"
+    async with sm() as s:
+        (r,) = (await s.execute(select(UpdateRollout))).scalars().all()
+        assert (await s.get(Node, r.canary_node_id)).name == "b"
+
+
 async def test_the_nodes_can_be_updated_when_the_coordinator_already_is(
     app, admin, agent_dir, sessionmaker
 ):

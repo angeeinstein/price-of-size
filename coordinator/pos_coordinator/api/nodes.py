@@ -169,8 +169,9 @@ async def heartbeat(
         "active_jobs": body.active_jobs,
         "spooled_results": body.spooled_results,
     }
-    if body.agent is not None:
-        node.agent_status = body.agent.model_dump(mode="json")
+    # what the agent reports now: a node without one (simple mode, or switched to it)
+    # no longer follows release targets, and is not counted as agent-managed
+    node.agent_status = body.agent.model_dump(mode="json") if body.agent is not None else None
     node.last_heartbeat_at = func.now()
     if ip is not None:
         # the group follows the address and the grouping rules of this version (a node

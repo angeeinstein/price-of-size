@@ -83,6 +83,11 @@ async def test_worker_hands_signed_release_to_the_agent(app, admin, tmp_path):
     await worker.heartbeat_once()
     node = (await admin.get("/api/admin/nodes")).json()[0]
     assert node["agent_status"]["update_state"] == "health_check"
+    # switched to simple mode (no agent): no longer reported as agent-managed
+    (exch / exchange.STATUS).unlink()
+    await worker.heartbeat_once()
+    node = (await admin.get("/api/admin/nodes")).json()[0]
+    assert node["agent_status"] is None
     await worker.client.aclose()
 
 
