@@ -58,3 +58,27 @@ def test_local_limits_win_over_remote():
     assert s.http == 3
     s = cgroup.compute_slots(_limits(4, 8), local_max_http=10, remote_max_http=5)
     assert s.http == 5  # the stricter cap applies; the coordinator can never raise a local cap
+
+
+def test_the_machines_limits_cap_what_the_container_sees(tmp_path):
+    # Docker inside a Proxmox LXC: the container's own cgroup has no limits, so it
+    # would see the whole host; install.sh passes the LXC's CPUs and RAM as caps
+    root = _v2(tmp_path / "cg")
+    lim = cgroup.read_limits(root, cpu_cap=2, mem_cap=2 * GiB)
+    assert lim.cpu == min(2.0, float(os.cpu_count()))
+    assert lim.mem_limit == 2 * GiB and lim.effective_mem == 2 * GiB
+    slots = cgroup.compute_slots(lim)
+    assert slots.embed_batch == 32  # sized for 2 GiB, not for the host
+    # a container limit smaller than the cap still wins
+    root = _v2(tmp_path / "cg2", cpu_max="50000 100000", mem_max=str(GiB))
+    lim = cgroup.read_limits(root, cpu_cap=2, mem_cap=2 * GiB)
+    assert lim.cpu == 0.5 and lim.mem_limit == GiB
+
+
+def test_the_worker_reads_its_caps_from_the_environment(monkeypatch):
+    from pos_worker.config import WorkerSettings
+
+    monkeypatch.setenv("POS_WORKER_CPU_LIMIT", "2")
+    monkeypatch.setenv("POS_WORKER_MEMORY_LIMIT_MB", "2048")
+    s = WorkerSettings()
+    assert s.cpu_limit == 2 and s.memory_limit_mb == 2048

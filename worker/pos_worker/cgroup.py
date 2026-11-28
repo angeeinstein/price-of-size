@@ -56,7 +56,14 @@ def _host_mem_total() -> int | None:
     return None
 
 
-def read_limits(root: Path = Path("/sys/fs/cgroup"), state_dir: Path | None = None) -> Limits:
+def read_limits(
+    root: Path = Path("/sys/fs/cgroup"),
+    state_dir: Path | None = None,
+    cpu_cap: float | None = None,
+    mem_cap: int | None = None,
+) -> Limits:
+    """The container's own limits, capped by the machine's (`cpu_cap`, `mem_cap`
+    bytes) where the container cannot see those (Docker inside an LXC)."""
     host_cpus = float(os.cpu_count() or 1)
     cpu = host_cpus
     mem_limit = mem_used = None
@@ -86,6 +93,11 @@ def read_limits(root: Path = Path("/sys/fs/cgroup"), state_dir: Path | None = No
     host_total = _host_mem_total()
     if mem_limit is not None and host_total is not None:
         mem_limit = min(mem_limit, host_total)
+    if cpu_cap is not None and cpu_cap > 0:
+        cpu = min(cpu, cpu_cap)
+    if mem_cap is not None and mem_cap > 0:
+        mem_limit = mem_cap if mem_limit is None else min(mem_limit, mem_cap)
+        host_total = mem_cap if host_total is None else min(host_total, mem_cap)
 
     try:
         load = os.getloadavg()[0]

@@ -5,7 +5,7 @@ when their major versions match and the worker's minor is not newer than the
 coordinator's (the coordinator only adds to the API within one major version).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 # 1.1: signing key in enrollment, GET /api/v1/nodes/signing-key, releases, lease release
 API_VERSION = "1.1"
 

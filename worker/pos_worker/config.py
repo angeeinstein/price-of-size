@@ -27,6 +27,13 @@ class WorkerSettings(BaseSettings):
     cf_access_client_id: str | None = None
     cf_access_client_secret: str | None = None
 
+    # The machine's CPUs and RAM where the worker's container cannot see them: in a
+    # Proxmox LXC, Docker containers see the host's (the LXC's limits are on its own
+    # cgroup, not theirs). install.sh sets both from the machine it runs on; the
+    # smaller of these and what the container sees counts. None: no cap.
+    cpu_limit: float | None = None
+    memory_limit_mb: int | None = None
+
     # Local caps (None = no local cap).
     max_http_slots: int | None = None
     max_browser_slots: int | None = None
