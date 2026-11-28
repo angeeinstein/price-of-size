@@ -514,7 +514,9 @@ sudo chmod 600 /etc/pos/coordinator.env
   leaves room for it (at least 1024 tokens). Only the tokens used are paid.
 * **Asking again:** an answer that failed is kept per stage version, so it is not
   bought twice. A new version of a stage's prompt (e.g. `llm-classify-2`) asks again;
-  answers that were fine come from the ledger at no cost.
+  answers that were fine come from the ledger at no cost. LLM extraction keeps its
+  answers per fetch, so it asks an answer that was cut off (out of tokens) once more
+  instead.
 * `GET /api/admin/llm`: whether a key is set, the budget, spend per stage and model
   this month, and batches still running.
 
