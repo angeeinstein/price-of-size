@@ -408,8 +408,16 @@ async def overview(
         .scalars()
         .all()
     )
+    managed = [n for n in nodes if n.agent_status is not None]
     return {
         "current": __version__,
+        # nodes not on the coordinator's version (e.g. after a rollout stopped at a node)
+        "nodes_behind": sum(
+            1
+            for n in managed
+            if n.version != __version__
+            or (n.agent_status or {}).get("running_version") != __version__
+        ),
         "repository": repository,
         "self_update": agent_dir is not None,
         "check": last_check.view() if last_check else None,

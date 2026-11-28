@@ -218,7 +218,7 @@ def _overview(status=None, *, available=False, agent_state=None, a="0.1.0", b="0
     }
 
 
-def _run_update(url: str, etc: Path | None = None) -> subprocess.CompletedProcess:
+def _run_update(url: str, etc: Path | None = None, explicit: bool = False):
     script = "\n".join(
         [
             "set -Eeuo pipefail",
@@ -229,7 +229,8 @@ def _run_update(url: str, etc: Path | None = None) -> subprocess.CompletedProces
             "sleep() { :; }",
             f"local_url() {{ echo {shlex.quote(url)}; }}",
             f"ETC={shlex.quote(str(etc or '/nonexistent'))} COORD_ADMIN_TOKEN=secret-token"
-            " COORD_API_ERROR='' COORD_API_CODE=''",
+            " COORD_API_ERROR='' COORD_API_CODE=''"
+            f" EXPLICIT_RELEASE={int(explicit)}",
             "docker() { :; }",
             _function("env_get"),
             _function("coord_api"),
@@ -327,3 +328,25 @@ def test_an_older_coordinator_is_moved_first_then_the_nodes_follow(tmp_path):
     ]
     register = next(b for m, p, _, b in fake.requests if p == "/api/admin/releases")
     assert json.loads(register)["version"] == "0.2.0"
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="needs jq")
+def test_an_explicit_release_is_the_one_rolled_out(tmp_path):
+    """--version / --release-file: that release, registered first, not GitHub's latest."""
+    import json
+
+    (tmp_path / "release.json").write_text(
+        json.dumps({"version": "0.1.5", "images": {"coordinator": "c@sha256:" + "1" * 64}})
+    )
+    fake = _FakeCoordinator([_overview("done", a="0.2.0", b="0.2.0")])
+    try:
+        r = _run_update(fake.url, etc=tmp_path, explicit=True)
+    finally:
+        fake.close()
+    posts = [(p, json.loads(b) if b else None) for m, p, _, b in fake.requests if m == "POST"]
+    assert (
+        "/api/admin/releases",
+        {"version": "0.1.5", "images": {"coordinator": "c@sha256:" + "1" * 64}},
+    ) in posts
+    start = next(b for p, b in posts if p == "/api/admin/updates/start")
+    assert start == {"version": "0.1.5"}, r.stderr  # not the latest (0.2.0)

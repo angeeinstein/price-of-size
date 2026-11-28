@@ -192,6 +192,7 @@ load_conf() {
   done <"$CONF"
 }
 INSTALLED_VERSION=""  # set by load_conf
+EXPLICIT_RELEASE=0     # --version or --release-file given: update to exactly that
 
 detect_os() {
   local os_release=${POS_OS_RELEASE:-/etc/os-release}
@@ -768,7 +769,15 @@ update_installation() {
     follow_update "$id" "$version"
     return
   fi
-  if [[ $(jq -r .update_available <<<"$ov") == true ]]; then
+  if ((EXPLICIT_RELEASE)); then
+    # exactly the release asked for (--version, --release-file), not GitHub's latest;
+    # registered first, so the coordinator does not need to find it on GitHub
+    version=$(jq -r .version "$ETC/release.json")
+    if ! coord_api ov POST /api/admin/releases "$(jq -c '{version, images}' "$ETC/release.json")" \
+      && [[ $COORD_API_CODE != 409 ]]; then
+      die "could not register $version: $COORD_API_ERROR"
+    fi
+  elif [[ $(jq -r .update_available <<<"$ov") == true ]]; then
     version=$(jq -r .check.latest.version <<<"$ov")
   else
     version=$(jq -r .current <<<"$ov")  # up to date: nodes behind still catch up
@@ -1076,6 +1085,7 @@ main() {
   need_root
   detect_os
   local explicit_role=$ROLE
+  if [[ -n "$VERSION" || -n "$RELEASE_FILE" ]]; then EXPLICIT_RELEASE=1; fi
   load_conf
   if [[ $ACTION == uninstall ]]; then ROLE=$explicit_role; uninstall; return; fi
   if [[ $ACTION == update ]]; then

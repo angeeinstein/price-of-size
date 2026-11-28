@@ -39,6 +39,7 @@ interface NodeState {
 
 export interface UpdatesOverview {
   current: string;
+  nodes_behind: number;
   repository: string;
   self_update: boolean;
   check: {
@@ -238,6 +239,17 @@ export function UpdatesCard() {
           }}>
             {start.isPending ? "Starting…" : `Update to ${latest.version}`}
           </Button>
+        )}
+        {admin && data?.self_update && !data.update_available && !active && data.nodes_behind > 0 && (
+          <div className="flex flex-wrap items-center gap-3">
+            <Button variant="outline" disabled={start.isPending} onClick={() => {
+              if (confirm(`Update the ${data.nodes_behind} node(s) not on ${data.current} yet? One node first, then the others.`))
+                start.mutate(data.current);
+            }}>
+              {start.isPending ? "Starting…" : `Update ${data.nodes_behind} node${data.nodes_behind === 1 ? "" : "s"} to ${data.current}`}
+            </Button>
+            <span className="text-xs text-muted">The coordinator runs {data.current}; these nodes do not yet.</span>
+          </div>
         )}
         {error && <p className="text-sm text-bad">{error}</p>}
         {reconnecting && <p className="text-sm text-muted">The coordinator is switching versions; reconnecting…</p>}

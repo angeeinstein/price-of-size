@@ -416,10 +416,12 @@ async def test_the_nodes_can_be_updated_when_the_coordinator_already_is(
         register(s, app.state.signing_key, __version__, _images(), None, "admin")
         await s.commit()
     await _node(sessionmaker, "behind", "0.0.1")
+    await _node(sessionmaker, "current", __version__)
+    assert (await admin.get("/api/admin/updates")).json()["nodes_behind"] == 1
     r = await admin.post("/api/admin/updates/start", json={"version": __version__})
     assert r.status_code == 200, r.text
     assert await _advance(sessionmaker, agent_dir) == "canary"
-    assert await _targets(sessionmaker) == {"behind": __version__}
+    assert await _targets(sessionmaker) == {"behind": __version__, "current": None}
 
 
 async def test_the_overview_shows_the_steps(app, admin, agent_dir, sessionmaker):
