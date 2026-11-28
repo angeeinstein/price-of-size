@@ -761,7 +761,8 @@ update_installation() {
   info "asking GitHub for the latest release"
   local ov id version
   if ! coord_api ov POST /api/admin/updates/check; then
-    [[ $COORD_API_CODE == 404 ]] || die "update check failed: $COORD_API_ERROR"
+    # no such route: 404, or 405 where the panel's catch-all GET route matches the path
+    [[ $COORD_API_CODE == 404 || $COORD_API_CODE == 405 ]] || die "update check failed: $COORD_API_ERROR"
     legacy_coordinator_update
     # the new coordinator has the update API: the nodes follow through it
     coord_api ov POST /api/admin/updates/check || die "update check failed: $COORD_API_ERROR"
@@ -1196,6 +1197,12 @@ main() {
   docker_login
   registry_env
   resolve_release
+  if [[ "$ROLE" != node ]]; then
+    # updates from the panel do not touch install.conf: the running coordinator knows better
+    local running
+    running=$(curl -fsS --max-time 5 "$(local_url)/healthz" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)
+    INSTALLED_VERSION=${running:-$INSTALLED_VERSION}
+  fi
   if [[ -n "$INSTALLED_VERSION" && "$INSTALLED_VERSION" != "$VERSION" ]]; then
     info "installed: $INSTALLED_VERSION, installing: $VERSION"
   fi
