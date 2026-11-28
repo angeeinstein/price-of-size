@@ -531,6 +531,15 @@ docker logs pos-worker-a                                   # the worker itself
   (restored from scratch?). Re-enroll the node: `install.sh --uninstall --purge
   --role node`, then install with a new code.
 * *Docker not running in an LXC:* enable nesting.
+* *The coordinator does not start; the agent logs "database 'pos' uses the encoding
+  SQL_ASCII, not UTF8" (older releases: "cannot use a string pattern on a
+  bytes-like object"):* the database was created on a system without a locale (a
+  minimal container, `LANG` unset). Re-run `install.sh --role database` on the
+  database host: it creates an empty database again as UTF8. A database that
+  already holds data is left alone; move it with `pg_dump` / `pg_restore` into a
+  new UTF8 database (`CREATE DATABASE pos OWNER pos ENCODING 'UTF8'
+  LC_COLLATE 'C.UTF-8' LC_CTYPE 'C.UTF-8' TEMPLATE template0`, then
+  `CREATE EXTENSION vector`). The coordinator's agent retries on its own.
 * *`/healthz` says `"raw_store": false`, log says "raw store ... is not this
   installation's store":* the raw store directory does not hold the marker
   (`.pos-rawstore`) the database recorded on first start, usually because the
