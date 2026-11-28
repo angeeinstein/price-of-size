@@ -175,6 +175,7 @@ HTTP_PORT=$HTTP_PORT
 LISTEN=$LISTEN
 TRUSTED_PROXY=$TRUSTED_PROXY
 LOCAL_NODE=$LOCAL_NODE
+PG_ALLOW=$PG_ALLOW
 EOF
   chmod 0600 "$CONF"
 }
@@ -193,6 +194,7 @@ load_conf() {
       LISTEN) [[ -n "$LISTEN" ]] || LISTEN=$v ;;
       TRUSTED_PROXY) [[ -n "$TRUSTED_PROXY" ]] || TRUSTED_PROXY=$v ;;
       LOCAL_NODE) [[ -n "$LOCAL_NODE" ]] || LOCAL_NODE=$v ;;
+      PG_ALLOW) [[ -n "$PG_ALLOW" ]] || PG_ALLOW=$v ;;
     esac
   done <"$CONF"
 }
@@ -805,6 +807,13 @@ update_installation() {
 
 # --- database ------------------------------------------------------------------------------
 
+# The networks of the installer's own block in pg_hba.conf, comma-separated.
+hba_networks() {  # hba_networks FILE
+  [[ -r "$1" ]] || return 0
+  sed -n '/# pos-install-begin/,/# pos-install-end/p' "$1" \
+    | awk '$1 == "host" && $2 == "pos" && $3 == "pos" {print $4}' | paste -sd, -
+}
+
 pg_major() {
   local v
   for v in 17 16 15; do
@@ -837,6 +846,9 @@ install_database() {
   shared=$(( mem_kb / 4 / 1024 ))   # 25% of RAM, fixed at install time
   cache=$(( mem_kb * 3 / 4 / 1024 ))
   install -d "$cluster_dir/conf.d"
+  # A repair keeps the networks set before: from install.conf, or (installations
+  # from before it was saved there) from the installer's block in pg_hba.conf.
+  [[ -n "$PG_ALLOW" ]] || PG_ALLOW=$(hba_networks "$cluster_dir/pg_hba.conf")
   ask PG_ALLOW "Networks allowed to connect (CIDR, comma-separated)" "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
   cat >"$cluster_dir/conf.d/pos.conf" <<EOF
 # Written by install.sh (The Price of Size). Memory is sized once for this machine;

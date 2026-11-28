@@ -434,3 +434,41 @@ def test_deleting_needs_the_word_and_cancel_does_nothing():
     out = _menu("coordinator", "5\n", local_node="1").stdout
     assert "RESULT" not in out and "error" not in out
     assert "unknown choice 9" in _menu("node", "9\n").stdout
+
+
+def test_a_repair_keeps_the_database_networks(tmp_path):
+    """Repair asks nothing: the networks allowed to the database come from
+    install.conf, or for older installations from the installer's pg_hba block."""
+    hba = tmp_path / "pg_hba.conf"
+    hba.write_text(
+        "local all postgres peer\n"
+        "host all all 127.0.0.1/32 scram-sha-256\n"
+        "# pos-install-begin\n"
+        "host pos pos 10.1.0.0/16 scram-sha-256\n"
+        "host pos pos 192.168.100.0/24 scram-sha-256\n"
+        "# pos-install-end\n"
+    )
+    etc = tmp_path / "etc"
+    script = "\n".join(
+        [
+            "set -Eeuo pipefail",
+            _function("hba_networks"),
+            _function("save_conf"),
+            _function("load_conf"),
+            f"ETC={shlex.quote(str(etc))} CONF={shlex.quote(str(etc / 'install.conf'))}",
+            "ROLE=database MODE= VERSION=0.1.3 RAW_STORE= BACKUP_DIR=/b HTTP_PORT= LISTEN=",
+            "TRUSTED_PROXY= LOCAL_NODE= INSTALLED_VERSION=",
+            f"PG_ALLOW=$(hba_networks {shlex.quote(str(hba))})",
+            'echo "from-hba=$PG_ALLOW"',
+            "save_conf",
+            "PG_ALLOW= ROLE=",
+            "load_conf",
+            'echo "from-conf=$PG_ALLOW role=$ROLE"',
+            f'echo "missing=$(hba_networks {shlex.quote(str(tmp_path / "nope"))})"',
+        ]
+    )
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "from-hba=10.1.0.0/16,192.168.100.0/24" in r.stdout
+    assert "from-conf=10.1.0.0/16,192.168.100.0/24 role=database" in r.stdout
+    assert "missing=\n" in r.stdout
