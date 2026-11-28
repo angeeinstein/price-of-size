@@ -697,11 +697,34 @@ EOF
   # UTF8 whatever the system's locale: in a container without one (LANG unset) the
   # cluster's default is SQL_ASCII, which the coordinator cannot use. An earlier
   # install's empty SQL_ASCII database is made again; one with data is left alone.
-  local enc tables
+  local enc objects
   enc=$(su postgres -c "psql -Atc \"SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname = 'pos'\"")
   if [[ -n "$enc" && "$enc" != UTF8 ]]; then
-    tables=$(su postgres -c "psql -d pos -Atc \"SELECT count(*) FROM pg_tables WHERE schemaname = 'public'\"")
-    [[ "$tables" == 0 ]] || die "database pos uses $enc, not UTF8, and holds data (docs/operations.md, Troubleshooting)"
+    # empty means no user object at all (any schema; relations, functions, types,
+    # large objects, schemas), apart from what an extension (vector) brings
+    objects=$(su postgres -c "psql -d pos -At -v ON_ERROR_STOP=1" <<'SQL'
+SELECT
+  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass
+                      AND d.objid = c.oid AND d.deptype = 'e'))
+  + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass
+                      AND d.objid = p.oid AND d.deptype = 'e'))
+  + (SELECT count(*) FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND n.nspname NOT LIKE 'pg\_toast%' AND t.typrelid = 0 AND t.typelem = 0
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass
+                      AND d.objid = t.oid AND d.deptype = 'e'))
+  + (SELECT count(*) FROM pg_largeobject_metadata)
+  + (SELECT count(*) FROM pg_namespace
+    WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'public')
+      AND nspname NOT LIKE 'pg\_toast%' AND nspname NOT LIKE 'pg\_temp%');
+SQL
+)
+    [[ "$objects" == 0 ]] || die "database pos uses $enc, not UTF8, and is not empty (docs/operations.md, Troubleshooting)"
     warn "database pos was created as $enc; it is empty and is created again as UTF8"
     su postgres -c "psql -q -v ON_ERROR_STOP=1 -c 'DROP DATABASE pos WITH (FORCE)'"
   fi
