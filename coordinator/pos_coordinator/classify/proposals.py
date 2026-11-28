@@ -37,7 +37,7 @@ from pos_shared import embedding
 log = logging.getLogger(__name__)
 
 STAGE = "category_mapping"
-PROMPT = "llm-mapping-1"
+PROMPT = "llm-mapping-2"  # 2: room for thinking (1 could cut answers off)
 CANDIDATES = 20
 SAMPLE = 50  # products whose vectors make the centroid
 TITLES = 10  # of them shown in the prompt
@@ -212,7 +212,7 @@ async def _schedule(sm: async_sessionmaker[AsyncSession], llm: Any) -> dict[str,
                 model_role="category_mapping",
                 priority=Priority.normal,
                 source=source,
-                max_tokens=256,
+                max_tokens=2048,  # room for thinking before the answer
                 meta={
                     "source": source,
                     "path": path,

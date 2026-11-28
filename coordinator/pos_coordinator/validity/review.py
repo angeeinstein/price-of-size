@@ -33,7 +33,7 @@ from pos_shared.extract.price_rules import visible_text
 log = logging.getLogger(__name__)
 
 STAGE = "price_review"
-PROMPT = "price-review-1"
+PROMPT = "price-review-2"  # 2: room for thinking (1 could cut answers off)
 FLAG = "review_rejected"
 # what makes an offer suspicious enough to ask
 REVIEW_FLAGS = ["cross_source_outlier", "price_disagreement", "price_jump", "category_outlier"]
@@ -174,7 +174,7 @@ async def _schedule(
                 schema=Review,
                 priority=Priority.normal,
                 source=offer.source,
-                max_tokens=200,
+                max_tokens=1024,  # room for thinking before the answer
                 meta={"offer_id": str(offer.id), "version": v},
             )
         )

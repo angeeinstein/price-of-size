@@ -128,7 +128,7 @@ async def test_flagged_offers_are_reviewed(app):
     async with sm() as s:
         (r,) = (await s.execute(select(PriceReview))).scalars().all()
         assert r.verdict == "wrong_price_type" and r.confidence == 0.9
-        assert r.validator_version == "price-review-1/claude-haiku-5-5"
+        assert r.validator_version == "price-review-2/claude-haiku-5-5"
         # the rejected offer no longer makes the product's price
         assert (await s.get(Product, odd.id)).canonical_price_eur is None
     assert await review.schedule(sm, llm, store) == {"price_reviews_queued": 0}  # answered
@@ -226,7 +226,7 @@ async def test_price_checks_endpoint(app, admin):
     body = (await admin.get("/api/admin/price-checks")).json()
     assert body["flagged"]["category_outlier"] == 1 and body["flagged"]["review_rejected"] == 1
     assert body["reviews"] == [
-        {"version": "price-review-1/claude-haiku-5-5", "verdict": "placeholder", "offers": 1}
+        {"version": "price-review-2/claude-haiku-5-5", "verdict": "placeholder", "offers": 1}
     ]
     (row,) = body["latest"]
     assert row["title"] == "Regal 0" and row["reason"] == "Filler."
@@ -341,5 +341,5 @@ async def test_a_new_review_version_asks_about_rejected_offers_again(app, monkey
         await s.commit()
     assert (await _offer(sm, odd.id)).flags == [review.FLAG]
     assert await review.schedule(sm, llm, store) == {"price_reviews_queued": 0}
-    monkeypatch.setattr(review, "PROMPT", "price-review-2")
+    monkeypatch.setattr(review, "PROMPT", "price-review-3")
     assert await review.schedule(sm, llm, store) == {"price_reviews_queued": 1}

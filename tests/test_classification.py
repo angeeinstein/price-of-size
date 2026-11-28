@@ -233,7 +233,7 @@ async def test_llm_picks_from_the_shortlist(sessionmaker):
     assert len(reqs) == 3
     params = reqs[0]["params"]
     assert params["system"][0]["text"] == by_llm.SYSTEM
-    assert params["model"] == "claude-haiku-5-5" and params["max_tokens"] == 64
+    assert params["model"] == "claude-haiku-5-5" and params["max_tokens"] == 1024
     text = params["messages"][0]["content"]
     assert "Shop category: Möbel > Regale" in text and "Price" not in text
     assert "\nCandidates:\n1. " in text and "\n20. " in text
@@ -253,7 +253,7 @@ async def test_llm_picks_from_the_shortlist(sessionmaker):
     cur = await _current(sessionmaker, a)
     assert cur.tier == "llm" and cur.confidence == 0.9
     assert str(cur.taxonomy_node_id) == cands[by_pid[str(a)]][1]
-    assert cur.classifier_version.startswith("llm-classify-1/claude-haiku-5-5/2021-09-21+pos-1.")
+    assert cur.classifier_version.startswith("llm-classify-2/claude-haiku-5-5/2021-09-21+pos-1.")
     assert await _current(sessionmaker, b) is None and await _current(sessionmaker, c) is None
     # every product was answered under this version: nothing more to ask
     assert await by_llm.schedule(sessionmaker, llm) == {"llm_classify_queued": 0}
@@ -358,7 +358,7 @@ async def test_mapping_proposals(sessionmaker, admin):
     r = await admin.get("/api/admin/category-paths", params={"method": "llm"})
     (p,) = r.json()
     assert p["path"] == "Möbel > Regale" and p["note"] == "Shelves, all of them."
-    assert p["created_by"].startswith("llm-mapping-1/claude-sonnet-5-5/")
+    assert p["created_by"].startswith("llm-mapping-2/claude-sonnet-5-5/")
     # a person confirms it: from now on it is a manual mapping, never proposed again
     r = await admin.put(
         "/api/admin/category-mappings",

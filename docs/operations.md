@@ -509,6 +509,14 @@ sudo chmod 600 /etc/pos/coordinator.env
   answered from the ledger instead of a second call. Answers must match a JSON schema;
   an invalid one is retried once, then kept as `invalid`. A refusal is kept as
   `refused`; Sonnet and Opus calls fall back to another model on the API's side first.
+* **Thinking:** Haiku 5.5 and Sonnet 5.5 think before they answer (at effort `low`
+  here), and thinking counts towards the answer's token limit, so every stage's limit
+  leaves room for it (at least 1024 tokens). Only the tokens used are paid.
+* **Asking again:** an answer that failed is kept per stage version, so it is not
+  bought twice. A new version of a stage's prompt (e.g. `llm-classify-2`) asks again;
+  answers that were fine come from the ledger at no cost. LLM extraction keeps its
+  answers per fetch, so it asks an answer that was cut off (out of tokens) once more
+  instead.
 * `GET /api/admin/llm`: whether a key is set, the budget, spend per stage and model
   this month, and batches still running.
 
@@ -551,6 +559,11 @@ docker logs pos-worker-a                                   # the worker itself
   (restored from scratch?). Re-enroll the node: `install.sh --uninstall --purge
   --role node`, then install with a new code.
 * *Docker not running in an LXC:* enable nesting.
+* *LLM calls `invalid` with "no answer" or "no complete answer (stop_reason
+  max_tokens)":* the answer ran out of tokens, usually while thinking. 0.1.2 and
+  later leave room for it and ask such items again (on the DB host:
+  `SELECT stage, output->>'detail', count(*) FROM llm_call WHERE output->>'status'
+  = 'invalid' GROUP BY 1, 2;`).
 * *The coordinator does not start; the agent logs "database 'pos' uses the encoding
   SQL_ASCII, not UTF8" (older releases: "cannot use a string pattern on a
   bytes-like object"):* the database was created on a system without a locale (a

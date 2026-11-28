@@ -133,6 +133,43 @@ async def schedule(
         return await _schedule(sm, llm, store)
 
 
+# An answer cut off before it was complete (it ran out of tokens, usually while
+# thinking, under the tighter limit of earlier releases): asked once more. The mark
+# stays with the row, so one cut off again is not asked a third time.
+REQUEUED = "requeued"
+
+
+def _cut_off() -> Any:
+    detail = LlmExtraction.output["detail"].astext
+    return or_(detail == "no answer", detail.like("%stop_reason max_tokens%"))
+
+
+async def requeue_cut_off(session: AsyncSession) -> int:
+    """Answers that were cut off go back to "wanted", once."""
+    result = await session.execute(
+        update(LlmExtraction)
+        .where(
+            LlmExtraction.prompt_version == PROMPT,
+            LlmExtraction.status == "invalid",
+            _cut_off(),
+            ~LlmExtraction.output.has_key(REQUEUED),
+        )
+        .values(
+            status="wanted",
+            output=LlmExtraction.output.op("||")(
+                func.jsonb_build_object(REQUEUED, LlmExtraction.output["detail"].astext)
+            ),
+            model=None,
+            answered_at=None,
+            # a failed answer counted as applied; the new one must reach the
+            # derived layer (apply_pending picks it up if it cannot at once)
+            applied_at=None,
+            tried_at=None,
+        )
+    )
+    return result.rowcount or 0
+
+
 def _due() -> Any:
     """Rows not waiting out RETRY_AFTER."""
     return or_(LlmExtraction.tried_at.is_(None), LlmExtraction.tried_at < func.now() - RETRY_AFTER)
@@ -200,6 +237,9 @@ async def _schedule(
             return out
         if await by_llm.running_batches(s, STAGE) >= MAX_RUNNING_BATCHES:
             return out
+        if requeued := await requeue_cut_off(s):
+            log.info("%d cut-off LLM extractions asked again", requeued)
+            await s.commit()
         busy = [uuid.UUID(b) for b in await by_llm.in_flight(s, STAGE, "fetch_id")]
         rows = (
             await s.execute(
@@ -244,7 +284,7 @@ async def _schedule(
                 schema=PageAnswer,
                 priority=Priority.low,
                 source=source,
-                max_tokens=800,
+                max_tokens=2048,  # room for thinking before the answer
                 meta={"fetch_id": str(fetch_id)},
             )
         )
@@ -289,7 +329,11 @@ async def handle(session: AsyncSession, outcome: service.Outcome) -> None:
     row.output = (
         data.model_dump(mode="json")
         if isinstance(data, PageAnswer)
-        else {"detail": (outcome.detail or "")[:500]}
+        else {
+            "detail": (outcome.detail or "")[:500],
+            # asked again once already: not a third time
+            **({REQUEUED: row.output[REQUEUED]} if REQUEUED in (row.output or {}) else {}),
+        }
     )
     row.model = outcome.model
     row.answered_at = datetime.now(UTC)

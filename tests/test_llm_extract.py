@@ -2,7 +2,7 @@
 sizes; its answer fills only those gaps and survives a rebuild without a new call."""
 
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -404,3 +404,69 @@ async def test_the_earliest_fetch_with_breadcrumbs_names_the_category(app):
     assert result["identical"], result
     assert (await _product(sm)).attributes["category_path"] == ["Möbel", "Frühere"]
     assert (await _product(sm)).category_id is None
+
+
+def _cut_off(custom_id):
+    """A batch answer that ran out of tokens while thinking: no text at all."""
+    from types import SimpleNamespace
+
+    from tests.test_llm import _msg
+
+    message = _msg("", stop="max_tokens")
+    message.content = message.content[:1]  # the thinking block only
+    return SimpleNamespace(
+        custom_id=custom_id, result=SimpleNamespace(type="succeeded", message=message)
+    )
+
+
+async def test_a_cut_off_answer_is_asked_once_more(app):
+    sm, store = app.state.sessionmaker, app.state.rawstore
+    await _fetch(sm, store, _page(), "https://holz.example/regal", "holz")
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    fake = FakeClient()
+    llm = LlmService(sm, lambda: fake)
+
+    async def answer(result) -> LlmExtraction:
+        assert await llm_tier.schedule(sm, llm, store) == {"llm_extractions_queued": 1}
+        bid = list(fake.batches)[-1]
+        fake.batches[bid]["status"] = "ended"
+        fake.batches[bid]["results"] = [result]
+        assert await llm.poll_batches() == 1
+        async with sm() as s:
+            return (await s.execute(select(LlmExtraction))).scalar_one()
+
+    row = await answer(_cut_off("0"))
+    assert row.status == "invalid"
+    assert row.output == {"detail": "no complete answer (stop_reason max_tokens)"}
+    # asked once more (an answer cut off under an earlier release's tighter limit)
+    row = await answer(_cut_off("0"))
+    assert row.status == "invalid" and row.output["requeued"]
+    # cut off again: not a third time
+    assert await llm_tier.schedule(sm, llm, store) == {"llm_extractions_queued": 0}
+    assert len(fake.batches) == 2
+
+
+async def test_a_requeued_answer_that_works_is_applied(app):
+    sm, store = app.state.sessionmaker, app.state.rawstore
+    fid = await _fetch(sm, store, _page(), "https://holz.example/regal", "holz")
+    await stage.run_until_caught_up(sm, store, settle=NOW)
+    async with sm() as s:  # as an earlier release left it
+        row = (await s.execute(select(LlmExtraction))).scalar_one()
+        row.status, row.output = "invalid", {"detail": "no answer"}
+        row.answered_at = row.applied_at = datetime.now(UTC)  # a failure counts as applied
+        await s.commit()
+    fake = FakeClient()
+    llm = LlmService(sm, lambda: fake)
+    assert await llm_tier.schedule(sm, llm, store) == {"llm_extractions_queued": 1}
+    async with sm() as s:
+        row = (await s.execute(select(LlmExtraction))).scalar_one()
+        assert row.status == "wanted" and row.applied_at is None and row.answered_at is None
+    (bid,) = fake.batches
+    fake.batches[bid]["status"] = "ended"
+    fake.batches[bid]["results"] = [_answer("0", json.dumps(ANSWER))]
+    assert await llm.poll_batches() == 1
+    async with sm() as s:
+        row = (await s.execute(select(LlmExtraction))).scalar_one()
+        assert row.fetch_id == fid and row.status == "ok"
+        (o,) = (await s.execute(select(Offer))).scalars().all()
+        assert float(o.price) == 1299

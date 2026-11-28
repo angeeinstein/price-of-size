@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 
 STAGE = "classify"
 TIER = "llm"
-PROMPT = "llm-classify-1"
+PROMPT = "llm-classify-2"  # 2: room for thinking (1 cut some answers off)
 CANDIDATES = 20
 MAX_RUNNING_BATCHES = 2
 MAX_MAPPING_PASSES = 20  # of shopmap.classify before a round (5,000 products each)
@@ -201,7 +201,7 @@ async def _schedule(sm: async_sessionmaker[AsyncSession], llm: Any) -> dict[str,
                 model_role="default",
                 priority=Priority.low,
                 source=f.source,
-                max_tokens=64,
+                max_tokens=1024,  # room for thinking before the short answer
                 meta={
                     "product_id": str(r.product_id),
                     "candidates": [str(nodes.ids[i]) for i in idx],
