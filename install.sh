@@ -466,7 +466,14 @@ install_node() {
     on_net=true
     url=$LOCAL_COORDINATOR
   fi
+  # This machine's CPUs and RAM: in an LXC the worker's container would see the
+  # whole host's. Re-running the installer after a resize updates them.
+  local cpus mem_mb
+  cpus=$(nproc 2>/dev/null || true)
+  mem_mb=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo 2>/dev/null || true)
   write_env "$env_file" \
+    "POS_WORKER_CPU_LIMIT=$cpus" \
+    "POS_WORKER_MEMORY_LIMIT_MB=$mem_mb" \
     "POS_WORKER_COORDINATOR_URL=$url" \
     "POS_WORKER_ENROLLMENT_CODE=$ENROLL_CODE" \
     "POS_WORKER_NAME=$NODE_NAME" \

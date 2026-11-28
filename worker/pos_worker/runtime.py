@@ -81,7 +81,7 @@ class Worker:
         self.local_paused = False
         self.compatible = True
         self.heartbeat_interval = 15.0
-        self.limits = cgroup.read_limits(settings.cgroup_root, settings.state_dir)
+        self.limits = self._read_limits()
         self.slots = self._compute_slots()
         fetch_handlers.set_concurrency(self.slots.http)
         embed.set_model_dir(settings.state_dir / "models")
@@ -171,6 +171,15 @@ class Worker:
 
     # --- resources ---------------------------------------------------------
 
+    def _read_limits(self) -> cgroup.Limits:
+        s = self.settings
+        return cgroup.read_limits(
+            s.cgroup_root,
+            s.state_dir,
+            cpu_cap=s.cpu_limit,
+            mem_cap=s.memory_limit_mb * 1024 * 1024 if s.memory_limit_mb else None,
+        )
+
     def _compute_slots(self) -> cgroup.Slots:
         return cgroup.compute_slots(
             self.limits,
@@ -185,7 +194,7 @@ class Worker:
         while True:
             await asyncio.sleep(self.settings.resource_poll_s)
             try:
-                self.limits = cgroup.read_limits(self.settings.cgroup_root, self.settings.state_dir)
+                self.limits = self._read_limits()
             except Exception:
                 log.exception("reading resource limits failed; keeping the previous ones")
                 continue

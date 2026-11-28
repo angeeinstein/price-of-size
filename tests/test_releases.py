@@ -6,6 +6,7 @@ from pos_coordinator import maintenance
 from pos_coordinator.backup import libpq_env, libpq_url
 from pos_shared import exchange, signing
 from pos_shared.ids import uuid7
+from pos_shared.version import __version__
 from tests.helpers import make_agent
 
 W = "ghcr.io/x/price-of-size-worker@sha256:" + "1" * 64
@@ -55,7 +56,7 @@ async def test_worker_hands_signed_release_to_the_agent(app, admin, tmp_path):
 
     await worker.heartbeat_once()
     assert (exch / exchange.PINNED_KEY).read_text().strip() == key
-    assert exchange.read_json(exch / exchange.HEALTH)["version"] == "0.1.0"
+    assert exchange.read_json(exch / exchange.HEALTH)["version"] == __version__  # the running code
     assert not (exch / exchange.DESIRED).exists()
 
     await _release(admin)

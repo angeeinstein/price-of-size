@@ -14,6 +14,14 @@ How to install, update and run The Price of Size. Everything is driven by
 
 LXCs running Docker need the **nesting** feature (Proxmox: Options → Features → nesting).
 
+Inside an LXC, Docker containers see the host's CPUs and RAM, not the LXC's (its
+limits sit on the LXC's own cgroup). The installer therefore writes the machine's
+CPUs and RAM, as it sees them, into the worker's environment
+(`POS_WORKER_CPU_LIMIT`, `POS_WORKER_MEMORY_LIMIT_MB`), and the worker sizes its
+concurrency by the smaller of those and its container's own limits. After
+resizing a node's LXC, run the installer on it again (it keeps its settings) so
+the worker picks up the new size.
+
 ## Installing
 
 On a fresh Debian/Ubuntu (amd64 or arm64), as root:

@@ -79,6 +79,9 @@ admin -X POST -H 'content-type: application/json' \
   "http://127.0.0.1:$PORT/api/admin/jobs" >/dev/null
 wait_for 60 "jobs done" jobs_done
 [[ "$(stat -c %a /etc/pos/worker.env)" == 600 ]] || fail "worker.env must be 0600"
+# the machine's CPUs and RAM, which the worker's container may not see (LXC)
+grep -qx "POS_WORKER_CPU_LIMIT=$(nproc)" /etc/pos/worker.env || fail "worker.env lacks the CPU limit"
+grep -q '^POS_WORKER_MEMORY_LIMIT_MB=[0-9]' /etc/pos/worker.env || fail "worker.env lacks the RAM limit"
 
 step "re-running is a no-op for a healthy node"
 before=$(docker inspect -f '{{.State.StartedAt}}' pos-worker-a)
