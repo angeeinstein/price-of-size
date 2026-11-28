@@ -328,6 +328,14 @@ def main() -> int:
                 requests_[0] += 1
                 time.sleep(0.05)
 
+    # The new release has a database migration to run (the database is put one
+    # revision back), so its agent backs the database up before migrating.
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "downgrade", "-1"],
+        cwd=ROOT,
+        env={**os.environ, "POS_DATABASE_URL": db_url},
+        check=True,
+    )
     t = threading.Thread(target=probe, daemon=True)
     t.start()
     r = admin.put("/api/admin/settings/coordinator.target_version", json={"value": "0.2.0"})

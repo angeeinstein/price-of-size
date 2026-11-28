@@ -14,6 +14,7 @@ from pos_coordinator.api import admin, crawl, jobs, nodes, raw, releases
 from pos_coordinator.api import parsers as parsers_api
 from pos_coordinator.api import prices as prices_api
 from pos_coordinator.api import taxonomy as taxonomy_api
+from pos_coordinator.api import updates as updates_api
 from pos_coordinator.api.deps import Session
 from pos_coordinator.classify import by_llm, proposals  # (registers batch handlers)
 from pos_coordinator.config import Settings, get_settings
@@ -77,6 +78,24 @@ async def llm_loop(service, interval_s: float, store: RawStore) -> None:
         await asyncio.sleep(interval_s)
 
 
+async def update_check_loop(app: FastAPI, repository: str, interval_h: float) -> None:
+    """Ask GitHub for a new release now and then (the panel can ask at any time)."""
+    from pos_coordinator import updates
+
+    log = logging.getLogger("pos_coordinator.updates")
+    await asyncio.sleep(60)  # not while the service is still starting
+    while True:
+        result = await updates.check(repository)
+        app.state.update_check = result
+        if result.error:
+            log.warning("update check: %s", result.error)
+        elif result.latest and updates.version_key(result.latest.version) > updates.version_key(
+            __version__
+        ):
+            log.info("update available: %s (running %s)", result.latest.version, __version__)
+        await asyncio.sleep(interval_h * 3600)
+
+
 def create_app(settings: Settings | None = None, *, run_maintenance: bool = True) -> FastAPI:
     settings = settings or get_settings()
 
@@ -103,6 +122,7 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
                         settings.reaper_interval_s,
                         settings.agent_dir,
                         app.state.signing_key,
+                        settings.node_offline_after_s,
                     )
                 )
             )
@@ -114,6 +134,14 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
                 )
             )
             tasks.append(asyncio.create_task(fx_daily(app.state.sessionmaker)))
+            if settings.update_repository and settings.update_check_interval_h > 0:
+                tasks.append(
+                    asyncio.create_task(
+                        update_check_loop(
+                            app, settings.update_repository, settings.update_check_interval_h
+                        )
+                    )
+                )
             tasks.append(
                 asyncio.create_task(
                     llm_loop(app.state.llm, settings.llm_poll_interval_s, app.state.rawstore)
@@ -152,7 +180,10 @@ def create_app(settings: Settings | None = None, *, run_maintenance: bool = True
     async def version():
         return {"version": __version__, "api_version": API_VERSION}
 
-    routers = (nodes, jobs, raw, releases, admin, crawl, taxonomy_api, prices_api, parsers_api)
+    routers = (
+        nodes, jobs, raw, releases, admin, crawl, taxonomy_api, prices_api, parsers_api,
+        updates_api,
+    )  # fmt: skip
     for module in (*routers, panel_api):
         app.include_router(module.router)
     app.add_middleware(panel_static.SecurityHeaders)

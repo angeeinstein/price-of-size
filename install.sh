@@ -12,7 +12,9 @@
 # which lists every image by digest), never whatever is on `main`. Running it
 # again repairs an installation instead of breaking it.
 #
-#   --update        install the latest (or --version) release for the installed role
+#   --update        repair the installed role and, on the coordinator, update everything
+#                   to the latest release: the same as the panel's Update button
+#                   (coordinator, then one node, then the others), with its progress
 #   --uninstall     remove containers and services, keep data (add --purge to delete data)
 #
 # See docs/operations.md for details.
@@ -190,6 +192,7 @@ load_conf() {
   done <"$CONF"
 }
 INSTALLED_VERSION=""  # set by load_conf
+EXPLICIT_RELEASE=0     # --version or --release-file given: update to exactly that
 
 detect_os() {
   local os_release=${POS_OS_RELEASE:-/etc/os-release}
@@ -627,6 +630,174 @@ agent_error() {
 }
 COORD_ADMIN_TOKEN=""
 
+# --- updates through the coordinator ---------------------------------------------------
+# The panel's Update button and `install.sh --update` share one implementation: the
+# coordinator's update API (coordinator/pos_coordinator/updates.py).
+
+COORD_API_ERROR="" COORD_API_CODE=""
+
+# coord_api VAR METHOD PATH [JSON]: the response body in VAR; on an error returns 1
+# with the reason in COORD_API_ERROR (no subshell, so the caller sees both)
+coord_api() {
+  local -n _body=$1
+  local method=$2 path=$3 out code
+  local args=(-sS --max-time 120 -X "$method" "$(local_url)$path"
+    -H "Authorization: Bearer $COORD_ADMIN_TOKEN" -H 'content-type: application/json'
+    -w '\n%{http_code}')
+  [[ $# -ge 4 ]] && args+=(-d "$4")
+  COORD_API_ERROR="" COORD_API_CODE="" _body=""
+  if ! out=$(curl "${args[@]}" 2>&1); then
+    COORD_API_ERROR=$out
+    return 1
+  fi
+  code=${out##*$'\n'}
+  out=${out%$'\n'*}
+  COORD_API_CODE=$code
+  if [[ $code != 2* ]]; then
+    COORD_API_ERROR=$(jq -r '.detail // empty' <<<"$out" 2>/dev/null || true)
+    COORD_API_ERROR=${COORD_API_ERROR:-HTTP $code}
+    return 1
+  fi
+  _body=$out
+}
+
+# One line on where a rollout is (the panel shows the same steps).
+ROLLOUT_LINE='
+  def step(s): {"pulling": "downloading the new images", "selftest": "checking the new version",
+    "preparing": "preparing", "backing_up": "backing up the database",
+    "migrating": "migrating the database", "draining": "stopping the old version",
+    "starting": "starting the new version", "health_check": "waiting until it answers",
+    "agent_update": "updating its agent"}[s] // s;
+  . as $o | (.rollouts[] | select(.id == $id)) as $r
+  | if $r.status == "coordinator" then "coordinator: " + (
+      if $o.coordinator_agent.update_target == $r.version and ($o.coordinator_agent.update_state // "idle") != "idle"
+      then step($o.coordinator_agent.update_state) else "waiting for its agent" end)
+    elif $r.status == "canary" then (
+      [$o.nodes[] | select(.id == $r.canary_node_id)][0] as $n
+      | "first node \($n.name): " + (if ($n.update_state // "idle") != "idle"
+          then step($n.update_state) else "waiting for its agent" end))
+    elif $r.status == "nodes" then
+      "other nodes: \([$o.nodes[] | select(.managed and .version == $r.version and .running_version == $r.version)] | length) of \([$o.nodes[] | select(.managed)] | length) on \($r.version)"
+    else $r.status end'
+
+follow_update() {  # follow_update ROLLOUT_ID VERSION
+  local id=$1 version=$2 begin=$SECONDS deadline=$((SECONDS + 3600)) last="" line status ov
+  while ((SECONDS < deadline)); do
+    if coord_api ov GET /api/admin/updates; then
+      status=$(jq -r --arg id "$id" '.rollouts[] | select(.id == $id) | .status' <<<"$ov")
+      line=$(jq -r --arg id "$id" "$ROLLOUT_LINE" <<<"$ov")
+    else
+      status="" line="coordinator: switching versions (not answering for a moment)"
+    fi
+    case "$status" in
+      done)
+        [[ -t 2 ]] && printf '\r\033[K' >&2
+        ok "updated to $version: coordinator and nodes"
+        return 0 ;;
+      failed|cancelled)
+        [[ -t 2 ]] && printf '\r\033[K' >&2
+        local error
+        error=$(jq -r --arg id "$id" '.rollouts[] | select(.id == $id) | .error // ""' <<<"$ov")
+        [[ $status == cancelled ]] && { warn "the update to $version was stopped: $error"; return 1; }
+        die "the update to $version failed: $error (the agents rolled back; docker logs pos-agent-coordinator)" ;;
+    esac
+    if [[ -t 2 ]]; then
+      printf '\r\033[K    %s ... %ds' "$line" $((SECONDS - begin)) >&2
+    elif [[ "$line" != "$last" ]]; then
+      echo "    $line" >&2
+    fi
+    last=$line
+    sleep 3
+  done
+  [[ -t 2 ]] && printf '\r\033[K' >&2
+  warn "still updating after an hour; follow it on the panel's Releases page"
+}
+
+# A coordinator from before one-click updates (0.1.2 and older) has no update API:
+# it is moved to the release this installer resolved the earlier way (register it,
+# set coordinator.target_version, wait until it answers as that version).
+legacy_coordinator_update() {
+  local version body ov begin=$SECONDS deadline=$((SECONDS + 1800)) started step logs
+  version=$(jq -r .version "$ETC/release.json")
+  info "this coordinator predates one-click updates: moving it to $version first"
+  body=$(jq -c '{version, images}' "$ETC/release.json")
+  if ! coord_api ov POST /api/admin/releases "$body" && [[ $COORD_API_CODE != 409 ]]; then
+    die "could not register $version: $COORD_API_ERROR"
+  fi
+  coord_api ov PUT /api/admin/settings/coordinator.target_version "{\"value\": \"$version\"}" \
+    || die "could not set the coordinator's target version: $COORD_API_ERROR"
+  started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  while ((SECONDS < deadline)); do
+    if [[ $(curl -fsS --max-time 5 "$(local_url)/healthz" 2>/dev/null | jq -r '.version // empty' 2>/dev/null) == "$version" ]]; then
+      [[ -t 2 ]] && printf '\r\033[K' >&2
+      ok "coordinator runs $version"
+      return 0
+    fi
+    logs=$(docker logs --since "$started" pos-agent-coordinator 2>&1 || true)
+    if grep -q "update to $version failed" <<<"$logs"; then
+      [[ -t 2 ]] && printf '\r\033[K' >&2
+      die "the coordinator update to $version failed (rolled back): $(grep "update to $version failed" <<<"$logs" | tail -n 1)"
+    fi
+    step=$(grep -E ' INFO pos_agent' <<<"$logs" | tail -n 1 | sed -E 's/.* INFO pos_agent[^ ]* //' || true)
+    [[ -t 2 ]] && printf '\r\033[K    coordinator: %s ... %ds' "${step:-waiting for its agent}" $((SECONDS - begin)) >&2
+    sleep 3
+  done
+  die "the coordinator did not answer as $version within 30 minutes; see: docker logs pos-agent-coordinator"
+}
+
+update_installation() {
+  COORD_ADMIN_TOKEN=${COORD_ADMIN_TOKEN:-$(env_get "$ETC/coordinator.env" POS_ADMIN_TOKEN)}
+  if ! curl -fsS --max-time 5 "$(local_url)/healthz" >/dev/null 2>&1; then
+    warn "the coordinator does not answer at $(local_url), so no update was started"
+    return 1
+  fi
+  info "asking GitHub for the latest release"
+  local ov id version
+  if ! coord_api ov POST /api/admin/updates/check; then
+    [[ $COORD_API_CODE == 404 ]] || die "update check failed: $COORD_API_ERROR"
+    legacy_coordinator_update
+    # the new coordinator has the update API: the nodes follow through it
+    coord_api ov POST /api/admin/updates/check || die "update check failed: $COORD_API_ERROR"
+  fi
+  local check_error; check_error=$(jq -r '.check.error // empty' <<<"$ov")
+  if [[ -n "$check_error" ]]; then
+    # the release asked for (--version, --release-file) does not need GitHub's latest
+    ((EXPLICIT_RELEASE)) || die "update check: $check_error"
+    warn "update check: $check_error (not needed for the release asked for)"
+  fi
+  # an update already running: follow it
+  id=$(jq -r '[.rollouts[] | select(.status == "coordinator" or .status == "canary" or .status == "nodes")][0].id // empty' <<<"$ov")
+  if [[ -n "$id" ]]; then
+    version=$(jq -r --arg id "$id" '.rollouts[] | select(.id == $id) | .version' <<<"$ov")
+    info "an update to $version is already running"
+    follow_update "$id" "$version"
+    return
+  fi
+  if ((EXPLICIT_RELEASE)); then
+    # exactly the release asked for (--version, --release-file), not GitHub's latest;
+    # registered first, so the coordinator does not need to find it on GitHub
+    version=$(jq -r .version "$ETC/release.json")
+    if ! coord_api ov POST /api/admin/releases "$(jq -c '{version, images}' "$ETC/release.json")" \
+      && [[ $COORD_API_CODE != 409 ]]; then
+      die "could not register $version: $COORD_API_ERROR"
+    fi
+  elif [[ $(jq -r .update_available <<<"$ov") == true ]]; then
+    version=$(jq -r .check.latest.version <<<"$ov")
+  else
+    version=$(jq -r .current <<<"$ov")  # up to date: nodes behind still catch up
+  fi
+  if ! coord_api ov POST /api/admin/updates/start "{\"version\": \"$version\"}"; then
+    if [[ "$COORD_API_ERROR" == "everything already runs"* ]]; then
+      ok "up to date: everything runs $version"
+      return
+    fi
+    die "could not start the update to $version: $COORD_API_ERROR"
+  fi
+  id=$(jq -r '.rollouts[0].id' <<<"$ov")
+  info "updating to $version (coordinator first, then one node, then the others)"
+  follow_update "$id" "$version"
+}
+
 # --- database ------------------------------------------------------------------------------
 
 pg_major() {
@@ -918,6 +1089,7 @@ main() {
   need_root
   detect_os
   local explicit_role=$ROLE
+  if [[ -n "$VERSION" || -n "$RELEASE_FILE" ]]; then EXPLICIT_RELEASE=1; fi
   load_conf
   if [[ $ACTION == uninstall ]]; then ROLE=$explicit_role; uninstall; return; fi
   if [[ $ACTION == update ]]; then
@@ -965,6 +1137,12 @@ main() {
       install_node ;;
   esac
   save_conf
+  if [[ $ACTION == update ]]; then
+    case "$ROLE" in
+      coordinator|all-in-one) update_installation ;;
+      node) info "nodes are updated by their coordinator: its panel (Releases, Update) or install.sh --update there" ;;
+    esac
+  fi
   echo
   ok "The Price of Size $VERSION installed ($ROLE)"
   if [[ -n "$COORD_ADMIN_TOKEN" ]]; then

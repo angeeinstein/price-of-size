@@ -55,12 +55,15 @@ def run_backup(database_url: str, out_dir: Path, label: str, keep: int) -> Path:
         raise RuntimeError("pg_dump produced an empty file")
     os.replace(tmp, final)
     log.info("backup written: %s (%d bytes)", final, final.stat().st_size)
-    _prune(out_dir, keep)
+    _prune(out_dir, keep, label)
     return final
 
 
-def _prune(out_dir: Path, keep: int) -> None:
-    dumps = sorted(out_dir.glob("pos-*.dump"))
+def _prune(out_dir: Path, keep: int, label: str) -> None:
+    """The newest `keep` dumps of the same kind stay: dumps before updates
+    ("before-<version>") count together, any other label on its own."""
+    pattern = "pos-*-before-*.dump" if label.startswith("before-") else f"pos-*-{label}.dump"
+    dumps = sorted(out_dir.glob(pattern))
     for old in dumps[: max(len(dumps) - keep, 0)]:
         old.unlink()
         log.info("pruned old backup %s", old.name)

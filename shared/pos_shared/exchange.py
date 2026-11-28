@@ -21,6 +21,11 @@ STATUS = "status.json"
 HEALTH = "health.json"
 PINNED_KEY = "signing_key.pub"
 
+# `pos-coordinator migrations-pending` answers with its exit code; anything else
+# (e.g. a release from before the command existed) means it cannot tell.
+MIGRATIONS_PENDING = 0
+NO_MIGRATIONS_PENDING = 3
+
 
 def write_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

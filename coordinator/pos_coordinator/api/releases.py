@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from pos_coordinator.api.deps import (
     CurrentNode,
@@ -54,32 +55,39 @@ class ReleaseCreate(BaseModel):
     notes: str | None = Field(None, max_length=10000)
 
 
-@admin_router.post("", status_code=status.HTTP_201_CREATED, response_model=SignedManifest)
-async def create_release(
-    body: ReleaseCreate, request: Request, admin: SensitiveAdmin, session: Session
-):
-    try:
-        manifest = ReleaseManifest(
-            version=body.version, images=body.images, created_at=datetime.now(UTC)
-        )
-    except ValueError as e:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
+def register(
+    session: AsyncSession, key, version: str, images: dict[str, str], notes: str | None, actor: str
+) -> Release:
+    """Sign a release and add it to the session (the caller commits). ValueError when
+    the manifest is invalid (e.g. an image not pinned by digest)."""
+    manifest = ReleaseManifest(version=version, images=images, created_at=datetime.now(UTC))
     payload = manifest.model_dump(mode="json")
-    key = request.app.state.signing_key
     release = Release(
         version=manifest.version,
         manifest=payload,
         signature=signing.sign(key, payload),
         key_id=signing.key_id(signing.public_key_b64(key)),
-        notes=body.notes,
-        created_by=admin.name,
+        notes=notes,
+        created_by=actor,
     )
     session.add(release)
     session.add(
-        AuditLog(
-            actor=admin.name, action="release.create", target=manifest.version, details=payload
-        )
+        AuditLog(actor=actor, action="release.create", target=manifest.version, details=payload)
     )
+    return release
+
+
+@admin_router.post("", status_code=status.HTTP_201_CREATED, response_model=SignedManifest)
+async def create_release(
+    body: ReleaseCreate, request: Request, admin: SensitiveAdmin, session: Session
+):
+    try:
+        release = register(
+            session, request.app.state.signing_key, body.version, body.images, body.notes,
+            admin.name,
+        )  # fmt: skip
+    except ValueError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
     try:
         await session.commit()
     except IntegrityError as e:

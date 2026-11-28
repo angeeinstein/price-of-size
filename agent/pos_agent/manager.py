@@ -293,7 +293,7 @@ class Manager:
             )
 
             phase("preparing")
-            await self.service.pre_switch(image, version)
+            await self.service.pre_switch(image, version, phase=phase)
 
             if self.service.stop_old_first:
                 phase("draining")

@@ -204,6 +204,10 @@ def main() -> None:
         "raw-store-adopt",
         help="after moving the raw store: make the database accept the store mounted now",
     )
+    sub.add_parser(
+        "migrations-pending",
+        help="exit 0 if this release has database migrations to run, 3 if not",
+    )
     bk = sub.add_parser("backup", help="pg_dump the database")
     bk.add_argument("--out", type=Path, default=None)
     bk.add_argument("--label", default="manual")
@@ -219,6 +223,14 @@ def main() -> None:
         return
     if args.cmd == "check":
         sys.exit(asyncio.run(_check()))
+    if args.cmd == "migrations-pending":
+        from pos_coordinator import schema
+        from pos_coordinator.config import get_settings
+        from pos_shared.exchange import MIGRATIONS_PENDING, NO_MIGRATIONS_PENDING
+
+        pending = schema.pending(_alembic_config(), get_settings().database_url)
+        print("migrations pending" if pending else "no migrations pending")
+        sys.exit(MIGRATIONS_PENDING if pending else NO_MIGRATIONS_PENDING)
     if args.cmd in ("rebuild-derived", "fx-refresh", "raw-store-adopt"):
         sys.exit(asyncio.run(_derived_cmd(args.cmd)))
     if args.cmd == "create-user":

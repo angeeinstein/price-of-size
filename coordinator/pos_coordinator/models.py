@@ -402,6 +402,35 @@ class Release(Base):
     created_at: Mapped[datetime] = created()
 
 
+class UpdateRollout(Base):
+    """One update of the whole installation (updates.py): the coordinator first, then
+    one node, then the others. At most one is active at a time."""
+
+    __tablename__ = "update_rollout"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('coordinator','canary','nodes','done','failed','cancelled')",
+            name="update_rollout_status",
+        ),
+        Index(
+            "uq_update_rollout_active",
+            text("(true)"),
+            unique=True,
+            postgresql_where=text("status IN ('coordinator','canary','nodes')"),
+        ),
+    )
+    id: Mapped[uuid.UUID] = pk()
+    version: Mapped[str] = mapped_column(Text)
+    from_version: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default="coordinator")
+    canary_node_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    error: Mapped[str | None] = mapped_column(Text)
+    started_by: Mapped[str] = mapped_column(Text)
+    started_at: Mapped[datetime] = created()
+    updated_at: Mapped[datetime] = created()
+    finished_at: Mapped[datetime | None]
+
+
 class AppUser(Base):
     """A person using the control panel."""
 

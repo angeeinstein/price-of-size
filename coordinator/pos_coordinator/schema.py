@@ -53,6 +53,22 @@ def require_utf8(database_url: str) -> None:
         )
 
 
+def pending(cfg: Config, database_url: str) -> bool:
+    """Has this release migrations the database has not run yet? (A database ahead
+    of this release has none: migrations are expand-only.)"""
+    require_utf8(database_url)
+    script = ScriptDirectory.from_config(cfg)
+    engine = create_engine(database_url, poolclass=pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            current = set(MigrationContext.configure(conn).get_current_heads())
+    finally:
+        engine.dispose()
+    if any(not _known(script, r) for r in current):
+        return False
+    return current != set(script.get_heads())
+
+
 def upgrade(cfg: Config, database_url: str) -> str:
     """'upgraded', or 'newer' when the database is ahead of this release."""
     require_utf8(database_url)

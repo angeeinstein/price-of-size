@@ -28,7 +28,10 @@ class AgentSettings(BaseSettings):
     container_name: str = "pos-agent"  # this agent's own container
     name_prefix: str = "pos"
     worker_on_network: bool = False  # all-in-one: worker joins the coordinator network
+    # Before an update that migrates the database: a pg_dump (only when the new
+    # release has migrations to run). The newest `backup_keep` such dumps are kept.
     backup_before_migrate: bool = True
+    backup_keep: int = 3
 
     check_interval_s: float = 10.0
     selftest_timeout_s: float = 180.0
