@@ -22,6 +22,7 @@ Destructive for anything named pos-* on this Docker host. Never run it on a node
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -81,8 +82,13 @@ def build_version(version: str, reported: str, dockerfile_filter: str | None, bu
     if extra.exists():
         shutil.copy2(extra, ctx / ".sandbox-ca.crt")
     vfile = ctx / "shared/pos_shared/version.py"
-    text = vfile.read_text()
-    vfile.write_text(text.replace('__version__ = "0.1.0"', f'__version__ = "{reported}"'))
+    # whatever version the checkout is at: the images report the one asked for
+    text, n = re.subn(
+        r'^__version__ = "[^"]*"$', f'__version__ = "{reported}"', vfile.read_text(), flags=re.M
+    )
+    if n != 1:
+        raise SystemExit(f"{vfile}: expected one __version__ line, found {n}")
+    vfile.write_text(text)
     refs = {}
     for c in COMPONENTS:
         dockerfile = ctx / f"deploy/docker/{c}.Dockerfile"
