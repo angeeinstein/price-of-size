@@ -17,6 +17,10 @@ VERSION_CODENAME=noble
 ID=ubuntu
 ID_LIKE=debian
 """
+MINIMAL = """NAME="Some Debian derivative"
+VERSION="1.0"
+ID=debian
+"""
 DEBIAN = """PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
 NAME="Debian GNU/Linux"
 VERSION_ID="12"
@@ -37,7 +41,11 @@ def _function(name: str) -> str:
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 @pytest.mark.parametrize(
     ("os_release", "expected"),
-    [(UBUNTU, "ubuntu|debian|noble"), (DEBIAN, "debian||bookworm")],
+    [
+        (UBUNTU, "ubuntu|debian|noble"),
+        (DEBIAN, "debian||bookworm"),
+        (MINIMAL, "debian||"),  # no ID_LIKE, no codename: empty, not an abort
+    ],
 )
 def test_detecting_the_system_keeps_the_release_to_install(tmp_path, os_release, expected):
     # os-release defines VERSION too; sourcing it into the script made the installer

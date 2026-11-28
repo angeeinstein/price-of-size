@@ -200,9 +200,11 @@ detect_os() {
   vars=$(
     # shellcheck disable=SC1090
     . "$os_release"
-    printf '%s\n' "${ID:-}" "${ID_LIKE:-}" "${VERSION_CODENAME:-}"
+    # one line, fields separated by US (0x1f): empty fields (no ID_LIKE or
+    # VERSION_CODENAME) survive, where trailing newlines would be stripped
+    printf '%s\x1f%s\x1f%s\x1f' "${ID:-}" "${ID_LIKE:-}" "${VERSION_CODENAME:-}"
   )
-  { read -r OS_ID; read -r OS_LIKE; read -r OS_CODENAME; } <<<"$vars"
+  IFS=$'\x1f' read -r OS_ID OS_LIKE OS_CODENAME _ <<<"$vars"
   case "$OS_ID $OS_LIKE" in
     *debian*|*ubuntu*) ;;
     *) die "only Debian, Ubuntu and derivatives (incl. Raspberry Pi OS) are supported, found $OS_ID" ;;
