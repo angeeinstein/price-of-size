@@ -25,18 +25,26 @@ function useOverview() {
 }
 
 function HourBars({ data }: { data: Overview["fetches_per_hour"] }) {
-  if (!data.length) return <Empty>No fetches in the last 24 hours.</Empty>;
+  if (!data.some((d) => d.fetches > 0)) return <Empty>No fetches in the last 24 hours.</Empty>;
   const max = Math.max(...data.map((d) => d.fetches), 1);
+  const hour = (h: string) => new Date(h).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
   return (
-    <div className="flex h-32 items-end gap-1" aria-label="Fetches per hour">
-      {data.map((d) => (
-        <div
-          key={d.hour}
-          className="flex-1 rounded-t bg-accent/70"
-          style={{ height: `${(d.fetches / max) * 100}%` }}
-          title={`${new Date(d.hour).toLocaleString()}: ${d.fetches}`}
-        />
-      ))}
+    <div>
+      <div className="flex h-32 items-end gap-1" aria-label="Fetches per hour">
+        {data.map((d) => (
+          <div
+            key={d.hour}
+            className="flex-1 rounded-t bg-accent/70"
+            style={{ height: `${(d.fetches / max) * 100}%` }}
+            title={`${new Date(d.hour).toLocaleString()}: ${d.fetches}`}
+          />
+        ))}
+      </div>
+      <div className="mt-1 flex justify-between text-xs text-muted">
+        <span>{hour(data[0].hour)}</span>
+        <span>peak {max.toLocaleString()} / h</span>
+        <span>{hour(data[data.length - 1].hour)}</span>
+      </div>
     </div>
   );
 }

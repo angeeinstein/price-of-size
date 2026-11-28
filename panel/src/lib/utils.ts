@@ -12,7 +12,9 @@ export function fmtTime(value: string | null | undefined): string {
 
 export function fmtAgo(value: string | null | undefined): string {
   if (!value) return "never";
+  // the browser's clock may be a little ahead of or behind the coordinator's
   const s = Math.round((Date.now() - new Date(value).getTime()) / 1000);
+  if (s < 5) return "just now";
   if (s < 60) return `${s}s ago`;
   if (s < 3600) return `${Math.round(s / 60)}m ago`;
   if (s < 86400) return `${Math.round(s / 3600)}h ago`;
