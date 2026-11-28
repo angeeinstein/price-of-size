@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 
-from pos_coordinator import budget, queue, runtime_settings
+from pos_coordinator import budget, queue, runtime_settings, settings_schema
 from pos_coordinator.api.deps import (
     AppSettings,
     CurrentAdmin,
@@ -321,6 +321,11 @@ async def job_stats(admin: CurrentViewer, session: Session):
 @router.get("/settings")
 async def get_settings(admin: CurrentViewer, session: Session):
     return await runtime_settings.get_all(session)
+
+
+@router.get("/settings/schema")
+async def get_settings_schema(admin: CurrentViewer):
+    return settings_schema.schema()
 
 
 @router.put("/settings/{key}")

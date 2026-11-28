@@ -77,6 +77,18 @@ Then sign in, set up two-factor sign-in (Account page) and add further users
 if the last sign-in is older than 10 minutes. Every admin action is in the audit
 log. The bootstrap `POS_ADMIN_TOKEN` keeps working for scripts.
 
+**Settings** is a form, grouped by topic, with the right input for each value
+(switches, numbers with their unit and range, choices, models with their prices).
+A changed value shows its default and a "reset" link. "Edit as JSON" lists every
+key as raw JSON, including the few nothing reads yet. The server checks every
+value whichever way it is entered. Secrets (the Claude API key) are not settings:
+they live only in the environment files.
+
+**HTML archive:** the full HTML of every page is kept until the archive reaches
+`html_archive_quota_gb` (100 GB by default); after that, only the first pages of
+each domain and a random sample. On a small coordinator disk, lower the quota
+well below the free space (Settings, Storage and retention).
+
 ### Without the agent ("simple mode")
 
 For machines where you do not want a container with access to the Docker

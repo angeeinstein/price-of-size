@@ -88,6 +88,32 @@ def _int_in(lo: int, hi: int):
     return lambda v: isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
 
 
+def _number_in(lo: float, hi: float | None = None):
+    return lambda v: (
+        isinstance(v, int | float)
+        and not isinstance(v, bool)
+        and lo <= v
+        and (hi is None or v <= hi)
+    )
+
+
+def _llm_models(v: Any) -> bool:
+    """Roles to model IDs. Only priced models: the budget must know what a call costs,
+    and a typo would otherwise fail every call of that role at the API."""
+    from pos_coordinator.llm.pricing import PRICES
+
+    roles = DEFAULTS["llm_models"]
+    if not isinstance(v, dict) or not all(isinstance(m, str) for m in v.values()):
+        raise InvalidSetting('llm_models: a JSON object of role to model, e.g. {"default": "…"}')
+    if "default" not in v:
+        raise InvalidSetting("llm_models: the role 'default' is required")
+    if unknown := sorted(set(v) - set(roles)):
+        raise InvalidSetting(f"llm_models: unknown roles {unknown}; roles: {sorted(roles)}")
+    if unpriced := sorted({m for m in v.values() if m not in PRICES}):
+        raise InvalidSetting(f"llm_models: unknown models {unpriced}; known: {sorted(PRICES)}")
+    return True
+
+
 BLOCK_VALIDATORS: dict[str, Any] = {
     "block_challenge_run": _int_in(1, 50),
     "block_suspect_pause_s": _int_in(0, 7 * 86400),
@@ -98,21 +124,26 @@ BLOCK_KEYS = tuple(BLOCK_VALIDATORS)
 
 VALIDATORS: dict[str, Any] = {
     "rate_limit_scope": lambda v: v in ("global", "per_egress_ip"),
-    "base_rate_rps": lambda v: isinstance(v, int | float) and 0 < v <= 10,
-    "max_rate_rps": lambda v: isinstance(v, int | float) and 0 < v <= 50,
-    "llm_budget_hard_cap_usd": lambda v: isinstance(v, int | float) and v >= 0,
-    "heartbeat_interval_s": lambda v: isinstance(v, int | float) and 2 <= v <= 600,
-    "job_lease_s": lambda v: isinstance(v, int) and 30 <= v <= 86400,
-    "job_retention_days": lambda v: isinstance(v, int) and 1 <= v <= 3650,
-    "failed_job_retention_days": lambda v: isinstance(v, int) and 1 <= v <= 3650,
+    "base_rate_rps": _number_in(0.01, 10),
+    "max_rate_rps": _number_in(0.01, 50),
+    "llm_budget_hard_cap_usd": _number_in(0),
+    "llm_budget_soft_target_usd": lambda v: v is None or _number_in(0)(v),
+    "llm_budget_warn_fraction": lambda v: _fraction(v),
+    "llm_models": _llm_models,
+    "html_archive_quota_gb": _number_in(0),
+    "html_keep_first_pages": _int_in(0, 1_000_000),
+    "postgres_disk_budget_gb": _number_in(1),
+    "coordinator.run_worker": lambda v: isinstance(v, bool),
+    "heartbeat_interval_s": _number_in(2, 600),
+    "job_lease_s": _int_in(30, 86400),
+    "job_retention_days": _int_in(1, 3650),
+    "failed_job_retention_days": _int_in(1, 3650),
     "coordinator.target_version": lambda v: v is None or isinstance(v, str),
-    "max_total_rate_per_domain": lambda v: (
-        v is None or (isinstance(v, int | float) and 0 < v <= 50)
-    ),
+    "max_total_rate_per_domain": lambda v: v is None or _number_in(0.01, 50)(v),
     "respect_robots_txt": lambda v: isinstance(v, bool),
     **BLOCK_VALIDATORS,
     "user_agent": lambda v: isinstance(v, str) and 3 <= len(v) <= 200,
-    "html_keep_sample_fraction": lambda v: isinstance(v, int | float) and 0 <= v <= 1,
+    "html_keep_sample_fraction": lambda v: _fraction(v),
     "classify_knn_min_confidence": lambda v: _fraction(v),
     "classify_llm": lambda v: isinstance(v, bool),
     "classify_llm_below_confidence": lambda v: _fraction(v),

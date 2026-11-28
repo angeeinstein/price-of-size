@@ -187,6 +187,42 @@ async def test_settings_roundtrip_and_validation(admin):
     assert (await admin.put("/api/admin/settings/nope", json={"value": 1})).status_code == 404
 
 
+def test_every_setting_is_checked():
+    from pos_coordinator import runtime_settings
+
+    assert set(runtime_settings.DEFAULTS) == set(runtime_settings.VALIDATORS)
+    for key, value in runtime_settings.DEFAULTS.items():
+        assert runtime_settings.VALIDATORS[key](value), key
+
+
+async def test_llm_models_are_checked(admin):
+    url = "/api/admin/settings/llm_models"
+    ok = {"default": "claude-haiku-5-5", "category_mapping": "claude-opus-5-5"}
+    assert (await admin.put(url, json={"value": ok})).status_code == 200
+    assert (await admin.get("/api/admin/settings")).json()["llm_models"] == ok
+    for bad, says in (
+        ("claude-haiku-5-5", "JSON object"),
+        ({"parser_generation": "claude-sonnet-5-5"}, "'default' is required"),
+        ({"default": "claude-haiku-5-5", "summaries": "claude-haiku-5-5"}, "unknown roles"),
+        ({"default": "claude-haiku-55"}, "unknown models"),
+        ({"default": 5}, "JSON object"),
+    ):
+        r = await admin.put(url, json={"value": bad})
+        assert r.status_code == 422 and says in r.text, (bad, r.text)
+    assert (await admin.get("/api/admin/settings")).json()["llm_models"] == ok
+
+
+async def test_a_bad_stored_model_map_falls_back_to_the_defaults(sessionmaker):
+    from pos_coordinator.llm.service import LlmService
+    from pos_coordinator.models import Setting
+
+    async with sessionmaker() as s:
+        s.add(Setting(key="llm_models", value="claude-haiku-5-5", updated_by="old"))
+        await s.commit()
+    svc = LlmService(sessionmaker)
+    assert await svc.model_for("parser_generation") == "claude-sonnet-5-5"
+
+
 async def test_budget_endpoint(admin):
     r = await admin.get("/api/admin/budget")
     assert r.status_code == 200

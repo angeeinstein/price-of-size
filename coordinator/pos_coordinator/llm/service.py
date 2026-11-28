@@ -255,6 +255,8 @@ class LlmService:
     async def model_for(self, role: str) -> str:
         async with self.sm() as s:
             models = await runtime_settings.get(s, "llm_models")
+        if not isinstance(models, dict) or not isinstance(models.get("default"), str):
+            models = runtime_settings.DEFAULTS["llm_models"]  # stored before it was checked
         return models.get(role) or models["default"]
 
     # --- ledger --------------------------------------------------------------------

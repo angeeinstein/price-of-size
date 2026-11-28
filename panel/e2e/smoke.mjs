@@ -50,6 +50,19 @@ try {
   await page.getByRole("button", { name: "Queue", exact: true }).click();
   await page.waitForSelector("text=1 queued");
 
+  // the settings form: a number saved through the form is there after a reload
+  await page.click('a[href="/settings"]');
+  const rate = () => page.getByLabel("Start rate per domain", { exact: true });
+  await rate().fill("0.3");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.waitForSelector("text=default: 0.2 req/s");
+  await page.reload();
+  await rate().waitFor();
+  if ((await rate().inputValue()) !== "0.3") throw new Error("the saved rate did not stick");
+  await shot("settings-form");
+  await page.getByText("reset", { exact: true }).first().click();
+  await page.waitForSelector("text=default: 0.2 req/s", { state: "detached" });
+
   await page.goto(`${base}/domains`);
   await page.waitForSelector("text=smoke.example.invalid");
   await page.click('button[aria-label="Toggle dark mode"]');
