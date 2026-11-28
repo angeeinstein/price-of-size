@@ -760,7 +760,11 @@ update_installation() {
     coord_api ov POST /api/admin/updates/check || die "update check failed: $COORD_API_ERROR"
   fi
   local check_error; check_error=$(jq -r '.check.error // empty' <<<"$ov")
-  [[ -z "$check_error" ]] || die "update check: $check_error"
+  if [[ -n "$check_error" ]]; then
+    # the release asked for (--version, --release-file) does not need GitHub's latest
+    ((EXPLICIT_RELEASE)) || die "update check: $check_error"
+    warn "update check: $check_error (not needed for the release asked for)"
+  fi
   # an update already running: follow it
   id=$(jq -r '[.rollouts[] | select(.status == "coordinator" or .status == "canary" or .status == "nodes")][0].id // empty' <<<"$ov")
   if [[ -n "$id" ]]; then

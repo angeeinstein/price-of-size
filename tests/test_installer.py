@@ -120,7 +120,7 @@ def _assignment(name: str) -> str:
 class _FakeCoordinator:
     """The admin update API, answering GET /api/admin/updates from a script."""
 
-    def __init__(self, polls, start_status=200, start_detail="", legacy=False):
+    def __init__(self, polls, start_status=200, start_detail="", legacy=False, check_error=None):
         import http.server
         import json
         import threading
@@ -174,7 +174,10 @@ class _FakeCoordinator:
                 if not fake.upgraded:
                     return self._send(404, {"detail": "Not Found"})
                 if self.path == "/api/admin/updates/check":
-                    return self._send(200, _overview(available=True))
+                    ov = _overview(available=not check_error)
+                    if check_error:
+                        ov["check"] = {"error": check_error, "latest": None}
+                    return self._send(200, ov)
                 if self.path == "/api/admin/updates/start":
                     if start_status != 200:
                         return self._send(start_status, {"detail": start_detail})
@@ -331,14 +334,16 @@ def test_an_older_coordinator_is_moved_first_then_the_nodes_follow(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="needs jq")
-def test_an_explicit_release_is_the_one_rolled_out(tmp_path):
-    """--version / --release-file: that release, registered first, not GitHub's latest."""
+@pytest.mark.parametrize("check_error", [None, "GitHub answered 403 for owner/repo"])
+def test_an_explicit_release_is_the_one_rolled_out(tmp_path, check_error):
+    """--version / --release-file: that release, registered first, not GitHub's latest
+    (which need not even be known: GitHub down or checks off does not matter)."""
     import json
 
     (tmp_path / "release.json").write_text(
         json.dumps({"version": "0.1.5", "images": {"coordinator": "c@sha256:" + "1" * 64}})
     )
-    fake = _FakeCoordinator([_overview("done", a="0.2.0", b="0.2.0")])
+    fake = _FakeCoordinator([_overview("done", a="0.2.0", b="0.2.0")], check_error=check_error)
     try:
         r = _run_update(fake.url, etc=tmp_path, explicit=True)
     finally:
@@ -350,3 +355,15 @@ def test_an_explicit_release_is_the_one_rolled_out(tmp_path):
     ) in posts
     start = next(b for p, b in posts if p == "/api/admin/updates/start")
     assert start == {"version": "0.1.5"}, r.stderr  # not the latest (0.2.0)
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="needs jq")
+def test_a_failed_check_stops_an_update_to_the_latest():
+    fake = _FakeCoordinator([_overview()], check_error="GitHub not reachable: ConnectError")
+    try:
+        r = _run_update(fake.url)
+    finally:
+        fake.close()
+    assert r.returncode == 1 and "update check: GitHub not reachable" in r.stderr
+    assert not [q for q in fake.requests if q[1] == "/api/admin/updates/start"]
