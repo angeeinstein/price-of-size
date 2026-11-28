@@ -43,10 +43,15 @@ class AgentSettings(BaseSettings):
     host_raw_store: str | None = None  # host path (NAS mount) for the raw store
     host_backup_dir: str | None = None  # host path for pre-migration backups
     http_port: int = 8080  # host port Caddy publishes (cloudflared points here)
-    # Loopback only: everything external goes through Cloudflare Tunnel + Access.
-    # Publishing on other interfaces bypasses Access, and direct callers could set
-    # CF-Connecting-IP themselves (the coordinator trusts it behind Caddy).
+    # Host address Caddy publishes on: 127.0.0.1 (this machine only: a local
+    # cloudflared) or 0.0.0.0 / a LAN address (cloudflared in another LXC, the panel
+    # from the LAN). Callers on the LAN bypass Cloudflare Access; the panel's own
+    # sign-in and the nodes' credentials still apply.
     http_bind: str = "127.0.0.1"
+    # Proxies whose CF-Connecting-IP / X-Forwarded-* Caddy believes (the cloudflared
+    # host), comma-separated addresses or networks. Empty: all callers when Caddy
+    # listens on loopback only (only this machine can call), none otherwise.
+    trusted_proxies: str = ""
     switch_grace_s: float = 10.0
 
     # Optional registry credentials (private GHCR packages)

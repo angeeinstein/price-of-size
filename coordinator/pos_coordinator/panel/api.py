@@ -20,6 +20,8 @@ from pos_coordinator.api.deps import (
     SensitiveAdmin,
     Session,
     client_ip,
+    is_local,
+    request_https,
 )
 from pos_coordinator.models import (
     AppUser,
@@ -86,7 +88,12 @@ async def login(
     token, s = await auth.create_session(session, user, ip, request.headers.get("user-agent"))
     session.add(AuditLog(actor=user.username, action="login", target=ip))
     await session.commit()
-    _set_cookie(response, token, settings.cookie_secure)
+    # Secure, except behind Caddy for a browser on the LAN over plain HTTP (the panel
+    # by its LAN address): it would never send a Secure cookie back
+    plain_lan = (
+        settings.trust_proxy_headers and not request_https(request, settings) and is_local(ip)
+    )
+    _set_cookie(response, token, settings.cookie_secure and not plain_lan)
     return {"user": _user_view(user), "csrf_token": s.csrf_token}
 
 

@@ -18,6 +18,10 @@ from pos_coordinator.api.deps import (
     CurrentViewer,
     SensitiveAdmin,
     Session,
+    client_ip,
+    egress_group_for,
+    is_local,
+    request_https,
 )
 from pos_coordinator.models import (
     AuditLog,
@@ -291,6 +295,19 @@ async def audit_log(viewer: CurrentViewer, session: Session, limit: int = Query(
         }
         for a in rows
     ]
+
+
+@router.get("/connection")
+async def connection(request: Request, viewer: CurrentViewer, settings: AppSettings):
+    """How the coordinator sees this request: to check a proxy setup (is the visitor's
+    address the real one, or the cloudflared host's?)."""
+    ip = client_ip(request, settings)
+    return {
+        "client_ip": ip,
+        "egress_group": egress_group_for(ip),
+        "local_network": is_local(ip),
+        "https": request_https(request, settings),
+    }
 
 
 @router.get("/jobs/stats")

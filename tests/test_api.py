@@ -119,7 +119,7 @@ async def test_egress_group_from_proxy_header(app, admin, settings):
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://c",
-        headers={API_VERSION_HEADER: "1.0", "CF-Connecting-IP": "2001:db8::1234"},
+        headers={API_VERSION_HEADER: "1.0", "X-Pos-Client-Ip": "2001:db8::1234"},
     ) as c:
         _, pub = keypair()
         r = await enroll(c, admin, pub)
@@ -127,6 +127,53 @@ async def test_egress_group_from_proxy_header(app, admin, settings):
     assert node["id"] == r.json()["node_id"]
     assert node["egress_ip"] == "2001:db8::1234"
     assert node["egress_group"] == "2001:db8::/64"
+
+
+async def test_the_client_address_behind_caddy(app, admin, settings):
+    settings.trust_proxy_headers = True
+    # Caddy's own header wins over anything else a caller sends
+    r = await admin.get(
+        "/api/admin/connection",
+        headers={
+            "X-Pos-Client-Ip": "192.168.1.20",
+            "CF-Connecting-IP": "203.0.113.9",
+            "X-Forwarded-For": "198.51.100.1",
+            "X-Forwarded-Proto": "http",
+        },  # fmt: skip
+    )
+    assert r.json() == {
+        "client_ip": "192.168.1.20",
+        "egress_group": "lan",
+        "local_network": True,
+        "https": False,
+    }
+    # without Caddy's header (a caller had it stripped), CF-Connecting-IP and
+    # X-Forwarded-For are never believed: the peer's own address counts
+    r = await admin.get(
+        "/api/admin/connection",
+        headers={"CF-Connecting-IP": "203.0.113.9", "X-Forwarded-For": "198.51.100.1"},
+    )
+    assert r.json()["client_ip"] == "127.0.0.1"
+    r = await admin.get(
+        "/api/admin/connection",
+        headers={"X-Pos-Client-Ip": "203.0.113.9", "X-Forwarded-Proto": "https"},
+    )
+    assert r.json() == {
+        "client_ip": "203.0.113.9",
+        "egress_group": "203.0.113.9",
+        "local_network": False,
+        "https": True,
+    }
+
+
+def test_callers_on_the_local_network_share_one_egress_group():
+    from pos_coordinator.api.deps import egress_group_for
+
+    for ip in ("127.0.0.1", "10.0.0.5", "192.168.1.20", "172.18.0.1", "fd00::1", "::1",
+               "::ffff:192.168.1.20", "fe80::1"):  # fmt: skip
+        assert egress_group_for(ip) == "lan", ip
+    assert egress_group_for("203.0.113.9") == "203.0.113.9"
+    assert egress_group_for("2001:db8::1234") == "2001:db8::/64"
 
 
 async def test_settings_roundtrip_and_validation(admin):

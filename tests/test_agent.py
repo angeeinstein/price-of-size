@@ -17,7 +17,17 @@ async def test_desired_state_and_commands(app, admin, tmp_path):
     await agent.heartbeat_once()
     nodes = (await admin.get("/api/admin/nodes")).json()
     assert nodes[0]["online"] and nodes[0]["actual_state"] == "running"
-    assert nodes[0]["egress_group"] == "127.0.0.1"
+    assert nodes[0]["egress_group"] == "lan"  # a node on the local network
+    # a node enrolled under older grouping rules is regrouped by its next heartbeat
+    from sqlalchemy import update as sa_update
+
+    from pos_coordinator.models import Node
+
+    async with app.state.sessionmaker() as s:
+        await s.execute(sa_update(Node).values(egress_group="127.0.0.1"))
+        await s.commit()
+    await agent.heartbeat_once()
+    assert (await admin.get("/api/admin/nodes")).json()[0]["egress_group"] == "lan"
 
     # pause: the node stops leasing
     await admin.patch(f"/api/admin/nodes/{node_id}", json={"run_state": "paused"})

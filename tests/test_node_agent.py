@@ -475,3 +475,40 @@ async def test_rollback_works_while_the_registry_is_down(env, key):
     st = await m.reconcile_once()
     assert st.slots[st.active].version == "0.1.0" and st.update_state == "idle"
     assert not [e for e in docker.events if e[0] == "pull"]
+
+
+@pytest.mark.parametrize(
+    ("bind", "proxies", "trusted"),
+    [
+        ("127.0.0.1", "", ["0.0.0.0/0", "::/0"]),  # only this machine can call
+        ("0.0.0.0", "", []),  # the LAN can call: nobody's visitor address is believed
+        ("0.0.0.0", "192.168.1.10, 10.0.0.0/24", ["192.168.1.10/32", "10.0.0.0/24"]),
+        ("192.168.1.5", "fd00::7", ["fd00::7/128"]),
+    ],
+)
+def test_caddy_trusts_the_visitor_address_only_from_trusted_proxies(bind, proxies, trusted):
+    from pos_agent.services import CoordinatorService
+
+    s = AgentSettings(role="coordinator", http_bind=bind, trusted_proxies=proxies)
+    svc = CoordinatorService(s, FakeDocker())
+    assert svc.trusted_proxy_ranges() == trusted
+    server = svc.caddy_config()["apps"]["http"]["servers"]["pos"]
+    if trusted:
+        assert server["trusted_proxies"] == {"source": "static", "ranges": trusted}
+        assert server["client_ip_headers"] == ["CF-Connecting-IP", "X-Forwarded-For"]
+    else:
+        assert "trusted_proxies" not in server and "client_ip_headers" not in server
+    # every upstream request carries Caddy's own client address, overwriting the
+    # caller's, set by the proxy itself (after hop-by-hop removal: Connection cannot
+    # strip it)
+    (proxy,) = server["routes"][0]["handle"]
+    assert proxy["handler"] == "reverse_proxy"
+    assert proxy["headers"] == {"request": {"set": {"X-Pos-Client-Ip": ["{http.vars.client_ip}"]}}}
+
+
+def test_a_malformed_trusted_proxy_is_an_error():
+    from pos_agent.services import CoordinatorService
+
+    s = AgentSettings(role="coordinator", http_bind="0.0.0.0", trusted_proxies="cloudflared")
+    with pytest.raises(ValueError):
+        CoordinatorService(s, FakeDocker()).caddy_config()
