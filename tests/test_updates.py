@@ -421,6 +421,57 @@ async def test_a_canary_that_left_agent_mode_is_replaced(app, agent_dir, session
         assert (await s.get(Node, r.canary_node_id)).name == "b"
 
 
+async def test_a_silent_canary_is_given_up_on_after_a_while(app, agent_dir, sessionmaker):
+    sm = sessionmaker
+    a = await _node(sm, "a", __version__)
+    await _node(sm, "b", __version__)
+    await _start(sm, app.state.signing_key, agent_dir)
+    assert await _advance(sm, agent_dir, own=NEW) == "canary"
+    # restarting for the switch stops heartbeats for a while: still the canary
+    await _set(sm, a, last_heartbeat_at=datetime.now(UTC) - timedelta(minutes=3))
+    assert await _advance(sm, agent_dir, own=NEW) == "canary"
+    async with sm() as s:
+        (r,) = (await s.execute(select(UpdateRollout))).scalars().all()
+        assert r.canary_node_id == a
+    # silent for longer than any switch: the other node goes first; a keeps its target
+    lost = timedelta(seconds=updates.CANARY_LOST_AFTER_S + 60)
+    await _set(sm, a, last_heartbeat_at=datetime.now(UTC) - lost)
+    assert await _advance(sm, agent_dir, own=NEW) == "canary"
+    async with sm() as s:
+        (r,) = (await s.execute(select(UpdateRollout))).scalars().all()
+        assert (await s.get(Node, r.canary_node_id)).name == "b"
+    assert await _targets(sm) == {"a": NEW, "b": NEW}
+
+
+async def test_the_only_canary_lost_lets_the_rollout_finish(app, agent_dir, sessionmaker):
+    sm = sessionmaker
+    a = await _node(sm, "a", __version__)
+    await _start(sm, app.state.signing_key, agent_dir)
+    assert await _advance(sm, agent_dir, own=NEW) == "canary"
+    lost = timedelta(seconds=updates.CANARY_LOST_AFTER_S + 60)
+    await _set(sm, a, last_heartbeat_at=datetime.now(UTC) - lost)
+    # nothing online left to wait for; a updates when it is back
+    assert await _advance(sm, agent_dir, own=NEW) == "done"
+    assert await _targets(sm) == {"a": NEW}
+
+
+async def test_nodes_that_join_during_the_rollout_get_the_target(app, agent_dir, sessionmaker):
+    sm = sessionmaker
+    a = await _node(sm, "a", __version__)
+    b = await _node(sm, "b", __version__)
+    await _start(sm, app.state.signing_key, agent_dir)
+    await _advance(sm, agent_dir, own=NEW)
+    await _switched(sm, a)
+    assert await _advance(sm, agent_dir, own=NEW) == "nodes"  # b still switching
+    late = await _node(sm, "late", "0.0.1")  # enrolled meanwhile, on an older version
+    assert await _advance(sm, agent_dir, own=NEW) == "nodes"
+    assert (await _targets(sm))["late"] == NEW
+    await _switched(sm, b)
+    assert await _advance(sm, agent_dir, own=NEW) == "nodes"  # waits for late too
+    await _switched(sm, late)
+    assert await _advance(sm, agent_dir, own=NEW) == "done"
+
+
 async def test_the_nodes_can_be_updated_when_the_coordinator_already_is(
     app, admin, agent_dir, sessionmaker
 ):

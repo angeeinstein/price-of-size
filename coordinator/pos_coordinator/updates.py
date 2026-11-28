@@ -38,6 +38,10 @@ log = logging.getLogger(__name__)
 
 REQUIRED_IMAGES = ("coordinator", "worker", "agent")
 ACTIVE = ("coordinator", "canary", "nodes")
+# A first node silent this long is given up on (another one goes first; it keeps its
+# target and updates when it is back). Far above a normal switch, whose drain and
+# restart can stop heartbeats for a few minutes.
+CANARY_LOST_AFTER_S = 600
 MAX_RELEASE_JSON = 64 * 1024
 GITHUB_API = "https://api.github.com"
 
@@ -303,10 +307,13 @@ async def advance(
             n.version == r.version and (n.agent_status or {}).get("running_version") == r.version
         )
 
-    async def to_nodes() -> None:
+    def target_all() -> None:
         for n in nodes:
             if pending(n) and n.desired_target_version != r.version:
                 n.desired_target_version = r.version
+
+    async def to_nodes() -> None:
+        target_all()
         r.status = "nodes"
 
     async def to_canary() -> None:
@@ -335,14 +342,19 @@ async def advance(
                 return r.status
     if r.status == "canary":
         canary = next((n for n in nodes if n.id == r.canary_node_id), None)
-        if canary is None:
-            await to_canary()  # revoked or gone meanwhile: another one
+        lost = canary is not None and (
+            canary.last_heartbeat_at is None
+            or (now - canary.last_heartbeat_at).total_seconds() > CANARY_LOST_AFTER_S
+        )
+        if canary is None or (lost and pending(canary)):
+            await to_canary()  # revoked, out of agent mode or silent: another one
         elif not pending(canary):
             await to_nodes()
         elif error := _failed(canary, r.version):
             _finish(r, "failed", f"{canary.name}: {error}")
             return r.status
     if r.status == "nodes":
+        target_all()  # nodes that joined (or came back to agent mode) meanwhile
         waiting = [
             n
             for n in nodes
