@@ -367,3 +367,108 @@ def test_a_failed_check_stops_an_update_to_the_latest():
         fake.close()
     assert r.returncode == 1 and "update check: GitHub not reachable" in r.stderr
     assert not [q for q in fake.requests if q[1] == "/api/admin/updates/start"]
+
+
+# --- the menu on a machine where it is installed ------------------------------------
+
+
+def _menu(role: str, keys: str, mode: str = "agent", local_node: str = ""):
+    script = "\n".join(
+        [
+            "set -Eeuo pipefail",
+            'die() { echo "error: $*"; exit 1; }',
+            f"ROLE={role} MODE={mode} LOCAL_NODE='{local_node}' INSTALLED_VERSION=0.1.3",
+            "ACTION=install NONINTERACTIVE=0 PURGE=0 ASSUME_YES=0 ETC=/etc/pos",
+            _function("installed_menu"),
+            "installed_menu",
+            'echo "RESULT action=$ACTION nonint=$NONINTERACTIVE local=$LOCAL_NODE purge=$PURGE"',
+        ]
+    )
+    # the menu reads the terminal (as under `curl ... | sudo bash`)
+    return subprocess.run(
+        ["script", "-qec", f"bash -c {shlex.quote(script)}", "/dev/null"],
+        input=keys,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+needs_script = pytest.mark.skipif(shutil.which("script") is None, reason="needs script(1)")
+
+
+@needs_script
+def test_the_coordinator_menu_offers_update_repair_a_local_node_and_uninstall():
+    r = _menu("coordinator", "\n")
+    out = r.stdout
+    assert "installed here: coordinator, release 0.1.3" in out
+    for option in (
+        "1) Update",
+        "2) Repair",
+        "3) Add a node",
+        "4) Uninstall",
+        "5) Delete",
+        "6) Cancel",
+    ):
+        assert option in out, out
+    assert "RESULT action=update" in out  # Enter: the first, Update
+    assert "RESULT action=install nonint=1 local=1" in _menu("coordinator", "3\n").stdout
+
+
+@needs_script
+def test_a_node_in_agent_mode_is_updated_by_its_coordinator():
+    out = _menu("node", "\n").stdout
+    assert "Update" not in out.split("Choice")[0].split("release 0.1.3.")[1].split("(this node")[0]
+    assert "updated by its coordinator" in out
+    assert "RESULT action=install nonint=1 local= purge=0" in out  # Enter: Repair
+    assert "1) Update" in _menu("node", "4\n", mode="simple").stdout  # simple mode updates itself
+
+
+@needs_script
+def test_deleting_needs_the_word_and_cancel_does_nothing():
+    out = _menu("coordinator", "4\ndelete\n", local_node="1").stdout
+    assert "RESULT action=uninstall nonint=0 local=1 purge=1" in out
+    assert "database, raw store and backups are kept" in out
+    out = _menu("coordinator", "4\nyes\n", local_node="1").stdout
+    assert "not confirmed; nothing deleted" in out and "RESULT" not in out
+    out = _menu("coordinator", "5\n", local_node="1").stdout
+    assert "RESULT" not in out and "error" not in out
+    assert "unknown choice 9" in _menu("node", "9\n").stdout
+
+
+def test_a_repair_keeps_the_database_networks(tmp_path):
+    """Repair asks nothing: the networks allowed to the database come from
+    install.conf, or for older installations from the installer's pg_hba block."""
+    hba = tmp_path / "pg_hba.conf"
+    hba.write_text(
+        "local all postgres peer\n"
+        "host all all 127.0.0.1/32 scram-sha-256\n"
+        "# pos-install-begin\n"
+        "host pos pos 10.1.0.0/16 scram-sha-256\n"
+        "host pos pos 192.168.100.0/24 scram-sha-256\n"
+        "# pos-install-end\n"
+    )
+    etc = tmp_path / "etc"
+    script = "\n".join(
+        [
+            "set -Eeuo pipefail",
+            _function("hba_networks"),
+            _function("save_conf"),
+            _function("load_conf"),
+            f"ETC={shlex.quote(str(etc))} CONF={shlex.quote(str(etc / 'install.conf'))}",
+            "ROLE=database MODE= VERSION=0.1.3 RAW_STORE= BACKUP_DIR=/b HTTP_PORT= LISTEN=",
+            "TRUSTED_PROXY= LOCAL_NODE= INSTALLED_VERSION=",
+            f"PG_ALLOW=$(hba_networks {shlex.quote(str(hba))})",
+            'echo "from-hba=$PG_ALLOW"',
+            "save_conf",
+            "PG_ALLOW= ROLE=",
+            "load_conf",
+            'echo "from-conf=$PG_ALLOW role=$ROLE"',
+            f'echo "missing=$(hba_networks {shlex.quote(str(tmp_path / "nope"))})"',
+        ]
+    )
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "from-hba=10.1.0.0/16,192.168.100.0/24" in r.stdout
+    assert "from-conf=10.1.0.0/16,192.168.100.0/24 role=database" in r.stdout
+    assert "missing=\n" in r.stdout
