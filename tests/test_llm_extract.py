@@ -2,7 +2,7 @@
 sizes; its answer fills only those gaps and survives a rebuild without a new call."""
 
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -453,10 +453,14 @@ async def test_a_requeued_answer_that_works_is_applied(app):
     async with sm() as s:  # as an earlier release left it
         row = (await s.execute(select(LlmExtraction))).scalar_one()
         row.status, row.output = "invalid", {"detail": "no answer"}
+        row.answered_at = row.applied_at = datetime.now(UTC)  # a failure counts as applied
         await s.commit()
     fake = FakeClient()
     llm = LlmService(sm, lambda: fake)
     assert await llm_tier.schedule(sm, llm, store) == {"llm_extractions_queued": 1}
+    async with sm() as s:
+        row = (await s.execute(select(LlmExtraction))).scalar_one()
+        assert row.status == "wanted" and row.applied_at is None and row.answered_at is None
     (bid,) = fake.batches
     fake.batches[bid]["status"] = "ended"
     fake.batches[bid]["results"] = [_answer("0", json.dumps(ANSWER))]

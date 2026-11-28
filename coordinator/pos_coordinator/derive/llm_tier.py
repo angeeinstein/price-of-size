@@ -161,6 +161,9 @@ async def requeue_cut_off(session: AsyncSession) -> int:
             ),
             model=None,
             answered_at=None,
+            # a failed answer counted as applied; the new one must reach the
+            # derived layer (apply_pending picks it up if it cannot at once)
+            applied_at=None,
             tried_at=None,
         )
     )
