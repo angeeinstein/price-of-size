@@ -226,6 +226,50 @@ async def test_batches_are_submitted_within_budget_and_collected(sessionmaker):
     assert [r.cost_usd for r in batch_rows] == [Decimal("0.000063")]  # half price
 
 
+async def test_a_batch_answer_cut_off_while_thinking_says_why(sessionmaker):
+    """Haiku 5.5 and Sonnet 5.5 think by default, and thinking counts towards
+    max_tokens: a tight limit ends the answer inside the thinking, with no text."""
+    got = []
+
+    @service.register("test_cut_off", Pick)
+    async def handler(session, outcome):
+        got.append((outcome.status, outcome.detail))
+
+    fake = FakeClient([])
+    llm = LlmService(sessionmaker, lambda: fake)
+    task = Task(stage="test_cut_off", system="S", prompt="p", schema=Pick, meta={},
+                priority=Priority.high, max_tokens=64)  # fmt: skip
+    await llm.submit_batch([task])
+    (bid,) = fake.batches
+    thinking_only = _msg("", stop="max_tokens")
+    thinking_only.content = thinking_only.content[:1]
+    fake.batches[bid]["status"] = "ended"
+    fake.batches[bid]["results"] = [
+        SimpleNamespace(
+            custom_id="0", result=SimpleNamespace(type="succeeded", message=thinking_only)
+        )
+    ]
+    assert await llm.poll_batches() == 1
+    assert got == [("invalid", "no complete answer (stop_reason max_tokens)")]
+    async with sessionmaker() as s:
+        row = (await s.execute(select(LlmCall).where(LlmCall.stage == "test_cut_off"))).scalar_one()
+    assert row.output["status"] == "invalid" and "max_tokens" in row.output["detail"]
+
+
+def test_every_stage_leaves_room_for_thinking():
+    """Each LLM stage's answer limit leaves room for the thinking before the answer."""
+    import inspect
+    import re
+
+    from pos_coordinator.classify import by_llm, proposals
+    from pos_coordinator.derive import llm_tier, site_parsers
+    from pos_coordinator.validity import review
+
+    for module in (by_llm, proposals, llm_tier, site_parsers, review):
+        limits = [int(m) for m in re.findall(r"max_tokens=(\d+)", inspect.getsource(module))]
+        assert limits and min(limits) >= 1024, module.__name__
+
+
 async def test_running_batches_count_against_the_budget(sessionmaker):
     @service.register("test_budget", Pick)
     async def handler(session, outcome):

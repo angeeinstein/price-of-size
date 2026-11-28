@@ -374,7 +374,7 @@ async def _schedule(
                 model_role="parser_generation",
                 priority=Priority.normal,
                 source=domain,
-                max_tokens=4000,
+                max_tokens=8000,  # room for thinking before the spec
                 effort="medium",
                 meta={
                     "domain": domain,

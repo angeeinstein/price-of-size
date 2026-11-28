@@ -613,8 +613,11 @@ class LlmService:
                                output={"status": "refused"}, batch=True)  # fmt: skip
             return Outcome("refused", None, served, stage, cost_usd=cost, meta=meta)
         try:
-            if schema is None or text is None:
-                raise ValueError("no answer")
+            stop = getattr(msg, "stop_reason", None)
+            if schema is None:
+                raise ValueError(f"no handler schema for stage {stage}")
+            if stop == "max_tokens" or text is None:
+                raise ValueError(f"no complete answer (stop_reason {stop})")
             data = schema.model_validate_json(text)
         except (ValidationError, ValueError) as e:
             await self._record(s, model=served, task=task, usage=usage, cost=cost, h=req["hash"],

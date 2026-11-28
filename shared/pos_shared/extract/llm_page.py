@@ -19,7 +19,7 @@ from pos_shared.extract import spectext
 from pos_shared.extract.model import Extraction, MeasurementCandidate, OfferCandidate
 from pos_shared.extract.price_rules import visible_text
 
-PROMPT_VERSION = "llm-extract-1"
+PROMPT_VERSION = "llm-extract-2"  # 2: room for thinking (1 could cut answers off)
 MAX_CHARS = 7_000
 PART_CHARS = {"title": 300, "description": 500, "breadcrumbs": 300, "prices": 1_200}
 CONFIDENCE = 0.6

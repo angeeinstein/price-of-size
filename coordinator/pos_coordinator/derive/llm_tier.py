@@ -244,7 +244,7 @@ async def _schedule(
                 schema=PageAnswer,
                 priority=Priority.low,
                 source=source,
-                max_tokens=800,
+                max_tokens=2048,  # room for thinking before the answer
                 meta={"fetch_id": str(fetch_id)},
             )
         )
